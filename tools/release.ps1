@@ -46,6 +46,37 @@ if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
 Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
 
 # 4) Compilar app (PyInstaller)
+# --- Limpieza robusta antes de PyInstaller ---
+$distRoot = Join-Path $ProjectRoot "dist"
+$distDir  = Join-Path $distRoot "SistemaCotizaciones"
+
+# Cierra el EXE si está vivo
+Get-Process SistemaCotizaciones -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# Intenta quitar atributos y borrar con reintentos
+function Remove-Dir-Robust([string]$path) {
+  if (!(Test-Path $path)) { return }
+  try {
+    attrib -r -s -h "$path" /s /d 2>$null
+  } catch {}
+  for ($i=0; $i -lt 5; $i++) {
+    try {
+      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+      return
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  # último recurso: renombrar y borrar en background
+  try {
+    $tmp = "$path._old_" + (Get-Random)
+    Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
+    Start-Job { param($p) Start-Sleep 2; Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } -ArgumentList $tmp | Out-Null
+  } catch {}
+}
+
+Remove-Dir-Robust $distDir
+
 Push-Location $ProjectRoot
 pyinstaller -y $SpecPath
 Pop-Location
@@ -83,6 +114,14 @@ if (!(Test-Path $attrPath) -or -not ((Get-Content $attrPath) -match '^output/\*\
   git -C $ProjectRoot add .gitattributes
 }
 
-git -C $ProjectRoot add "src/version.py" $IssPath "output/$setupName" "config/cotizador.json"
-git -C $ProjectRoot commit -m "Release $next: bump version, build installer and manifest"
-Write-Host "Listo. Revisa y haz: git -C `"$ProjectRoot`" push origin main"
+$files = @(
+  "src/version.py",
+  $IssPath,
+  ("output\" + $setupName),
+  "config\cotizador.json"
+)
+
+git -C $ProjectRoot add -- $files
+git -C $ProjectRoot commit -m ("Release {0}: bump version, build installer and manifest" -f $next)
+Write-Host ("Listo. Revisa y haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
+

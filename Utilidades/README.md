@@ -17,7 +17,16 @@ pytest -q tests/test_presentations.py
 
 
 # ejecutable
-pyinstaller -y Utilidades/sistema_cotizaciones.spec
+
+
+powershell -ExecutionPolicy Bypass -File tools\release.ps1 `
+  -Bump patch `
+  -RepoUser "zaphatito" `
+  -RepoName "Cotizador" `
+  -IssPath "Output\script inno.iss"
+
+
+
 
 # Desactivar entorno virtual
 deactivate
@@ -44,3 +53,12 @@ Cotizador/
    ├─ models.py             # ItemsModel (QAbstractTableModel)
    ├─ app_window.py         # QMainWindow SistemaCotizaciones (controla todo el flujo)
    └─ app.py                # run_app(): arranca QApplication, carga datos, muestra la ventana
+
+
+
+
+powershell -ExecutionPolicy Bypass -File tools\release.ps1 `
+  -Bump patch `
+  -RepoUser "zaphatito" `
+  -RepoName "Cotizador" `
+  -IssPath "Output\script inno.iss"
