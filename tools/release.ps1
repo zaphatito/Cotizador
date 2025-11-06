@@ -75,20 +75,28 @@ if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
 }
 Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
 
-# 4) Compilar app con el Python del venv (LIMPIO)
+# 4) Compilar app (PyInstaller) usando SIEMPRE el venv
+# Requiere que el venv esté activo o que exista .venv en la raíz
+
+# 4.1 Determinar intérprete Python del venv
+$py = $null
+if ($env:VIRTUAL_ENV -and (Test-Path (Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"))) {
+  $py = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+} elseif (Test-Path (Join-Path $ProjectRoot ".venv\Scripts\python.exe")) {
+  $py = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+} else {
+  throw "No encuentro el Python del venv. Activa el venv o crea .venv en la raíz."
+}
+
+# 4.2 Limpieza robusta
 $distRoot = Join-Path $ProjectRoot "dist"
 $distDir  = Join-Path $distRoot "SistemaCotizaciones"
-
 Get-Process SistemaCotizaciones -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
 function Remove-Dir-Robust([string]$path) {
   if (!(Test-Path $path)) { return }
   try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
   for ($i=0; $i -lt 5; $i++) {
-    try {
-      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-      return
-    } catch { Start-Sleep -Milliseconds 500 }
+    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 500 }
   }
   try {
     $tmp = "$path._old_" + (Get-Random)
@@ -96,12 +104,13 @@ function Remove-Dir-Robust([string]$path) {
     Start-Job { param($p) Start-Sleep 2; Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } -ArgumentList $tmp | Out-Null
   } catch {}
 }
-
 Remove-Dir-Robust $distDir
 
+# 4.3 Ejecutar PyInstaller DESDE el venv
 Push-Location $ProjectRoot
 & $py -m PyInstaller -y $SpecPath
 Pop-Location
+
 
 # 5) Compilar instalador (ISCC)
 & "$ISCC" "$issFull" | Write-Host
