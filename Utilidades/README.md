@@ -17,7 +17,7 @@ pytest -q tests/test_presentations.py
 
 
 # ejecutable
-pyinstaller -y sistema_cotizaciones.spec
+pyinstaller -y Utilidades/sistema_cotizaciones.spec
 
 # Desactivar entorno virtual
 deactivate

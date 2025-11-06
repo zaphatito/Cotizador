@@ -78,7 +78,7 @@ def resolve_template_path(country_code: str | None) -> str | None:
 
 def load_app_icon(country_code: str | None) -> QIcon:
     if country_code:
-        cand = os.path.join(TEMPLATES_DIR, country_code, "logo_sistema.ico")
+        cand = os.path.join(TEMPLATES_DIR,  "logo_sistema.ico")
         if os.path.exists(cand): return QIcon(cand)
     p2 = resource_path("logo_sistema.ico")
     if os.path.exists(p2):

@@ -2,9 +2,15 @@
 ; Instalador para Sistema de Cotizaciones
 ; ---------------------------------------------
 #define MyAppName    "Sistema de Cotizaciones"
-#define MyAppVersion "1.2.0"
 #define MyAppExeName "SistemaCotizaciones.exe"
 
+; === Versionado (lo sobreescribe el script de release) ===
+#define MyAppVersion "1.2.0"
+
+; === URL pública del manifiesto (RAW de GitHub). El script también la puede reemplazar. ===
+#define UpdateManifestUrl "https://raw.githubusercontent.com/tu-usuario/tu-repo/main/config/cotizador.json"
+
+; Rutas locales
 #define ProjectRoot  "C:\Users\Samuel\OneDrive\Escritorio\Cotizador"
 #define BuildDir     "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\dist\SistemaCotizaciones"
 
@@ -15,15 +21,16 @@ AppVersion={#MyAppVersion}
 VersionInfoVersion={#MyAppVersion}
 DefaultDirName={pf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
-; Esto facilita publicar un EXE versionado y enlazarlo desde el manifest.json
+; EXE versionado para subir a /output del repo
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
-OutputDir={#ProjectRoot}\Output
+; Carpeta de salida en minúsculas (para que coincida con el repo)
+OutputDir={#ProjectRoot}\output
 Compression=lzma
 SolidCompression=yes
 DisableDirPage=no
 DisableProgramGroupPage=no
 ArchitecturesInstallIn64BitMode=x64
-; ==== Para upgrades amables ====
+; ==== Upgrades amables ====
 CloseApplications=prompt
 RestartApplications=no
 
@@ -37,7 +44,9 @@ Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
 
 [Files]
+; Binarios generados por PyInstaller
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Requisitos a modo referencia (el EXE ya los incluye)
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
 [Icons]
@@ -195,12 +204,13 @@ begin
       '  "log_level": "' + LogLevelSel + '",' + #13#10 +
       '  "update_mode": "ASK",' + #13#10 +
       '  "update_check_on_startup": true,' + #13#10 +
-      '  "update_manifest_url": "",' + #13#10 +
+      '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
       '  "update_flags": "/CLOSEAPPLICATIONS"' + #13#10 +
       '}';
 
     SaveStringToFile(FJson, ConfJson, False);
 
+    { Ocultar y proteger el JSON }
     SetFileAttributes(FJson, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     Cmd := ExpandConstant('{cmd}');
     Params := '/c icacls "' + FJson + '" /inheritance:r /grant:r "SYSTEM":F "Administrators":F "Users":R';

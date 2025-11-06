@@ -1,51 +1,48 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
-BASE_DIR = os.path.abspath(".")
-SRC_DIR  = os.path.join(BASE_DIR, "src")
 
-pyside6_datas   = collect_data_files("PySide6")
-reportlab_datas = collect_data_files("reportlab")
-openpyxl_datas  = collect_data_files("openpyxl")
+# === Rutas base (sin __file__) ===
+# Ejecuta el comando de PyInstaller desde la RAÍZ del repo (donde está main.py)
+ROOT = Path(os.getcwd())
+MAIN = ROOT / "main.py"
+ICON_PATH = ROOT / "templates" / "logo_sistema.ico"
 
-our_datas = [
-    (os.path.join(BASE_DIR, "templates"), "templates"),
-    (os.path.join(BASE_DIR, "Utilidades", "requirements.txt"), "Utilidades"),
-]
+# --- Util: incluir archivos de una carpeta (recursivo) ---
+def folder_files(src_dir: Path, dest_rel: str):
+    if not src_dir.exists():
+        return []
+    items = []
+    for p in src_dir.rglob("*"):
+        if p.is_file():
+            items.append((str(p), str(dest_rel)))
+    return items
 
-all_datas = pyside6_datas + reportlab_datas + openpyxl_datas + our_datas
+# DATA que quieres llevar al bundle:
+datas = []
+# 1) config/cotizador.json  -> dist/.../config
+cfg = ROOT / "config" / "cotizador.json"
+if cfg.exists():
+    datas.append((str(cfg), "config"))
 
-pyside6_hidden = collect_submodules("PySide6")
-
-hidden = [
-    "pandas",
-    "openpyxl",
-    "reportlab",
-    "src",
-    "src.pricing",
-    "src.presentations",
-    "src.logging_setup",
-    "src.config",
-    "src.version",      # NUEVO
-    "src.updater",      # NUEVO
-    *pyside6_hidden,
-]
+# 2) Copias opcionales de carpetas completas (descomenta si las necesitas)
+# datas += folder_files(ROOT / "assets", "assets")
+# datas += folder_files(ROOT / "templates", "templates")
 
 a = Analysis(
-    ['main.py'],
-    pathex=[BASE_DIR, SRC_DIR],
+    [str(MAIN)],
+    pathex=[str(ROOT)],             # agrega la raíz al sys.path del build
     binaries=[],
-    datas=all_datas,
-    hiddenimports=hidden,
+    datas=datas,
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tests', 'pytest', 'unittest'],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
+    # Silencia el warning de PySide6 deploy_lib
+    excludes=['PySide6.scripts.deploy', 'PySide6.scripts.deploy_lib', 'project_lib'],
     noarchive=False,
 )
 
@@ -56,13 +53,13 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='SistemaCotizaciones',
+    name="SistemaCotizaciones",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,
-    console=False,
-    icon=os.path.join(BASE_DIR, "templates", "logo_sistema.ico"),
+    upx=True,
+    console=False,  # pon True si quieres consola
+    icon=str(ICON_PATH) if ICON_PATH.exists() else None,
 )
 
 coll = COLLECT(
@@ -71,7 +68,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
-    name='SistemaCotizaciones'
+    name="SistemaCotizaciones",
 )
