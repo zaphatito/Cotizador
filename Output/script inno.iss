@@ -1,14 +1,14 @@
-; ---------------------------------------------
+﻿; ---------------------------------------------
 ; Instalador para Sistema de Cotizaciones
 ; ---------------------------------------------
 #define MyAppName    "Sistema de Cotizaciones"
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobreescribe el script de release) ===
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "2.2.4"
 
-; === URL pública del manifiesto (RAW de GitHub). El script también la puede reemplazar. ===
-#define UpdateManifestUrl "https://raw.githubusercontent.com/tu-usuario/tu-repo/main/config/cotizador.json"
+; === URL pÃºblica del manifiesto (RAW de GitHub). El script tambiÃ©n la puede reemplazar. ===
+#define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
 
 ; Rutas locales
 #define ProjectRoot  "C:\Users\Samuel\OneDrive\Escritorio\Cotizador"
@@ -23,7 +23,7 @@ DefaultDirName={pf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 ; EXE versionado para subir a /output del repo
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
-; Carpeta de salida en minúsculas (para que coincida con el repo)
+; Carpeta de salida en minÃºsculas (para que coincida con el repo)
 OutputDir={#ProjectRoot}\output
 Compression=lzma
 SolidCompression=yes
@@ -31,7 +31,8 @@ DisableDirPage=no
 DisableProgramGroupPage=no
 ArchitecturesInstallIn64BitMode=x64
 ; ==== Upgrades amables ====
-CloseApplications=prompt
+CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
 
 [Languages]
@@ -92,8 +93,8 @@ procedure InitializeWizard;
 begin
   PaisPage := CreateCustomPage(
     wpSelectDir,
-    'País por defecto',
-    'Elija el país con el que el sistema operará (afecta moneda y reglas de cantidades).'
+    'PaÃ­s por defecto',
+    'Elija el paÃ­s con el que el sistema operarÃ¡ (afecta moneda y reglas de cantidades).'
   );
 
   cbPais := TNewComboBox.Create(PaisPage.Surface);
@@ -103,14 +104,14 @@ begin
   cbPais.Width := PaisPage.SurfaceWidth;
   cbPais.Style := csDropDownList;
   cbPais.Items.Add('Paraguay');
-  cbPais.Items.Add('Perú');
+  cbPais.Items.Add('PerÃº');
   cbPais.Items.Add('Venezuela');
   cbPais.ItemIndex := 0;
 
   ListadoPage := CreateCustomPage(
     PaisPage.ID,
     'Tipo de listado',
-    'Elija qué tipo de ítems mostrará el listado y el autocompletar dentro del sistema.'
+    'Elija quÃ© tipo de Ã­tems mostrarÃ¡ el listado y el autocompletar dentro del sistema.'
   );
 
   cbListado := TNewComboBox.Create(ListadoPage.Surface);
@@ -141,7 +142,7 @@ begin
   LogPage := CreateCustomPage(
     StockPage.ID,
     'Logging centralizado',
-    'Seleccione el nivel de logging. Los archivos se guardarán en Documentos\Cotizaciones\logs.'
+    'Seleccione el nivel de logging. Los archivos se guardarÃ¡n en Documentos\Cotizaciones\logs.'
   );
 
   cbLogLevel := TNewComboBox.Create(LogPage.Surface);
@@ -217,3 +218,6 @@ begin
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
+
+
+
