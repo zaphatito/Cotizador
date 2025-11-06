@@ -8,9 +8,4 @@ build/
 *.msi
 *.zip
 *.log
-Output/
-dist/
-build/
-*.msi
-*.zip
-*.log
+
