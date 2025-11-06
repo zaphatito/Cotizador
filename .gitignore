@@ -1,2 +1,16 @@
 /.pytest_cache
 /.venv
+/src/__pycache__
+/tests/__pycache__
+/utilidades/__pycache__Output/
+dist/
+build/
+*.msi
+*.zip
+*.log
+Output/
+dist/
+build/
+*.msi
+*.zip
+*.log
