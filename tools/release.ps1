@@ -5,9 +5,13 @@ param(
   [string]$RepoName = "Cotizador",
   [string]$ProjectRoot = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador",
   [string]$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-  [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",   # ajusta si tu .spec tiene otro nombre
-  [string]$IssPath  = "Output\script inno.iss"     # ajusta a la ruta real de tu .iss
+  [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
+  [string]$IssPath  = "Output\script inno.iss",
+  # <-- NUEVO: ruta del venv. Si no la pasas, intenta .venv o venv dentro del proyecto.
+  [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv"
 )
+
+$ErrorActionPreference = "Stop"
 
 function Get-VersionTuple($v) {
   $parts = $v -split '\.'; while($parts.Count -lt 3){ $parts += '0' }
@@ -23,7 +27,33 @@ function Bump-Version($v, $kind) {
   return "$M.$m.$p"
 }
 
-# 1) Leer versión actual de src/version.py
+# --- Detectar venv ---
+if (-not $VenvPath -or -not (Test-Path $VenvPath)) {
+  $cand1 = Join-Path $ProjectRoot ".venv"
+  $cand2 = Join-Path $ProjectRoot "venv"
+  if (Test-Path $cand1) { $VenvPath = $cand1 }
+  elseif (Test-Path $cand2) { $VenvPath = $cand2 }
+}
+$py = $null
+if ($VenvPath -and (Test-Path (Join-Path $VenvPath "Scripts\python.exe"))) {
+  $py = Join-Path $VenvPath "Scripts\python.exe"
+} else {
+  throw "No se encontró el venv. Pasa -VenvPath 'C:\ruta\al\venv' o crea .venv/venv en el proyecto."
+}
+
+Write-Host "Usando Python del venv: $py"
+
+# 0) Asegurar deps en venv
+& $py -m pip install --upgrade pip
+# OJO: tu archivo se llama 'requirements.txt' (sin s)
+$reqFile = Join-Path $ProjectRoot "Utilidades\requirements.txt"
+if (Test-Path $reqFile) {
+  & $py -m pip install -r $reqFile
+} else {
+  Write-Warning "No se halló Utilidades\requirements.txt; se asume venv ya tiene dependencias."
+}
+
+# 1) Leer y bump version
 $verFile = Join-Path $ProjectRoot "src\version.py"
 $verTxt  = Get-Content -Raw $verFile
 if ($verTxt -notmatch '__version__\s*=\s*"([^"]+)"') { throw "No se encontró __version__ en src\version.py" }
@@ -31,11 +61,11 @@ $cur = $Matches[1]
 $next = Bump-Version $cur $Bump
 Write-Host "Versión actual: $cur  ->  Nueva versión: $next"
 
-# 2) Escribir nueva versión en src/version.py
+# 2) Escribir nueva versión
 $verTxt = $verTxt -replace '__version__\s*=\s*"[^"]+"', "__version__ = `"$next`""
 Set-Content -Path $verFile -Value $verTxt -Encoding UTF8
 
-# 3) Actualizar MyAppVersion y UpdateManifestUrl en el .iss
+# 3) Actualizar .iss (MyAppVersion y UpdateManifestUrl)
 $issFull = Join-Path $ProjectRoot $IssPath
 $issTxt  = Get-Content -Raw $issFull
 $issTxt  = $issTxt -replace '#define\s+MyAppVersion\s+"[^"]+"', "#define MyAppVersion `"$next`""
@@ -45,29 +75,21 @@ if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
 }
 Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
 
-# 4) Compilar app (PyInstaller)
-# --- Limpieza robusta antes de PyInstaller ---
+# 4) Compilar app con el Python del venv (LIMPIO)
 $distRoot = Join-Path $ProjectRoot "dist"
 $distDir  = Join-Path $distRoot "SistemaCotizaciones"
 
-# Cierra el EXE si está vivo
 Get-Process SistemaCotizaciones -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-# Intenta quitar atributos y borrar con reintentos
 function Remove-Dir-Robust([string]$path) {
   if (!(Test-Path $path)) { return }
-  try {
-    attrib -r -s -h "$path" /s /d 2>$null
-  } catch {}
+  try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
   for ($i=0; $i -lt 5; $i++) {
     try {
       Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
       return
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
+    } catch { Start-Sleep -Milliseconds 500 }
   }
-  # último recurso: renombrar y borrar en background
   try {
     $tmp = "$path._old_" + (Get-Random)
     Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
@@ -78,13 +100,13 @@ function Remove-Dir-Robust([string]$path) {
 Remove-Dir-Robust $distDir
 
 Push-Location $ProjectRoot
-pyinstaller -y $SpecPath
+& $py -m PyInstaller -y $SpecPath
 Pop-Location
 
 # 5) Compilar instalador (ISCC)
 & "$ISCC" "$issFull" | Write-Host
 
-# 6) Calcular SHA256 del instalador generado y actualizar config/cotizador.json
+# 6) SHA256 + actualizar manifest
 $setupName = "Setup_SistemaCotizaciones_{0}.exe" -f $next
 $setupLocal = Join-Path $ProjectRoot "output\$setupName"
 if (!(Test-Path $setupLocal)) { throw "No se encontró $setupLocal" }
@@ -124,4 +146,3 @@ $files = @(
 git -C $ProjectRoot add -- $files
 git -C $ProjectRoot commit -m ("Release {0}: bump version, build installer and manifest" -f $next)
 Write-Host ("Listo. Revisa y haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
-

@@ -1,17 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from pathlib import Path
 import os
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# === Rutas base (sin __file__) ===
-# Ejecuta el comando de PyInstaller desde la RAÍZ del repo (donde está main.py)
 ROOT = Path(os.getcwd())
 MAIN = ROOT / "main.py"
 ICON_PATH = ROOT / "templates" / "logo_sistema.ico"
 
-# --- Util: incluir archivos de una carpeta (recursivo) ---
 def folder_files(src_dir: Path, dest_rel: str):
     if not src_dir.exists():
         return []
@@ -21,27 +19,34 @@ def folder_files(src_dir: Path, dest_rel: str):
             items.append((str(p), str(dest_rel)))
     return items
 
-# DATA que quieres llevar al bundle:
+# === Datos propios que quieres dentro del bundle ===
 datas = []
-# 1) config/cotizador.json  -> dist/.../config
 cfg = ROOT / "config" / "cotizador.json"
 if cfg.exists():
     datas.append((str(cfg), "config"))
 
-# 2) Copias opcionales de carpetas completas (descomenta si las necesitas)
-# datas += folder_files(ROOT / "assets", "assets")
+# (opcional) mete templates al bundle
 # datas += folder_files(ROOT / "templates", "templates")
+
+# === PySide6 & shiboken6: datos y submódulos (CLAVE) ===
+datas += collect_data_files("PySide6")
+datas += collect_data_files("shiboken6")
+# Si usas reportlab/openpyxl con assets internos:
+# datas += collect_data_files("reportlab")
+# datas += collect_data_files("openpyxl")
+
+hiddenimports = []
+hiddenimports += collect_submodules("PySide6")  # <- imprescindible
 
 a = Analysis(
     [str(MAIN)],
-    pathex=[str(ROOT)],             # agrega la raíz al sys.path del build
+    pathex=[str(ROOT)],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # Silencia el warning de PySide6 deploy_lib
     excludes=['PySide6.scripts.deploy', 'PySide6.scripts.deploy_lib', 'project_lib'],
     noarchive=False,
 )
@@ -57,8 +62,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    console=False,  # pon True si quieres consola
+    upx=True,         # pon False si no tienes UPX instalado
+    console=False,    # pon True si quieres ver consola para depurar
     icon=str(ICON_PATH) if ICON_PATH.exists() else None,
 )
 
