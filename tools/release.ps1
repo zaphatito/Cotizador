@@ -122,7 +122,7 @@ if (!(Test-Path $setupLocal)) { throw "No se encontró $setupLocal" }
 $sha = (Get-FileHash $setupLocal -Algorithm SHA256).Hash
 
 $manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
-$rawExeUrl = "https://raw.githubusercontent.com/$RepoUser/$RepoName/main/output/$setupName"
+$rawExeUrl = "https://raw.githubusercontent.com/$RepoUser/$RepoName/main/Output/$setupName"
 
 $manifestObj = [ordered]@{
   version   = $next
@@ -140,15 +140,15 @@ Write-Host "  sha256  = $sha"
 
 # 7) Git (LFS + commit)
 $attrPath = Join-Path $ProjectRoot ".gitattributes"
-if (!(Test-Path $attrPath) -or -not ((Get-Content $attrPath) -match '^output/\*\.exe')) {
-  'output/*.exe filter=lfs diff=lfs merge=lfs -text' | Add-Content $attrPath
+if (!(Test-Path $attrPath) -or -not ((Get-Content $attrPath) -match '^Output/\*\.exe')) {
+  'Output/*.exe filter=lfs diff=lfs merge=lfs -text' | Add-Content $attrPath
   git -C $ProjectRoot add .gitattributes
 }
 
 $files = @(
   "src/version.py",
   $IssPath,
-  ("output\" + $setupName),
+  ("Output\" + $setupName),
   "config\cotizador.json"
 )
 
