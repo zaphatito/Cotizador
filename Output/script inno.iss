@@ -5,7 +5,7 @@
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobreescribe el script de release) ===
-#define MyAppVersion "2.2.5"
+#define MyAppVersion "2.2.1"
 
 ; === URL pÃºblica del manifiesto (RAW de GitHub). El script tambiÃ©n la puede reemplazar. ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -218,6 +218,7 @@ begin
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
+
 
 
 

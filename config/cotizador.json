@@ -1,7 +1,7 @@
 ﻿{
-    "version":  "2.2.5",
-    "url":  "https://raw.githubusercontent.com/zaphatito/Cotizador/main/output/Setup_SistemaCotizaciones_2.2.5.exe",
-    "sha256":  "94361FC9DBDF782FFCA92D06345DE328F0237C78C8B2D6B8ABBF7A995E3711E5",
+    "version":  "2.2.1",
+    "url":  "https://raw.githubusercontent.com/zaphatito/Cotizador/main/output/Setup_SistemaCotizaciones_2.2.1.exe",
+    "sha256":  "90A0DE0E362CF0EF6A053C9D5FFFFC58909B6F1032C84A7DED14FCACEA9E42D2",
     "mandatory":  true,
-    "notes":  "Release 2.2.5"
+    "notes":  "Release 2.2.1"
 }
