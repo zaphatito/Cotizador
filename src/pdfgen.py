@@ -3,8 +3,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 
-from .config import APP_COUNTRY, id_label_for_country
-from .paths import COTIZACIONES_DIR, resolve_template_path
+from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE
+from .paths import COTIZACIONES_DIR, resolve_template_path, resolve_country_asset
 from .utils import fmt_money_pdf, nz
 from .pricing import cantidad_para_mostrar
 
@@ -26,7 +26,12 @@ def generar_pdf(datos: dict) -> str:
     c.setTitle(f"Cotización - {cliente_raw}")
     W, H = A4
 
-    TEMPLATE_PATH = resolve_template_path("template")  # busca template.* por país, luego global
+    TEMPLATE_PATH = (
+        resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.jpg", COUNTRY_CODE)
+        or resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.png", COUNTRY_CODE)
+        or resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.jpeg", COUNTRY_CODE)
+        or resolve_template_path(COUNTRY_CODE)  # fallbacks (TEMPLATE.*, etc.)
+    )
 
     def x_img(px): return px / 960.0 * W
     def y_img(py): return (1 - py / 1280.0) * H

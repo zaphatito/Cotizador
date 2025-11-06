@@ -1,11 +1,14 @@
 # src/paths.py
-import os, sys, shutil
+import os, sys, shutil, re
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QStandardPaths
 
 BASE_APP_TITLE = "Cotizador"
 
 def resource_path(relative_path: str) -> str:
+    """
+    Devuelve una ruta válida tanto en modo desarrollo como 'frozen' (PyInstaller).
+    """
     if getattr(sys, "frozen", False):
         base_dir = os.path.dirname(sys.executable)
 
@@ -23,40 +26,75 @@ def resource_path(relative_path: str) -> str:
             if os.path.exists(cand_meipass):
                 return cand_meipass
 
+        # último intento (aunque no exista todavía)
         return cand_root
     else:
         return os.path.join(os.path.abspath("."), relative_path)
 
+
 def user_docs_root() -> str:
     try:
-        base = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.join(os.path.expanduser("~"), "Documents")
+        base = (
+            QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+            or os.path.join(os.path.expanduser("~"), "Documents")
+        )
     except Exception:
         base = os.path.join(os.path.expanduser("~"), "Documents")
     root = os.path.join(base, "Cotizaciones")
     os.makedirs(root, exist_ok=True)
     return root
 
+
 def user_docs_dir(subfolder: str) -> str:
     d = os.path.join(user_docs_root(), subfolder)
     os.makedirs(d, exist_ok=True)
     return d
 
+
 # Rutas principales
-APP_DATA_DIR   = os.path.abspath(resource_path("data"))         # solo lectura / fallback
-DATA_DIR       = user_docs_dir("data")                          # escribible
-COTIZACIONES_DIR = user_docs_dir("cotizaciones")                # escribible
-TEMPLATES_DIR  = resource_path("templates")                     # solo lectura
-CONFIG_DIR     = resource_path("config")                        # solo lectura (installer)
+APP_DATA_DIR      = os.path.abspath(resource_path("data"))   # solo lectura / fallback
+DATA_DIR          = user_docs_dir("data")                    # escribible
+COTIZACIONES_DIR  = user_docs_dir("cotizaciones")            # escribible
+TEMPLATES_DIR     = resource_path("templates")               # solo lectura
+CONFIG_DIR        = resource_path("config")                  # solo lectura (installer)
+
+
+# -------- helpers internos --------
+_CC_RE = re.compile(r'(?i)\btemplate[_-]?([a-z]{2})(?:[_-]\d+)?\.(jpg|jpeg|png)$')
+
+def _infer_cc_from_filename(filename: str) -> str | None:
+    """
+    Si el filename es del estilo TEMPLATE_PE.jpg / TEMPLATE_py_2.png, devuelve 'PE'/'PY'.
+    """
+    base = os.path.basename(filename)
+    m = _CC_RE.search(base)
+    if m:
+        return m.group(1).upper()
+    return None
+
 
 def resolve_country_asset(filename: str, country_code: str | None = None) -> str | None:
     """
-    Devuelve primero templates/<PAIS>/<filename> y si no existe,
-    hace fallback a templates/<filename>.
+    Busca un asset priorizando carpeta por país.
+    Soporta dos formas:
+      - Pasando country_code y filename (p.ej. 'TEMPLATE_PE.jpg'): templates/PE/TEMPLATE_PE.jpg
+      - Sin country_code pero con sufijo en filename (TEMPLATE_PE.jpg): infiere 'PE' y busca igual.
+
+    Fallback: templates/<filename> en la raíz de templates.
     """
-    tries = []
-    if country_code:
-        tries.append(os.path.join(TEMPLATES_DIR, country_code, filename))
-    tries.append(os.path.join(TEMPLATES_DIR, filename))
+    base_name = os.path.basename(filename)
+    tries: list[str] = []
+
+    cc = (country_code or "").strip().upper()
+    if not cc:
+        cc = _infer_cc_from_filename(base_name) or ""
+
+    if cc:
+        tries.append(os.path.join(TEMPLATES_DIR, cc, base_name))
+
+    # raíz de templates/
+    tries.append(os.path.join(TEMPLATES_DIR, base_name))
+
     for p in tries:
         if os.path.exists(p):
             return p
@@ -64,26 +102,71 @@ def resolve_country_asset(filename: str, country_code: str | None = None) -> str
 
 
 def resolve_template_path(country_code: str | None) -> str | None:
-    # Busca template.{jpg/png} en templates/<PAIS>/ luego en templates/
-    tries = []
-    if country_code:
-        for ext in ("jpg", "jpeg", "png"):
-            tries.append(os.path.join(TEMPLATES_DIR, country_code, f"template.{ext}"))
-    for ext in ("jpg", "jpeg", "png"):
+    """
+    Busca la plantilla siguiendo tu convención:
+      templates/<PAIS>/TEMPLATE_<PAIS>.(jpg|jpeg|png)
+    con fallbacks razonables.
+    """
+    cc = (country_code or "").strip().upper()
+    exts = ("jpg", "jpeg", "png")
+    tries: list[str] = []
+
+    if cc:
+        # 1) TEMPLATE_<PAIS>.* dentro del país
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, cc, f"TEMPLATE_{cc}.{ext}"))
+        # 2) Variante _2
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, cc, f"TEMPLATE_{cc}_2.{ext}"))
+        # 3) TEMPLATE.* dentro del país
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, cc, f"TEMPLATE.{ext}"))
+        # 4) En raíz con sufijo de país
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, f"TEMPLATE_{cc}.{ext}"))
+
+    # 5) En la raíz, genérico
+    for ext in exts:
+        tries.append(os.path.join(TEMPLATES_DIR, f"TEMPLATE.{ext}"))
+
+    # 6) Fallbacks minúscula/compat
+    if cc:
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, cc, f"template_{cc}.{ext}"))
+        for ext in exts:
+            tries.append(os.path.join(TEMPLATES_DIR, cc, f"template.{ext}"))
+    for ext in exts:
         tries.append(os.path.join(TEMPLATES_DIR, f"template.{ext}"))
 
     for p in tries:
-        if os.path.exists(p): return p
+        if os.path.exists(p):
+            return p
     return None
 
+
 def load_app_icon(country_code: str | None) -> QIcon:
-    if country_code:
-        cand = os.path.join(TEMPLATES_DIR,  "logo_sistema.ico")
-        if os.path.exists(cand): return QIcon(cand)
-    p2 = resource_path("logo_sistema.ico")
-    if os.path.exists(p2):
-        return QIcon(p2)
+    """
+    Carga el ícono, priorizando por país.
+    """
+    cc = (country_code or "").strip().upper()
+    candidates: list[str] = []
+
+    if cc:
+        candidates.append(os.path.join(TEMPLATES_DIR, cc, "logo_sistema.ico"))
+    candidates.append(os.path.join(TEMPLATES_DIR, "logo_sistema.ico"))
+    candidates.append(resource_path("logo_sistema.ico"))
+
+    # Fallback PNG (QIcon soporta .png)
+    if cc:
+        candidates.append(os.path.join(TEMPLATES_DIR, cc, "logo.png"))
+    candidates.append(os.path.join(TEMPLATES_DIR, "logo.png"))
+
+    for p in candidates:
+        if p and os.path.exists(p):
+            return QIcon(p)
+
     return QIcon()
+
 
 def set_win_app_id():
     if sys.platform.startswith("win"):
@@ -93,10 +176,15 @@ def set_win_app_id():
         except Exception:
             pass
 
+
 def ensure_data_seed_if_empty():
+    """
+    Deja 'data' vacío salvo que empaquetes datos en APP_DATA_DIR.
+    """
     try:
         if not os.path.isdir(DATA_DIR):
             os.makedirs(DATA_DIR, exist_ok=True)
+
         is_empty = (len(os.listdir(DATA_DIR)) == 0)
         if is_empty and os.path.isdir(APP_DATA_DIR) and len(os.listdir(APP_DATA_DIR)) > 0:
             for name in os.listdir(APP_DATA_DIR):

@@ -7,7 +7,7 @@ param(
   [string]$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
-  # <-- NUEVO: ruta del venv. Si no la pasas, intenta .venv o venv dentro del proyecto.
+  # Ruta del venv (si no, detecta .venv/venv)
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv"
 )
 
@@ -27,7 +27,12 @@ function Bump-Version($v, $kind) {
   return "$M.$m.$p"
 }
 
-# --- Detectar venv ---
+function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) {
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+# --- Detectar venv (primera pasada) ---
 if (-not $VenvPath -or -not (Test-Path $VenvPath)) {
   $cand1 = Join-Path $ProjectRoot ".venv"
   $cand2 = Join-Path $ProjectRoot "venv"
@@ -45,7 +50,6 @@ Write-Host "Usando Python del venv: $py"
 
 # 0) Asegurar deps en venv
 & $py -m pip install --upgrade pip
-# OJO: tu archivo se llama 'requirements.txt' (sin s)
 $reqFile = Join-Path $ProjectRoot "Utilidades\requirements.txt"
 if (Test-Path $reqFile) {
   & $py -m pip install -r $reqFile
@@ -76,14 +80,14 @@ if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
 Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
 
 # 4) Compilar app (PyInstaller) usando SIEMPRE el venv
-# Requiere que el venv esté activo o que exista .venv en la raíz
-
-# 4.1 Determinar intérprete Python del venv
+# 4.1 Determinar intérprete Python del venv (segunda pasada, por si está activo)
 $py = $null
 if ($env:VIRTUAL_ENV -and (Test-Path (Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"))) {
   $py = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
 } elseif (Test-Path (Join-Path $ProjectRoot ".venv\Scripts\python.exe")) {
   $py = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+} elseif (Test-Path (Join-Path $VenvPath "Scripts\python.exe")) {
+  $py = Join-Path $VenvPath "Scripts\python.exe"
 } else {
   throw "No encuentro el Python del venv. Activa el venv o crea .venv en la raíz."
 }
@@ -101,44 +105,48 @@ function Remove-Dir-Robust([string]$path) {
   try {
     $tmp = "$path._old_" + (Get-Random)
     Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
-    Start-Job { param($p) Start-Sleep 2; Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } -ArgumentList $tmp | Out-Null
+    Start-Sleep 2
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   } catch {}
 }
 Remove-Dir-Robust $distDir
 
-# 4.3 Ejecutar PyInstaller DESDE el venv
+# 4.3 Ejecutar PyInstaller
 Push-Location $ProjectRoot
 & $py -m PyInstaller -y $SpecPath
 Pop-Location
 
-
 # 5) Compilar instalador (ISCC)
 & "$ISCC" "$issFull" | Write-Host
 
-# 6) SHA256 + actualizar manifest
+# 6) SHA256 + actualizar manifest (URL -> media.githubusercontent.com para LFS)
 $setupName = "Setup_SistemaCotizaciones_{0}.exe" -f $next
 $setupLocal = Join-Path $ProjectRoot "Output\$setupName"
 if (!(Test-Path $setupLocal)) { throw "No se encontró $setupLocal" }
 $sha = (Get-FileHash $setupLocal -Algorithm SHA256).Hash
 
 $manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
-$rawExeUrl = "https://raw.githubusercontent.com/$RepoUser/$RepoName/main/Output/$setupName"
+$exeUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Output/$setupName"
 
 $manifestObj = [ordered]@{
   version   = $next
-  url       = $rawExeUrl
+  url       = $exeUrl
   sha256    = $sha
   mandatory = $true
   notes     = "Release $next"
 }
-($manifestObj | ConvertTo-Json -Depth 3) | Set-Content -Path $manifestPath -Encoding UTF8
+$manifestJson = ($manifestObj | ConvertTo-Json -Depth 5)
+Set-ContentUtf8NoBOM -Path $manifestPath -Text $manifestJson
 
 Write-Host "Actualizado manifest: $manifestPath"
 Write-Host "  version = $next"
-Write-Host "  url     = $rawExeUrl"
+Write-Host "  url     = $exeUrl"
 Write-Host "  sha256  = $sha"
 
 # 7) Git (LFS + commit)
+# Asegura LFS operativo
+try { git lfs env | Out-Null } catch { git lfs install | Out-Null }
+
 $attrPath = Join-Path $ProjectRoot ".gitattributes"
 if (!(Test-Path $attrPath) -or -not ((Get-Content $attrPath) -match '^Output/\*\.exe')) {
   'Output/*.exe filter=lfs diff=lfs merge=lfs -text' | Add-Content $attrPath
@@ -154,4 +162,5 @@ $files = @(
 
 git -C $ProjectRoot add -- $files
 git -C $ProjectRoot commit -m ("Release {0}: bump version, build installer and manifest" -f $next)
+
 Write-Host ("Listo. Revisa y haz: git -C `"{0}`" push origin main" -f $ProjectRoot)

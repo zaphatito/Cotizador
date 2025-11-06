@@ -22,14 +22,13 @@ VersionInfoVersion={#MyAppVersion}
 DefaultDirName={pf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
-; *** minúsculas para coincidir con el repo ***
-OutputDir={#ProjectRoot}\output
+; === Usa 'Output' con O mayúscula para coincidir con el repo ===
+OutputDir={#ProjectRoot}\Output
 Compression=lzma
 SolidCompression=yes
 DisableDirPage=no
 DisableProgramGroupPage=no
 ArchitecturesInstallIn64BitMode=x64
-; ==== Upgrades amables ====
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
@@ -38,17 +37,13 @@ RestartApplications=no
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Dirs]
-; Carpeta de configuración de la app (aquí quedarán: config.json y cotizador.json)
 Name: "{app}\config"
-; Persistentes en Documentos
 Name: "{userdocs}\Cotizaciones\data";         Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
 
 [Files]
-; Binarios generados por PyInstaller (incluye config\cotizador.json desde el spec)
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; (Opcional) Requisitos a modo referencia
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
 [Icons]
@@ -86,16 +81,13 @@ end;
 var
   PaisPage: TWizardPage;
   cbPais: TNewComboBox;
-
   ListadoPage: TWizardPage;
   cbListado: TNewComboBox;
-
   StockPage: TWizardPage;
   chkNoStock: TNewCheckBox;
 
 procedure InitializeWizard;
 begin
-  { === País === }
   PaisPage := CreateCustomPage(
     wpSelectDir,
     'País por defecto',
@@ -112,7 +104,6 @@ begin
   cbPais.Items.Add('Venezuela');
   cbPais.ItemIndex := 0;
 
-  { === Tipo de listado === }
   ListadoPage := CreateCustomPage(
     PaisPage.ID,
     'Tipo de listado',
@@ -129,7 +120,6 @@ begin
   cbListado.Items.Add('Ambos');
   cbListado.ItemIndex := 2;
 
-  { === Permitir sin stock === }
   StockPage := CreateCustomPage(
     ListadoPage.ID,
     'Permitir sin stock',
@@ -142,8 +132,6 @@ begin
   chkNoStock.Top := ScaleY(8);
   chkNoStock.Width := StockPage.SurfaceWidth;
   chkNoStock.Checked := False;
-
-  { No hay página de logging; el nivel por defecto lo maneja el código Python. }
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -175,7 +163,6 @@ begin
     else
       AllowStr := 'false';
 
-    { === Escribir config\config.json (mismo folder que cotizador.json) === }
     ConfigFolder := ExpandConstant('{app}\config');
     ForceDir(ConfigFolder);
 
@@ -194,20 +181,15 @@ begin
     if not SaveStringToFile(FJson, ConfJson, False) then
       MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
-    { === Ocultar carpeta y archivo === }
     SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
 
-    { === (Opcional) si cotizador.json ya existe allí, también ocultarlo === }
     CotizadorPath := ConfigFolder + '\cotizador.json';
     if FileExists(CotizadorPath) then
       SetFileAttributes(CotizadorPath, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
 
-    { === ACL: SYSTEM/Administrators Full, Users Read-Only === }
     Cmd := ExpandConstant('{cmd}');
     Params := '/c icacls "' + FJson + '" /inheritance:r /grant:r "SYSTEM":F "Administrators":F "Users":R';
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
-
-

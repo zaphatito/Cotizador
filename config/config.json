@@ -1,7 +1,9 @@
 {
-  "country": "PARAGUAY",
+  "country": "PERU",
   "listing_type": "AMBOS",
   "allow_no_stock": true,
-  "log_dir": "%USERPROFILE%\\Documents\\Cotizaciones\\logs",
-  "log_level": "INFO"
+  "update_mode": "ASK",
+  "update_check_on_startup": true,
+  "update_manifest_url": "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json",
+  "update_flags": "/CLOSEAPPLICATIONS"
 }
