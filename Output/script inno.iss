@@ -4,10 +4,10 @@
 #define MyAppName    "Sistema de Cotizaciones"
 #define MyAppExeName "SistemaCotizaciones.exe"
 
-; === Versionado (el release.ps1 lo sobrescribe) ===
-#define MyAppVersion "2.2.2"
+; === Versionado (lo sobrescribe release.ps1) ===
+#define MyAppVersion "2.2.3"
 
-; === Manifiesto público para el updater ===
+; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
 
 ; Rutas locales de build
@@ -38,15 +38,15 @@ RestartApplications=no
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Dirs]
-; Carpeta de configuración dentro del programa
+; Carpeta de configuración de la app (aquí quedarán: config.json y cotizador.json)
 Name: "{app}\config"
-; Carpetas en Documentos del usuario (persisten entre desinstalaciones)
+; Persistentes en Documentos
 Name: "{userdocs}\Cotizaciones\data";         Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
 
 [Files]
-; Binarios generados por PyInstaller
+; Binarios generados por PyInstaller (incluye config\cotizador.json desde el spec)
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; (Opcional) Requisitos a modo referencia
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
@@ -143,7 +143,7 @@ begin
   chkNoStock.Width := StockPage.SurfaceWidth;
   chkNoStock.Checked := False;
 
-  { NOTA: No existe página de logging ni log_dir. Se deja por defecto INFO en código. }
+  { No hay página de logging; el nivel por defecto lo maneja el código Python. }
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -152,6 +152,7 @@ var
   FJson, ConfJson, Cmd, Params: string;
   ResultCode: Integer;
   ConfigFolder: string;
+  CotizadorPath: string;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -174,11 +175,11 @@ begin
     else
       AllowStr := 'false';
 
-    { === Asegurar carpeta y escribir JSON === }
+    { === Escribir config\config.json (mismo folder que cotizador.json) === }
     ConfigFolder := ExpandConstant('{app}\config');
     ForceDir(ConfigFolder);
 
-    FJson := ConfigFolder + '\app_config.json';
+    FJson := ConfigFolder + '\config.json';
     ConfJson :=
       '{' + #13#10 +
       '  "country": "' + PaisSel + '",' + #13#10 +
@@ -191,11 +192,16 @@ begin
       '}';
 
     if not SaveStringToFile(FJson, ConfJson, False) then
-      MsgBox('No se pudo crear app_config.json en ' + FJson, mbError, MB_OK);
+      MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
     { === Ocultar carpeta y archivo === }
     SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-    SetFileAttributes(FJson, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
+    SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
+
+    { === (Opcional) si cotizador.json ya existe allí, también ocultarlo === }
+    CotizadorPath := ConfigFolder + '\cotizador.json';
+    if FileExists(CotizadorPath) then
+      SetFileAttributes(CotizadorPath, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
 
     { === ACL: SYSTEM/Administrators Full, Users Read-Only === }
     Cmd := ExpandConstant('{cmd}');
@@ -203,6 +209,4 @@ begin
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
-
-
 
