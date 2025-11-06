@@ -1,0 +1,7 @@
+{
+  "country": "PARAGUAY",
+  "listing_type": "AMBOS",
+  "allow_no_stock": true,
+  "log_dir": "%USERPROFILE%\\Documents\\Cotizaciones\\logs",
+  "log_level": "INFO"
+}
