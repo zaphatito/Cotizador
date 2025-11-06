@@ -117,7 +117,7 @@ Pop-Location
 
 # 6) SHA256 + actualizar manifest
 $setupName = "Setup_SistemaCotizaciones_{0}.exe" -f $next
-$setupLocal = Join-Path $ProjectRoot "output\$setupName"
+$setupLocal = Join-Path $ProjectRoot "Output\$setupName"
 if (!(Test-Path $setupLocal)) { throw "No se encontró $setupLocal" }
 $sha = (Get-FileHash $setupLocal -Algorithm SHA256).Hash
 
