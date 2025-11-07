@@ -1,7 +1,7 @@
 ﻿{
-    "version":  "2.2.4",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_2.2.4.exe",
+    "version":  "1.1.0",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.1.0.exe",
     "sha256":  "E2451538970BB27C837968E2091B8E889FB55072BD709848052A67458B5C7547",
     "mandatory":  false,
-    "notes":  "Release 2.2.4"
+    "notes":  "Release 1.1.0"
 }

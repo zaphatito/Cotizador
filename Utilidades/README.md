@@ -1,5 +1,5 @@
 # Activar entorno virtual
-source .venv/Scripts/activate
+actv
 
 # TODO CON ENTORNO VIRTUAL ACTIVO
 

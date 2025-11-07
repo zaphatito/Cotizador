@@ -1,5 +1,5 @@
 # src/models.py
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush
 
 from .config import APP_COUNTRY, CATS
@@ -14,6 +14,9 @@ CAN_EDIT_UNIT_PRICE = (APP_COUNTRY == "PARAGUAY")
 
 class ItemsModel(QAbstractTableModel):
     HEADERS = ["Código", "Producto", "Cantidad", "Precio Unitario", "Subtotal"]
+
+    # ► Señal: emite el índice de la fila recién agregada
+    item_added = Signal(int)
 
     def __init__(self, items: list[dict]):
         super().__init__()
@@ -30,8 +33,20 @@ class ItemsModel(QAbstractTableModel):
     def flags(self, index):
         if not index.isValid(): return Qt.ItemIsEnabled
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if index.column() == 2: return base | Qt.ItemIsEditable
-        if index.column() == 3 and CAN_EDIT_UNIT_PRICE: return base | Qt.ItemIsEditable
+
+        if index.column() == 2:
+            return base | Qt.ItemIsEditable
+
+        if index.column() == 3:
+            # Editable si: Paraguay (cualquier ítem) o categoría SERVICIO (siempre)
+            try:
+                it = self._items[index.row()]
+                cat = (it.get("categoria") or "").upper()
+            except Exception:
+                cat = ""
+            if CAN_EDIT_UNIT_PRICE or cat == "SERVICIO":
+                return base | Qt.ItemIsEditable
+
         return base
 
     def data(self, index, role=Qt.DisplayRole):
@@ -87,7 +102,7 @@ class ItemsModel(QAbstractTableModel):
                     return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                 try: return str(int(round(float(nz(it.get("cantidad"), 0)))))
                 except Exception: return "1"
-            if col == 3 and CAN_EDIT_UNIT_PRICE:
+            if col == 3 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() == "SERVICIO"):
                 try: return f"{float(nz(it.get('precio'), 0.0)):.4f}"
                 except Exception: return "0.0000"
 
@@ -134,7 +149,7 @@ class ItemsModel(QAbstractTableModel):
             self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return True
 
-        if col == 3 and CAN_EDIT_UNIT_PRICE:
+        if col == 3 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() == "SERVICIO"):
             txt = str(value).strip().replace(",", "").replace(" ", "")
             txt = re.sub(r"[^\d\.\-]", "", txt)
             try:
@@ -162,6 +177,8 @@ class ItemsModel(QAbstractTableModel):
         self._items.append(item)
         self.endInsertRows()
         log.debug("Item agregado: %s", item.get("codigo"))
+        # ► Notificar a la vista para scroll/foco en el último
+        self.item_added.emit(len(self._items) - 1)
 
     def remove_rows(self, rows: list[int]):
         for r in sorted(set(rows), reverse=True):

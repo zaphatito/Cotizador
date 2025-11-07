@@ -6,322 +6,462 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE
-from .paths import COTIZACIONES_DIR, resolve_template_path, resolve_country_asset
-from .utils import fmt_money_pdf, nz
+from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, TEMPLATES_DIR, resolve_font_asset
+from .utils  import fmt_money_pdf, nz
 from .pricing import cantidad_para_mostrar
 
-# -------------------------------
-# Helpers
-# -------------------------------
+# =====================================================
+# LAYOUTS AJUSTABLES (sistema 960×1280; +X=DER, +Y=ABAJO)
+# =====================================================
 
-def _split_base_and_extra_from_name(name: str) -> tuple[str, str]:
-    """Devuelve (base_name, extra_from_name) separando por '|' si existe."""
-    if not name:
-        return "", ""
-    if "|" in name:
-        left, right = name.split("|", 1)
-        return left.strip(), right.strip()
-    return str(name).strip(), ""
+# --- Venezuela ---
+LAYOUT_VE = {
+    # Encabezado
+    "DATE_PX": 735, "DATE_PY": 205,             # "Fecha: ..." (blanco)
+    "QUOTE_SHOW": False,
+    "QUOTE_PX": 735, "QUOTE_PY": 185,           # sin uso si QUOTE_SHOW=False
+    "CLIENT_RIGHT_PX": 900,
+    "CLIENT_Ys": (310, 332, 354),
 
-def _register_lufga() -> tuple[str, str]:
+    # Tabla
+    "HEADER_Y_PX": 430,                         # línea de títulos de la tabla
+    "HEADER_TO_FIRST_ROW_GAP": 24,              # distancia a la primera fila
+    "COLS_PX": {"codigo": 80, "producto": 200, "cantidad": 505, "precio": 630, "subtotal": 745},
+    # Ajuste fino SOLO para los rótulos del header respecto a su ancla de columna
+    "COLS_HEADER_ANCHOR_ADD": {"codigo": 0, "producto": 0, "cantidad": 30, "precio": 50, "subtotal": 40},
+    "TABLE_SHIFT_X": 10, "TABLE_SHIFT_Y": 0,
+    "ROW_LINE_H": 13,
+    "BOTTOM_LIMIT_PY": 880,
+
+    # Evitar solape de CÓDIGO con PRODUCTO
+    "CODE_TO_PRODUCT_GAP_PX": 8,                # espacio mínimo entre el último char de código y la col. producto
+
+    # Totales (tres líneas, cada una con su X/Y y tamaño independiente)
+    "TOTALS_LABEL_TEXTS": ("TOTAL BRUTO:", "DESCUENTO:", "TOTAL FINAL:"),
+    "TOTALS_LABEL_X_PXs": (700, 700, 700),
+    "TOTALS_VALUE_X_PXs": (880, 880, 880),
+    "TOTALS_Ys_PX": (950, 935, 920),
+    "TOTALS_FONT_SIZES": (10, 10, 10),
+    "TOTALS_COLOR_LABEL": colors.HexColor("#4f3b40"),
+    "SHOW_LABELS": {"BRUTO": True, "DESC": True, "FINAL": True},
+
+    # Observaciones (bloque inferior izq.)
+    "OBS_X_PX": 160,
+    "OBS_START_Y_PX": None,     # None => usa TOTALS_Ys_PX[0]
+    "OBS_LINE_H": 12,
+    "OBS_MAX_Y_LIMIT_PX": 1170,
+
+    # Cuadro crema en páginas intermedias
+    "TOTALS_BG": {
+        "color_rgb_255": (252, 251, 249),
+        "x_px": 470, "bottom_py": 865, "top_py": 1000,
+        "width_px": None,       # None => hasta el borde derecho
+    },
+}
+
+# --- Perú / Paraguay ---
+# CLIENT_RIGHT_PX es el ancla del caracter ":" (separador entre etiqueta y valor).
+# La etiqueta se alinea a la DERECHA en (CLIENT_RIGHT_PX - CLIENT_LABEL_GAP_PX).
+# El valor se alinea a la IZQUIERDA en (CLIENT_RIGHT_PX + CLIENT_VALUE_GAP_PX).
+LAYOUT_ALT = {
+    # Encabezado
+    "QUOTE_SHOW": True,
+    "QUOTE_PX": 685, "QUOTE_PY": 182,
+    "DATE_PX": 700, "DATE_PY": 243,             # negro (sólo fecha)
+    "CLIENT_RIGHT_PX": 295,                      # ancla del ":" (no mover si quieres la misma separación)
+    "CLIENT_LABEL_GAP_PX": 6,                    # espacio entre fin de la etiqueta y ":"
+    "CLIENT_VALUE_GAP_PX": 6,                    # espacio entre ":" y el inicio del valor
+    "CLIENT_Ys": (325, 347, 369),
+
+    # Tabla
+    "HEADER_Y_PX": 452,
+    "HEADER_TO_FIRST_ROW_GAP": 24,
+    "COLS_PX": {"codigo": 130, "producto": 230, "cantidad": 560, "precio": 700, "subtotal": 820},
+    "COLS_HEADER_ANCHOR_ADD": {"codigo": 0, "producto": 0, "cantidad": 30, "precio": 50, "subtotal": 40},
+    "TABLE_SHIFT_X": 28, "TABLE_SHIFT_Y": 12,
+    "ROW_LINE_H": 13,
+    "BOTTOM_LIMIT_PY": 880,
+
+    # Evitar solape de CÓDIGO con PRODUCTO
+    "CODE_TO_PRODUCT_GAP_PX": 8,
+
+    # Totales (3 medidas)
+    "TOTALS_LABEL_TEXTS": ("TOTAL BRUTO:", "DESCUENTO:", "TOTAL:"),
+    "TOTALS_LABEL_X_PXs": (700, 700, 700),
+    "TOTALS_VALUE_X_PXs": (880, 880, 880),
+    "TOTALS_Ys_PX": (908, 948, 980),
+    "TOTALS_FONT_SIZES": (10, 10, 10),
+    # ► Cambiado a #551f31
+    "TOTALS_COLOR_LABEL": colors.HexColor("#551f31"),
+    "SHOW_LABELS": {"BRUTO": False, "DESC": True, "FINAL": False},  # ocultar 1 y 3
+
+    # Observaciones
+    "OBS_X_PX": 160,
+    "OBS_START_Y_PX": 940,
+    "OBS_LINE_H": 12,
+    "OBS_MAX_Y_LIMIT_PX": 1350,
+
+    # Cuadro crema
+    "TOTALS_BG": {
+        "color_rgb_255": (255, 255, 255),
+        "x_px": 470, "bottom_py": 1000, "top_py": 880,
+        "width_px": None,
+    },
+}
+
+# =====================================================
+# Utilidades
+# =====================================================
+
+def _x_img(W, px): return px / 960.0 * W
+def _y_img(H, py): return (1 - py / 1280.0) * H
+
+def _country() -> str:
+    try:
+        return (COUNTRY_CODE or "PY").strip().upper()
+    except Exception:
+        return "PY"
+
+def _template_path_for_country(cc: str) -> str | None:
+    return (
+        resolve_country_asset(f"TEMPLATE_{cc}.jpg", cc)
+        or resolve_country_asset(f"TEMPLATE_{cc}.png", cc)
+        or resolve_country_asset(f"TEMPLATE_{cc}.jpeg", cc)
+        or resolve_template_path(cc)
+    )
+
+def _register_lufga_if_available() -> tuple[str, str]:
     """
-    Intenta registrar la fuente Lufga. 
-    Devuelve (font_regular, font_bold) a usar.
+    Busca Lufga en: templates/fonts/Lufga/Lufga-*.otf (o .ttf).
     """
-    # Busca en assets por país y en un directorio común.
-    candidates_reg = [
-        resolve_country_asset("Lufga-Regular.ttf", COUNTRY_CODE),
-        resolve_country_asset("Lufga.ttf", COUNTRY_CODE),
-        resolve_country_asset("Lufga-Regular.ttf", "COMMON"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "Lufga-Regular.ttf"),
-    ]
-    candidates_bold = [
-        resolve_country_asset("Lufga-Bold.ttf", COUNTRY_CODE),
-        resolve_country_asset("Lufga Bold.ttf", COUNTRY_CODE),
-        resolve_country_asset("Lufga-Bold.ttf", "COMMON"),
-        os.path.join(os.path.dirname(__file__), "assets", "fonts", "Lufga-Bold.ttf"),
-    ]
+    reg = resolve_font_asset("Lufga", "Lufga-Regular", exts=("otf","ttf"))
+    bold = resolve_font_asset("Lufga", "Lufga-Bold", exts=("otf","ttf"))
 
-    reg = next((p for p in candidates_reg if p and os.path.exists(p)), None)
-    bold = next((p for p in candidates_bold if p and os.path.exists(p)), None)
+    # Fallback adicional (por si la carpeta 'assets/fonts' sigue existiendo en tu repo)
+    if not reg:
+        alt = os.path.join(os.path.dirname(__file__), "assets", "fonts", "Lufga-Regular.otf")
+        if os.path.exists(alt): reg = alt
+    if not bold:
+        altb = os.path.join(os.path.dirname(__file__), "assets", "fonts", "Lufga-Bold.otf")
+        if os.path.exists(altb): bold = altb
 
     try:
-        if reg:
-            pdfmetrics.registerFont(TTFont("Lufga", reg))
-        if bold:
-            pdfmetrics.registerFont(TTFont("Lufga-Bold", bold))
-        if reg and bold:
-            return "Lufga", "Lufga-Bold"
-        if reg:
-            return "Lufga", "Helvetica-Bold"
+        if reg:  pdfmetrics.registerFont(TTFont("Lufga", reg))
+        if bold: pdfmetrics.registerFont(TTFont("Lufga-Bold", bold))
+        if reg and bold: return "Lufga", "Lufga-Bold"
+        if reg:          return "Lufga", "Helvetica-Bold"
     except Exception:
         pass
-    # Fallback
     return "Helvetica", "Helvetica-Bold"
 
 def _next_quote_number(prefix: str) -> str:
-    """
-    Genera un número de cotización autoincremental por país.
-    Guarda/lee en COTIZACIONES_DIR/seq_{prefix}.txt
-    Retorna, por ejemplo: 'PE-000123'
-    """
-    os.makedirs(COTIZACIONES_DIR, exist_ok=True)
-    seq_file = os.path.join(COTIZACIONES_DIR, f"seq_{prefix}.txt")
-    current = 0
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    seq_file = os.path.join(TEMPLATES_DIR, f"seq_{prefix}.txt")
+    n = 0
     try:
         if os.path.exists(seq_file):
             with open(seq_file, "r", encoding="utf-8") as fh:
-                current = int((fh.read() or "0").strip())
+                n = int((fh.read() or "0").strip())
     except Exception:
-        current = 0
-    current += 1
+        n = 0
+    n += 1
     try:
         with open(seq_file, "w", encoding="utf-8") as fh:
-            fh.write(str(current))
+            fh.write(str(n))
     except Exception:
-        # Si falla escritura, igual devolvemos el generado en memoria
         pass
-    return f"{prefix}-{current:06d}"
+    return f"{prefix}-{n:07d}"
 
-# -------------------------------
-# PDF principal
-# -------------------------------
+def _split_base_and_extra_from_name(name: str) -> tuple[str, str]:
+    if not name: return "", ""
+    if "|" in name:
+        a, b = name.split("|", 1)
+        return a.strip(), b.strip()
+    return str(name).strip(), ""
+
+def _draw_totals_bg_block(c: canvas.Canvas, W, H, L: dict):
+    """Cuadro crema para páginas intermedias (debajo del detalle)."""
+    bg = L.get("TOTALS_BG", None)
+    if not bg:
+        return
+    r, g, b = bg.get("color_rgb_255", (252, 251, 249))
+    color = colors.Color(r/255.0, g/255.0, b/255.0)
+
+    x_px      = bg.get("x_px", 470)
+    bottom_py = bg.get("bottom_py", 865)
+    top_py    = bg.get("top_py", 1000)
+    width_px  = bg.get("width_px", None)  # None => hasta el borde derecho
+
+    X = lambda px: _x_img(W, px)
+    Y = lambda py: _y_img(H, py)
+
+    x = X(x_px)
+    w = (W - x) if width_px in (None, "", 0) else X(width_px)
+    y_bottom = Y(bottom_py)
+    h = Y(top_py) - y_bottom
+
+    c.setFillColor(color)
+    c.rect(x, y_bottom, w, h, stroke=0, fill=1)
+
+# ---------- helpers de wrapping ----------
+def _wrap_words(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int):
+    """Word wrap clásico (para PRODUCTO)."""
+    words = str(text).split(" ")
+    lines, current = [], ""
+    for w in words:
+        test = (current + " " + w).strip()
+        if c.stringWidth(test, font_name, font_size) <= max_width:
+            current = test
+        else:
+            if current: lines.append(current)
+            current = w
+    if current: lines.append(current)
+    return lines
+
+def _wrap_code_with_hyphen(c: canvas.Canvas, code: str, max_width: float, font_name: str, font_size: int):
+    """
+    Rompe CÓDIGO por caracteres para que NUNCA invada la columna PRODUCTO.
+    Si hay corte, agrega '-' al final de la línea (menos en la última).
+    """
+    s = str(code or "")
+    out = []
+    while s:
+        # buscar el prefijo más largo que entra
+        last_fit = 0
+        for i in range(1, len(s)+1):
+            if c.stringWidth(s[:i], font_name, font_size) <= max_width:
+                last_fit = i
+            else:
+                break
+        if last_fit == 0:  # si ni un solo char entra, forzar 1
+            last_fit = 1
+        if last_fit < len(s):
+            out.append(s[:last_fit] + "-")
+            s = s[last_fit:]
+        else:
+            out.append(s[:last_fit])
+            s = ""
+    return out
+
+# =====================================================
+# Generación de PDF (paginado + observaciones por página)
+# =====================================================
 
 def generar_pdf(datos: dict) -> str:
-    cliente_raw = (datos.get("cliente","") or "").strip()
+    cc = _country()
+    is_alt = cc in {"PE", "PY"}
+    L = LAYOUT_ALT if is_alt else LAYOUT_VE
+
+    # Color “negro” para PE/PY
+    TEXT_COLOR = colors.HexColor("#551f31") if is_alt else colors.black
+
+    cliente_raw  = (datos.get("cliente","") or "").strip()
     cliente_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", cliente_raw).strip("_")
+    nro_cot      = _next_quote_number(cc)
+    nro_cot2     = nro_cot.rsplit("-", 1)[1]  # solo el correlativo numérico
+    out_path     = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
 
-    # País con nuevo formato
-    use_alt_format = (str(COUNTRY_CODE).upper() in {"PE", "PY"})
-
-    # Número de cotización autoincremental (para PE/PY)
-    nro_cotizacion = _next_quote_number(str(COUNTRY_CODE).upper()) if use_alt_format else None
-
-    # Nombre de archivo
-    if use_alt_format:
-        nombre_archivo = os.path.join(COTIZACIONES_DIR, f"cotizacion_{cliente_slug}_{nro_cotizacion}.pdf")
-    else:
-        fecha_slug = datetime.datetime.now().strftime("%Y%m%d")
-        nombre_archivo = os.path.join(COTIZACIONES_DIR, f"cotizacion_{cliente_slug}_{fecha_slug}.pdf")
-
-    c = canvas.Canvas(nombre_archivo, pagesize=A4)
+    c = canvas.Canvas(out_path, pagesize=A4)
     c.setTitle(f"Cotización - {cliente_raw}")
     W, H = A4
 
-    # Template por país
-    if use_alt_format:
-        TEMPLATE_PATH = (
-            resolve_country_asset("template.jpg", COUNTRY_CODE)
-            or resolve_country_asset("template.png", COUNTRY_CODE)
-            or resolve_country_asset("template.jpeg", COUNTRY_CODE)
-        )
-    else:
-        TEMPLATE_PATH = (
-            resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.jpg", COUNTRY_CODE)
-            or resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.png", COUNTRY_CODE)
-            or resolve_country_asset(f"TEMPLATE_{COUNTRY_CODE}.jpeg", COUNTRY_CODE)
-            or resolve_template_path(COUNTRY_CODE)
-        )
+    TEMPLATE_PATH = _template_path_for_country(cc)
+    FONT_REG, FONT_BOLD = (_register_lufga_if_available() if is_alt else ("Helvetica", "Helvetica-Bold"))
 
-    # Elección de fuentes
-    FONT_REG, FONT_BOLD = (_register_lufga() if use_alt_format else ("Helvetica", "Helvetica-Bold"))
+    X = lambda px: _x_img(W, px)
+    Y = lambda py: _y_img(H, py)
 
-    def x_img(px): return px / 960.0 * W
-    def y_img(py): return (1 - py / 1280.0) * H
-
-    def draw_template():
+    def draw_background():
         if TEMPLATE_PATH and os.path.exists(TEMPLATE_PATH):
             c.drawImage(TEMPLATE_PATH, 0, 0, width=W, height=H)
 
-    def draw_header_common():
-        # Todos los textos en negro para PE/PY (legibilidad).
-        # Para VE conservamos el comportamiento original excepto color (lo ponemos negro igualmente).
-        c.setFillColor(colors.black)
+    def _draw_label_colon_value(y_px: int, label: str, value: str):
+        """
+        Dibuja: [LABEL]  ":"  [VALUE]
+        ":" anclado a CLIENT_RIGHT_PX.
+        LABEL alineado a la derecha en (CLIENT_RIGHT_PX - CLIENT_LABEL_GAP_PX).
+        VALUE alineado a la izquierda en (CLIENT_RIGHT_PX + CLIENT_VALUE_GAP_PX).
+        """
+        colon_x = X(L["CLIENT_RIGHT_PX"])
+        pad_l   = X(L.get("CLIENT_LABEL_GAP_PX", 6))
+        pad_r   = X(L.get("CLIENT_VALUE_GAP_PX", 6))
 
-        if use_alt_format:
-            # En el nuevo formato: mostramos N° de cotización en el lugar de la fecha
-            c.setFont(FONT_BOLD, 11)
-            c.drawString(x_img(735), y_img(205), f"COTIZACIÓN N°: {nro_cotizacion}")
-        else:
-            # Formato VE: seguimos mostrando Fecha (en negro)
-            c.setFont(FONT_REG, 10)
-            c.drawString(x_img(735), y_img(205), f"Fecha: {datos.get('fecha', datetime.datetime.now().strftime('%d/%m/%Y'))}")
+        y = Y(y_px)
+        c.drawRightString(colon_x - pad_l, y, label)
+        c.drawString(colon_x, y, ":")
+        c.drawString(colon_x + pad_r, y, value)
 
-        cli_right = x_img(900)
-        id_lbl = id_label_for_country(APP_COUNTRY)
+    def draw_header():
+        fecha_str = datetime.datetime.now().strftime("%d/%m/%Y")
+        id_lbl    = id_label_for_country(APP_COUNTRY)
 
+        # Fecha
         c.setFont(FONT_REG, 10)
-        c.drawRightString(cli_right, y_img(310), f"Nombre/Empresa: {datos.get('cliente','')}")
-        c.drawRightString(cli_right, y_img(332), f"{id_lbl}: {datos.get('cedula','')}")
-        c.drawRightString(cli_right, y_img(354), f"Teléfono: {datos.get('telefono','')}")
+        c.setFillColor(TEXT_COLOR if is_alt else colors.white)
+        c.drawString(X(L["DATE_PX"]), Y(L["DATE_PY"]), f"{fecha_str}")
 
-    def draw_table_header():
-        c.setFont(FONT_BOLD, 10 if use_alt_format else 9)
-        c.setFillColor(colors.black)
-        c.drawString(col_codigo, header_y, "CÓDIGO")
-        c.drawString(col_producto, header_y, "PRODUCTO")
-        c.drawRightString(col_cantidad + 30, header_y, "CANTIDAD")
-        c.drawRightString(col_precio + 50, header_y, "PRECIO UNITARIO")
-        c.drawRightString(col_subtotal + 40, header_y, "SUBTOTAL")
+        # Cotización N°
+        if L["QUOTE_SHOW"]:
+            c.setFillColor(TEXT_COLOR)
+            c.setFont(FONT_BOLD, 20)
+            c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{nro_cot2}")
 
-    def wrap_text(text, max_width, font_name=FONT_REG, font_size=9):
-        words = str(text).split(" ")
-        lines, current = [], ""
-        for w in words:
-            test = (current + " " + w).strip()
-            if c.stringWidth(test, font_name, font_size) <= max_width:
-                current = test
-            else:
-                if current:
-                    lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
-        return lines
+        # Cliente / ID / Teléfono
+        c.setFont(FONT_BOLD, 10)
+        c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
+        y_cli, y_id, y_tel = L["CLIENT_Ys"]
 
+        if is_alt:
+            _draw_label_colon_value(y_cli, "Nombre/Empresa", (datos.get("cliente","") or ""))
+            _draw_label_colon_value(y_id,  id_lbl,             (datos.get("cedula","") or ""))
+            _draw_label_colon_value(y_tel, "Teléfono",         (datos.get("telefono","") or ""))
+        else:
+            cli_right = X(L["CLIENT_RIGHT_PX"])
+            c.drawRightString(cli_right, Y(y_cli), f"Nombre/Empresa: {datos.get('cliente','')}")
+            c.drawRightString(cli_right, Y(y_id),  f"{id_lbl}: {datos.get('cedula','')}")
+            c.drawRightString(cli_right, Y(y_tel), f"Teléfono: {datos.get('telefono','')}")
+
+    def _anchor_x(col_key: str, shift_x: float) -> float:
+        """Ancla horizontal compartida entre header y celdas para ALINEACIÓN PERFECTA."""
+        base = L["COLS_PX"][col_key] + shift_x
+        add  = L["COLS_HEADER_ANCHOR_ADD"].get(col_key, 0)
+        return X(base + add)
+
+    def draw_table_header(shift_x, shift_y):
+        header_y = Y(L["HEADER_Y_PX"] + shift_y)
+        c.setFont(FONT_BOLD, 10 if is_alt else 9)
+        c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
+
+        # izquierdas
+        c.drawString( _anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"]),   header_y, "CÓDIGO")
+        c.drawString( _anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"]), header_y, "PRODUCTO")
+
+        # derechas (alineadas al MISMO ancla de números)
+        c.drawRightString(_anchor_x("cantidad", shift_x), header_y, "CANTIDAD")
+        c.drawRightString(_anchor_x("precio",   shift_x), header_y, "PRECIO UNITARIO")
+        c.drawRightString(_anchor_x("subtotal", shift_x), header_y, "SUBTOTAL")
+        return header_y
+
+    # Paginado
     all_items = datos["items"]
-    total_bruto = round(sum(float(nz(i.get("total"))) for i in all_items), 2)
-
-    # DESCUENTO: PRESENTACION con ml >= 30
-    pres_validas = [i for i in all_items if (i.get("categoria") or "") == "PRESENTACION" and i.get("ml") and int(i["ml"]) >= 30]
-    total_pres_bruto = round(sum(float(nz(i.get("total"))) for i in pres_validas), 2)
-    cnt_pres = sum(int(nz(i.get("cantidad"), 0)) for i in pres_validas)
-
-    desc_pct = 0
-    if cnt_pres >= 20:
-        desc_pct = 0.20
-    elif cnt_pres >= 10:
-        desc_pct = 0.15
-    elif cnt_pres >= 5:
-        desc_pct = 0.10
-    elif cnt_pres >= 3:
-        desc_pct = 0.05
-
-    descuento_valor = round(total_pres_bruto * desc_pct, 2)
-    total_final = round(total_bruto - descuento_valor, 2)
-
-    # -------------------------------
-    # Layout (coordenadas)
-    # -------------------------------
-    # Para PE/PY movemos la tabla a la derecha y hacia abajo
-    TABLE_SHIFT_X = 28 if use_alt_format else 10
-    TABLE_SHIFT_Y = 12 if use_alt_format else 0
-
-    header_y = y_img(430 + TABLE_SHIFT_Y)
-    col_codigo   = x_img(80)  + TABLE_SHIFT_X
-    col_producto = x_img(200) + TABLE_SHIFT_X
-    col_cantidad = x_img(505) + TABLE_SHIFT_X
-    col_precio   = x_img(630) + TABLE_SHIFT_X
-    col_subtotal = x_img(745) + TABLE_SHIFT_X
-
-    top_row_y = header_y - 24
-    bottom_limit = y_img(880 + TABLE_SHIFT_Y)  # límite inferior
-    line_h = 13
-    max_prod_width = (col_cantidad - 8) - col_producto
-
-    # Totales
-    tot_lbl_x = x_img(700)
-    y_tot_1 = y_img(950)
-    y_tot_2 = y_tot_1 - 15
-    y_tot_3 = y_tot_2 - 15
-    val_x = x_img(880)
-
-    # Fondo para cubrir box si hay paginación
-    bg_color = colors.Color(252/255.0, 251/255.0, 249/255.0)
-    cover_x = x_img(470)
-    cover_top = y_img(1000)
-    cover_bottom = y_img(865)
-    cover_w = W - cover_x
-    cover_h = cover_top - cover_bottom
-    obs_min_y = y_img(1170)
-
     idx = 0
     n_items = len(all_items)
 
     while idx < n_items:
-        draw_template()
-        draw_header_common()
-        draw_table_header()
+        draw_background()
+        draw_header()
 
-        row_y = top_row_y
-        obs_lines = []
+        shift_x, shift_y = L["TABLE_SHIFT_X"], L["TABLE_SHIFT_Y"]
+        header_y = draw_table_header(shift_x, shift_y)
+
+        # Anclas compartidas para celdas
+        col_codigo   = _anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"])
+        col_producto = _anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"])
+        ax_cantidad  = _anchor_x("cantidad", shift_x)
+        ax_precio    = _anchor_x("precio",   shift_x)
+        ax_subtotal  = _anchor_x("subtotal", shift_x)
+
+        row_y = header_y - L["HEADER_TO_FIRST_ROW_GAP"]
+        bottom_limit = Y(L["BOTTOM_LIMIT_PY"] + shift_y)
+        line_h = L["ROW_LINE_H"]
+
+        # anchos máximos para wrap
+        max_prod_width = (ax_cantidad - X(8)) - col_producto
+        max_code_width = (col_producto - X(L["CODE_TO_PRODUCT_GAP_PX"])) - col_codigo
+
+        # Observaciones SOLO de esta página
+        page_obs_lines = []
+
+        def _cell_wrap_heights(prod_text: str, code_text: str, font_size: int):
+            prod_lines = _wrap_words(c, prod_text, max_prod_width, FONT_REG, font_size)
+            code_lines = _wrap_code_with_hyphen(c, code_text, max_code_width, FONT_REG, font_size)
+            n_lines = max(len(prod_lines), len(code_lines))
+            return prod_lines, code_lines, n_lines
 
         while idx < n_items:
             it = all_items[idx]
             full_name = it["producto"]
-            if it.get("fragancia"):
-                full_name += f" ({it['fragancia']})"
-            if it.get("observacion"):
-                full_name += f" | {it['observacion']}"
+            if it.get("fragancia"):   full_name += f" ({it['fragancia']})"
+            if it.get("observacion"): full_name += f" | {it['observacion']}"
 
-            qty_txt = cantidad_para_mostrar(it)
-            body_font_size = 10 if use_alt_format else 9
-            prod_lines = wrap_text(full_name, max_prod_width, FONT_REG, body_font_size)
-            n_lines = len(prod_lines)
+            body_fs = 10 if is_alt else 9
+            prod_lines, code_lines, n_lines = _cell_wrap_heights(full_name, str(it["codigo"]), body_fs)
             h_needed = n_lines * line_h + 2
+
             if row_y - h_needed < bottom_limit:
                 break
 
-            c.setFont(FONT_REG, body_font_size)
-            c.setFillColor(colors.black)
-            c.drawString(col_codigo, row_y, str(it["codigo"]))
+            # Fila
+            c.setFont(FONT_REG, body_fs)
+            c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+            # Código (envuelve con guión)
+            for lidx, line in enumerate(code_lines):
+                c.drawString(col_codigo, row_y - lidx * line_h, line)
+            # Producto (word wrap)
             for lidx, line in enumerate(prod_lines):
                 c.drawString(col_producto, row_y - lidx * line_h, line)
-            c.setFont(FONT_REG, body_font_size)
-            c.drawRightString(col_cantidad + 30, row_y, qty_txt)
-            c.drawRightString(col_precio + 50, row_y, fmt_money_pdf(float(nz(it.get("precio")))))
-            c.drawRightString(col_subtotal + 40, row_y, fmt_money_pdf(float(nz(it.get("total")))))
 
-            # Observaciones al pie: "- {codigo} {base_name}: {extra_from_name | observacion}"
-            name_for_obs = it.get("producto", "")
-            base_name, extra_from_name = _split_base_and_extra_from_name(name_for_obs)
-            page_obs_text = (it.get("observacion") or "").strip()
-            parts = []
-            if extra_from_name:
-                parts.append(extra_from_name)
-            if page_obs_text:
-                parts.append(page_obs_text)
-            if parts:
-                obs_lines.append(f"- {it['codigo']} {base_name}: " + " | ".join(parts))
+            qty_txt = cantidad_para_mostrar(it)
+            c.drawRightString(ax_cantidad, row_y, qty_txt)
+            c.drawRightString(ax_precio,   row_y, fmt_money_pdf(float(nz(it.get("precio")))))
+            c.drawRightString(ax_subtotal, row_y, fmt_money_pdf(float(nz(it.get("total")))))
+
+            # Observación SOLO de esta página
+            obs_txt = (it.get("observacion") or "").strip()
+            if obs_txt:
+                page_obs_lines.append(f"- {it['codigo']}: {obs_txt}")
 
             row_y -= h_needed
             idx += 1
 
-        # Observaciones
+        is_last_page = (idx >= n_items)
+        if not is_last_page:
+            _draw_totals_bg_block(c, W, H, L)
+
+        # Observaciones de la página
         c.setFont(FONT_REG, 9)
-        c.setFillColor(colors.black)
-        obs_x = x_img(160)
-        obs_y = y_tot_1
-        for line in obs_lines:
+        c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+        obs_x = X(L["OBS_X_PX"])
+        obs_y = Y(L["OBS_START_Y_PX"] if L["OBS_START_Y_PX"] is not None else L["TOTALS_Ys_PX"][0])
+        obs_min_y = Y(L["OBS_MAX_Y_LIMIT_PX"])
+        for line in page_obs_lines:
             c.drawString(obs_x, obs_y, line[:135])
-            obs_y -= 12
+            obs_y -= L["OBS_LINE_H"]
             if obs_y < obs_min_y:
                 break
 
-        is_last_page = (idx >= n_items)
         if is_last_page:
-            # Etiquetas de totales
-            c.setFont(FONT_BOLD, 10)
-            c.setFillColor(colors.black)
+            # Totales
+            total_bruto = round(sum(float(nz(i.get("total"))) for i in all_items), 2)
+            pres_validas = [i for i in all_items if (i.get("categoria") or "") == "PRESENTACION" and i.get("ml") and int(i["ml"]) >= 30]
+            total_pres_bruto = round(sum(float(nz(i.get("total"))) for i in pres_validas), 2)
+            cnt_pres = sum(int(nz(i.get("cantidad"), 0)) for i in pres_validas)
+            desc_pct = 0.20 if cnt_pres >= 20 else 0.15 if cnt_pres >= 10 else 0.10 if cnt_pres >= 5 else 0.05 if cnt_pres >= 3 else 0
+            descuento_valor = round(total_pres_bruto * desc_pct, 2)
+            total_final = round(total_bruto - descuento_valor, 2)
 
-            # Para PE/PY ocultamos "TOTAL BRUTO:" y "TOTAL FINAL:" (solo mostramos importes)
-            if not use_alt_format:
-                c.drawRightString(tot_lbl_x, y_tot_1, "TOTAL BRUTO:")
-            c.drawRightString(tot_lbl_x, y_tot_2, "DESCUENTO:")
-            if not use_alt_format:
-                c.drawRightString(tot_lbl_x, y_tot_3, "TOTAL FINAL:")
+            values = (total_bruto, -descuento_valor, total_final)
+            shows  = (L["SHOW_LABELS"]["BRUTO"], L["SHOW_LABELS"]["DESC"], L["SHOW_LABELS"]["FINAL"])
 
-            # Valores
-            c.setFont(FONT_REG, 10)
-            c.drawRightString(val_x, y_tot_1, fmt_money_pdf(total_bruto))
-            c.drawRightString(val_x, y_tot_2, f"- {fmt_money_pdf(descuento_valor)}")
-            c.drawRightString(val_x, y_tot_3, fmt_money_pdf(total_final))
+            for i in range(3):
+                y  = Y(L["TOTALS_Ys_PX"][i])
+                lx = X(L["TOTALS_LABEL_X_PXs"][i])
+                vx = X(L["TOTALS_VALUE_X_PXs"][i])
+
+                if shows[i]:
+                    c.setFont(FONT_BOLD, L["TOTALS_FONT_SIZES"][i])
+                    c.setFillColor(L["TOTALS_COLOR_LABEL"])
+                    c.drawRightString(lx, y, L["TOTALS_LABEL_TEXTS"][i])
+
+                c.setFont(FONT_REG, L["TOTALS_FONT_SIZES"][i])
+                c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+                val = values[i]
+                txt = fmt_money_pdf(val if i != 1 else abs(val))
+                if i == 1:
+                    txt = f"- {txt}"
+                c.drawRightString(vx, y, txt)
         else:
-            # Cubrimos el block de totales para no "ensuciar" páginas intermedias
-            c.setFillColor(bg_color)
-            c.rect(cover_x, cover_bottom, cover_w, cover_h, stroke=0, fill=1)
-            c.setFillColor(colors.black)
             c.showPage()
 
     c.save()
-    return nombre_archivo
+    return out_path

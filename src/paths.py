@@ -57,6 +57,7 @@ DATA_DIR          = user_docs_dir("data")                    # escribible
 COTIZACIONES_DIR  = user_docs_dir("cotizaciones")            # escribible
 TEMPLATES_DIR     = resource_path("templates")               # solo lectura
 CONFIG_DIR        = resource_path("config")                  # solo lectura (installer)
+FONTS_DIR         = os.path.join(TEMPLATES_DIR, "fonts")     # solo lectura
 
 
 # -------- helpers internos --------
@@ -196,3 +197,26 @@ def ensure_data_seed_if_empty():
                     shutil.copy2(src, dst)
     except Exception:
         pass
+
+
+def resolve_font_asset(font_family: str, base_name: str, exts: tuple[str, ...] = ("otf", "ttf")) -> str | None:
+    """
+    Busca una fuente en:
+      templates/fonts/<font_family>/<base_name>.<ext>
+      templates/fonts/<base_name>.<ext>
+    Devuelve la primera coincidencia existente, si no encuentra devuelve None.
+    """
+    candidates: list[str] = []
+    for ext in exts:
+        candidates.append(os.path.join(FONTS_DIR, font_family, f"{base_name}.{ext}"))
+        candidates.append(os.path.join(FONTS_DIR, f"{base_name}.{ext}"))
+
+    # Fallback explícito vía resource_path (por si PyInstaller reubica)
+    for ext in exts:
+        candidates.append(resource_path(os.path.join("templates", "fonts", font_family, f"{base_name}.{ext}")))
+        candidates.append(resource_path(os.path.join("templates", "fonts", f"{base_name}.{ext}")))
+
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None

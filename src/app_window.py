@@ -5,7 +5,7 @@ import pandas as pd
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit, QPushButton,
     QMessageBox, QGroupBox, QHeaderView, QAbstractItemView, QTableView, QTableWidget, QTableWidgetItem,
-    QMenu, QDialog, QToolButton, QSizePolicy
+    QMenu, QDialog, QToolButton, QSizePolicy, QApplication
 )
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QIcon, QBrush
 from PySide6.QtCore import Qt, QTimer, QUrl, QModelIndex, QStringListModel
@@ -78,6 +78,9 @@ class SistemaCotizaciones(QMainWindow):
         self._update_title_with_client(self.entry_cliente.text())
         self._build_completer()
 
+        # 👉 Conectar a la señal para enfocar/scroll al último ítem agregado (venga de donde venga)
+        self.model.item_added.connect(self._focus_last_row)
+
     def _center_on_screen(self):
         scr = self.screen()
         if not scr: return
@@ -91,6 +94,21 @@ class SistemaCotizaciones(QMainWindow):
         if not self._shown_once:
             self._shown_once = True
             self._center_on_screen()
+
+    # === Helper: enfoca y desplaza al último item ===
+    def _focus_last_row(self, row_index: int):
+        try:
+            r = row_index if isinstance(row_index, int) else (self.model.rowCount() - 1)
+            if r < 0: return
+            idx0 = self.model.index(r, 0)
+            # Seleccionar fila, desplazar y (si no hay modal) poner foco en la tabla
+            self.table.selectRow(r)
+            self.table.setCurrentIndex(idx0)
+            self.table.scrollTo(idx0, QAbstractItemView.PositionAtBottom)
+            if QApplication.activeModalWidget() is None:
+                self.table.setFocus()
+        except Exception:
+            pass
 
     # ==== abrir carpetas ====
     def abrir_carpeta_data(self):
@@ -166,7 +184,7 @@ class SistemaCotizaciones(QMainWindow):
         htop.addWidget(btn_listado)
         main.addLayout(htop)
 
-        # --- Búsqueda (con Agregar y + Servicio como en tu mock)
+        # --- Búsqueda (con Agregar Servicio como en tu mock)
         grp_bus = QGroupBox("Búsqueda de Productos")
         vbus = QVBoxLayout(); hbus = QHBoxLayout()
         self.entry_producto = QLineEdit()
@@ -175,8 +193,7 @@ class SistemaCotizaciones(QMainWindow):
 
         lbl_bus = QLabel("Código o Nombre:")
 
-
-        btn_agregar_srv = QPushButton("+ Servicio")
+        btn_agregar_srv = QPushButton("Agregar Servicio")
         self._apply_btn_responsive(btn_agregar_srv, 110, 36)
         btn_agregar_srv.setToolTip("Agregar un ítem de tipo SERVICIO / personalizado")
         btn_agregar_srv.clicked.connect(self.agregar_producto_personalizado)
@@ -234,14 +251,16 @@ class SistemaCotizaciones(QMainWindow):
 
         menu = QMenu(self)
 
-        # Precio editable sólo en Paraguay
-        if CAN_EDIT_UNIT_PRICE:
+        cat = (item.get("categoria") or "").upper()
+
+        # 👉 Precio: editable siempre si es SERVICIO, o si es Paraguay
+        can_edit_price = (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE
+        if can_edit_price:
             menu.addAction(self.act_edit_price)
             self.act_clear_price.setEnabled(item.get("precio_override") is not None)
             menu.addAction(self.act_clear_price)
 
         # Observación solo en BOTELLAS o SERVICIO
-        cat = (item.get("categoria") or "").upper()
         if cat in ("BOTELLAS", "SERVICIO"):
             if menu.actions(): menu.addSeparator()
             menu.addAction(self.act_edit)
@@ -278,7 +297,7 @@ class SistemaCotizaciones(QMainWindow):
             self._agregar_por_codigo(cod)
             QTimer.singleShot(0, self.entry_producto.clear)
             if self._completer.popup(): self._completer.popup().hide()
-            self.entry_producto.setFocus()
+            # ❌ No volver a forzar foco a entry para no romper el scroll al último
 
         self._completer.activated[str].connect(add_from_completion)
 
@@ -294,7 +313,7 @@ class SistemaCotizaciones(QMainWindow):
                 self._agregar_por_codigo(cod)
                 QTimer.singleShot(0, self.entry_producto.clear)
                 popup.hide()
-                self.entry_producto.setFocus()
+                # ❌ No forzar foco a la caja de texto
                 return
 
         if self._suppress_next_return:
@@ -306,7 +325,7 @@ class SistemaCotizaciones(QMainWindow):
         cod = text.split(" - ")[0].strip()
         self._agregar_por_codigo(cod)
         self.entry_producto.clear()
-        self.entry_producto.setFocus()
+        # ❌ No forzar foco a la caja de texto
 
     # ===== Agregar producto personalizado/servicio
     def agregar_producto_personalizado(self):
@@ -606,13 +625,19 @@ class SistemaCotizaciones(QMainWindow):
         self._abrir_dialogo_observacion(row, item)
 
     def editar_precio_unitario(self):
-        if not CAN_EDIT_UNIT_PRICE: return
+        # Permitir siempre si es SERVICIO; o Paraguay para cualquier ítem
         row = self._ctx_row
         if row is None:
             sel = self.table.selectionModel().selectedRows()
             if not sel: return
             row = sel[0].row()
         if row < 0 or row >= len(self.items): return
+
+        item = self.items[row]
+        cat = (item.get("categoria") or "").upper()
+        if not (CAN_EDIT_UNIT_PRICE or cat == "SERVICIO"):
+            return
+
         idx_price = self.model.index(row, 3)
         if not idx_price.isValid(): return
         self.table.setCurrentIndex(idx_price)
@@ -627,7 +652,6 @@ class SistemaCotizaciones(QMainWindow):
         item["total"] = round(float(unit_price) * qty, 2)
 
     def quitar_reescritura_precio(self):
-        if not CAN_EDIT_UNIT_PRICE: return
         sel = self.table.selectionModel().selectedRows()
         if not sel: return
         rows = [ix.row() for ix in sel if 0 <= ix.row() < len(self.items)]
