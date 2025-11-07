@@ -5,7 +5,7 @@
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.1.0"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -361,5 +361,7 @@ begin
       Log('Carpeta {app} no se pudo eliminar (puede contener archivos no controlados o estar en uso).');
   end;
 end;
+
+
 
 

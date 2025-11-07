@@ -2,12 +2,12 @@
 
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-from PyInstaller.building.datastruct import Tree
 
 block_cipher = None
 
 # === Rutas base ===
-ROOT = Path.cwd()          # Ejecutar pyinstaller desde la RAÍZ del repo
+# OJO: el release.ps1 hace Push-Location al root; por eso usamos cwd.
+ROOT = Path.cwd()
 MAIN = ROOT / "main.py"
 ICON_PATH = ROOT / "templates" / "logo_sistema.ico"
 
@@ -19,10 +19,11 @@ cfg = ROOT / "config" / "cotizador.json"
 if cfg.exists():
     datas.append((str(cfg), "config"))
 
-# 2) Templates completos (preserva subcarpetas, p.ej. templates/PY/, templates/PE/)
-datas.append(Tree(str(ROOT / "templates"), prefix="templates"))
+# 2) Templates completos (preserva subcarpetas)
+#    (No usar Tree; usar par (src_dir, dest_dir) para PyInstaller 6.x)
+datas.append((str(ROOT / "templates"), "templates"))
 
-# 3) Archivos de PySide6 (plugins/platforms, etc.)
+# 3) Archivos de PySide6 (plugins/platforms, etc.) sin .py
 datas += collect_data_files("PySide6", include_py_files=False)
 
 # ===== Hidden imports (Qt) =====
@@ -39,7 +40,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PySide6.scripts.deploy', 'PySide6.scripts.deploy_lib', 'project_lib'],
+    excludes=['PySide6.scripts', 'project_lib'],  # <- sin punto final
     noarchive=False,
 )
 
