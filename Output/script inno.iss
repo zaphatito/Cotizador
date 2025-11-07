@@ -22,35 +22,32 @@ VersionInfoVersion={#MyAppVersion}
 DefaultDirName={pf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
-; === Usa 'Output' con O mayúscula para coincidir con el repo ===
 OutputDir={#ProjectRoot}\Output
 Compression=lzma
 SolidCompression=yes
-DisableDirPage=no
-DisableProgramGroupPage=no
+DisableWelcomePage=yes
+DisableDirPage=yes
+DisableProgramGroupPage=yes
+; Mostramos solo Instalando/Finalización
+WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
 
-WizardStyle=modern
-; (Opcional) Imágenes de asistente:
-; WizardImageFile={#ProjectRoot}\templates\wizard-large.bmp
-; WizardSmallImageFile={#ProjectRoot}\templates\wizard-small.bmp
-
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Dirs]
-; Carpetas de datos de usuario (por defecto se preservan).
+; No borrar datos de usuario nunca en upgrades
 Name: "{userdocs}\Cotizaciones\data";         Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
 
 [Files]
-; Bundle generado por PyInstaller
+; Bundle de PyInstaller
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; (Opcional) Requirements para referencia
+; Referencia (opcional)
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
 [Icons]
@@ -75,27 +72,24 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: 
 const
   MY_ATTR_HIDDEN = $00000002;
   MY_ATTR_SYSTEM = $00000004;
+  UNINST_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}_is1';
 
 function SetFileAttributes(lpFileName: string; dwFileAttributes: LongWord): Boolean;
   external 'SetFileAttributes{#A}@kernel32.dll stdcall';
 
 procedure ForceDir(const Path: string);
 begin
-  if not DirExists(Path) then
-    CreateDir(Path);
+  if not DirExists(Path) then CreateDir(Path);
 end;
 
 procedure AttribClearRecursive(const Path: string);
-var
-  Cmd, Params: string;
-  RC: Integer;
+var Cmd, Params: string; RC: Integer;
 begin
   if DirExists(Path) then
   begin
     Cmd := ExpandConstant('{cmd}');
     Params := '/c attrib -s -h -r "' + Path + '\*" /S /D';
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
-    Log(Format('Atributos limpiados en: %s (RC=%d)', [Path, RC]));
   end;
 end;
 
@@ -104,111 +98,163 @@ begin
   if DirExists(Path) then
   begin
     AttribClearRecursive(Path);
-    if DelTree(Path, True, True, True) then
-      Log(Format('Eliminada carpeta: %s', [Path]))
-    else
-      Log(Format('No se pudo eliminar carpeta: %s', [Path]));
+    DelTree(Path, True, True, True);
   end;
 end;
 
-var
-  // ====== Páginas de instalación (país/listado/stock) ======
-  PaisPage: TWizardPage;
-  cbPais: TNewComboBox;
-
-  ListadoPage: TWizardPage;
-  cbListado: TNewComboBox;
-
-  StockPage: TWizardPage;
-  chkNoStock: TNewCheckBox;
-
-  // ====== Formulario del desinstalador (casillas para borrar) ======
-  UninstForm: TSetupForm;
-  chkDelConfig: TNewCheckBox;
-  chkDelDocs: TNewCheckBox;
-  btnOK, btnCancel: TNewButton;
-  lblMsg: TNewStaticText;
-
-  // Flags elegidos por el usuario en desinstalación
-  GDelConfig, GDelDocs: Boolean;
-
-procedure InitializeWizard;
+function RegReadStrAnyView(const Root: Integer; const Key, Name: string; var Val: string): Boolean;
 begin
-  // -------- Página País --------
-  PaisPage := CreateCustomPage(
-    wpSelectDir,
-    'País por defecto',
-    'Elija el país con el que operará el sistema (afecta moneda y reglas de cantidad).'
-  );
-  cbPais := TNewComboBox.Create(PaisPage.Surface);
-  cbPais.Parent := PaisPage.Surface;
-  cbPais.Left := ScaleX(0);
-  cbPais.Top := ScaleY(8);
-  cbPais.Width := PaisPage.SurfaceWidth;
-  cbPais.Style := csDropDownList;
-  cbPais.Items.Add('Paraguay');
-  cbPais.Items.Add('Perú');
-  cbPais.Items.Add('Venezuela');
-  cbPais.ItemIndex := 0;
+  Result := RegQueryStringValue(Root, Key, Name, Val);
+  if (not Result) and IsWin64 then
+    Result := RegQueryStringValue(HKLM64, Key, Name, Val);
+end;
 
-  // -------- Página Listado --------
-  ListadoPage := CreateCustomPage(
-    PaisPage.ID,
-    'Tipo de listado',
-    'Elija qué tipo de ítems mostrará el listado/autocompletar.'
-  );
-  cbListado := TNewComboBox.Create(ListadoPage.Surface);
-  cbListado.Parent := ListadoPage.Surface;
-  cbListado.Left := ScaleX(0);
-  cbListado.Top := ScaleY(8);
-  cbListado.Width := ListadoPage.SurfaceWidth;
-  cbListado.Style := csDropDownList;
-  cbListado.Items.Add('Productos');
-  cbListado.Items.Add('Presentaciones');
-  cbListado.Items.Add('Ambos');
-  cbListado.ItemIndex := 2;
+function PosEx2(const SubStr, S: string; Offset: Integer): Integer;
+var i, L: Integer;
+begin
+  Result := 0;
+  L := Length(SubStr);
+  if Offset < 1 then Offset := 1;
+  for i := Offset to Length(S) - L + 1 do
+    if Copy(S, i, L) = SubStr then begin Result := i; Exit; end;
+end;
 
-  // -------- Página Stock --------
-  StockPage := CreateCustomPage(
-    ListadoPage.ID,
-    'Permitir sin stock',
-    'Puede permitir listar y cotizar productos/presentaciones sin stock disponible.'
-  );
-  chkNoStock := TNewCheckBox.Create(StockPage.Surface);
-  chkNoStock.Parent := StockPage.Surface;
-  chkNoStock.Caption := 'Permitir listar y cotizar sin stock';
-  chkNoStock.Left := ScaleX(0);
-  chkNoStock.Top := ScaleY(8);
-  chkNoStock.Width := StockPage.SurfaceWidth;
-  chkNoStock.Checked := False;
+function LoadStringFromFileSafe(const FileName: string; var S: string): Boolean;
+var
+  A: AnsiString;
+begin
+  if not FileExists(FileName) then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  // LoadStringFromFile exige var A: AnsiString en Unicode
+  Result := LoadStringFromFile(FileName, A);
+  if Result then
+    S := String(A)  // convertir explícitamente a UnicodeString
+  else
+    S := '';
+end;
+function TrimQuotes(const S: string): string;
+begin
+  Result := S;
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result)-2);
+end;
+
+
+function JsonExtractStr(const Json, Key: string; var OutVal: string): Boolean;
+var LJson, LKey: string; p, q, r: Integer;
+begin
+  LJson := LowerCase(Json);
+  LKey := '"' + LowerCase(Key) + '"';
+  p := Pos(LKey, LJson);
+  if p = 0 then begin Result := False; Exit; end;
+  q := PosEx2(':', LJson, p);
+  if q = 0 then begin Result := False; Exit; end;
+  q := PosEx2('"', LJson, q);
+  if q = 0 then begin Result := False; Exit; end;
+  r := PosEx2('"', LJson, q+1);
+  if r = 0 then begin Result := False; Exit; end;
+  OutVal := TrimQuotes(Copy(Json, q, r-q+1));
+  Result := True;
+end;
+
+function JsonExtractBool(const Json, Key: string; var OutVal: Boolean): Boolean;
+var LJson, LKey: string; p, q: Integer; seg: string;
+begin
+  LJson := LowerCase(Json);
+  LKey := '"' + LowerCase(Key) + '"';
+  p := Pos(LKey, LJson);
+  if p = 0 then begin Result := False; Exit; end;
+  q := PosEx2(':', LJson, p);
+  if q = 0 then begin Result := False; Exit; end;
+  seg := Trim(Copy(LJson, q+1, 12));
+  if Pos('true', seg) = 1 then begin OutVal := True; Result := True; Exit; end;
+  if Pos('false', seg) = 1 then begin OutVal := False; Result := True; Exit; end;
+  Result := False;
+end;
+
+var
+  HaveOldConfig: Boolean;
+  OldCountry, OldListing: string;
+  OldAllow: Boolean;
+  PrevDir: string;
+
+function TryGetPrevAppDir(): Boolean;
+begin
+  Result := RegReadStrAnyView(HKLM, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
+  if not Result then
+    Result := RegReadStrAnyView(HKCU, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
+  if (not Result) and DirExists(ExpandConstant('{pf}\') + '{#MyAppName}') then
+  begin
+    PrevDir := ExpandConstant('{pf}\') + '{#MyAppName}';
+    Result := True;
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+var PrevCfg, J: string;
+begin
+  HaveOldConfig := False;
+  OldCountry := '';
+  OldListing := '';
+  OldAllow := False;
+  PrevDir := '';
+
+  if TryGetPrevAppDir() then
+  begin
+    PrevCfg := PrevDir + '\config\config.json';
+    if FileExists(PrevCfg) and LoadStringFromFileSafe(PrevCfg, J) then
+    begin
+      if JsonExtractStr(J, 'country', OldCountry) then ;
+      if JsonExtractStr(J, 'listing_type', OldListing) then ;
+      if not JsonExtractBool(J, 'allow_no_stock', OldAllow) then OldAllow := False;
+      HaveOldConfig := (Length(OldCountry) > 0) and (Length(OldListing) > 0);
+    end;
+  end;
+
+  Result := True;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  if (PageID = wpInstalling) or (PageID = wpFinished) then
+    Result := False
+  else
+    Result := True;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   PaisSel, ListadoSelUpper, AllowStr: string;
-  FJson, ConfJson, Cmd, Params: string;
-  ResultCode: Integer;
-  ConfigFolder: string;
-  CotizadorPath: string;
+  ConfigFolder, FJson, ConfJson, OldConfigPath: string;
 begin
+  if CurStep = ssInstall then
+  begin
+    if PrevDir <> '' then
+    begin
+      OldConfigPath := PrevDir + '\config';
+      if DirExists(OldConfigPath) then
+        DeleteTreeForce(OldConfigPath);
+    end;
+  end;
+
   if CurStep = ssPostInstall then
   begin
-    case cbPais.ItemIndex of
-      1: PaisSel := 'PERU';
-      2: PaisSel := 'VENEZUELA';
-      else PaisSel := 'PARAGUAY';
-    end;
-
-    case cbListado.ItemIndex of
-      0: ListadoSelUpper := 'PRODUCTOS';
-      1: ListadoSelUpper := 'PRESENTACIONES';
-      else ListadoSelUpper := 'AMBOS';
-    end;
-
-    if chkNoStock.Checked then
-      AllowStr := 'true'
+    if HaveOldConfig then
+    begin
+      PaisSel := UpperCase(OldCountry);
+      ListadoSelUpper := UpperCase(OldListing);
+      if OldAllow then AllowStr := 'true' else AllowStr := 'false';
+    end
     else
+    begin
+      PaisSel := 'PARAGUAY';
+      ListadoSelUpper := 'AMBOS';
       AllowStr := 'false';
+    end;
 
     ConfigFolder := ExpandConstant('{app}\config');
     ForceDir(ConfigFolder);
@@ -228,142 +274,123 @@ begin
     if not SaveStringToFile(FJson, ConfJson, False) then
       MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
-    // Oculta y marca como sistema la carpeta/archivo de config
     SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-
-    // Si existe manifiesto de updater, también ocultarlo
-    CotizadorPath := ConfigFolder + '\cotizador.json';
-    if FileExists(CotizadorPath) then
-      SetFileAttributes(CotizadorPath, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-
-    // Endurecer permisos mínimos (lectura para Users)
-    Cmd := ExpandConstant('{cmd}');
-    Params := '/c icacls "' + FJson + '" /inheritance:r /grant:r "SYSTEM":F "Administrators":F "Users":R';
-    Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if FileExists(ConfigFolder + '\cotizador.json') then
+      SetFileAttributes(ConfigFolder + '\cotizador.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
   end;
 end;
 
-// ========= Desinstalación =========
+var
+  UninstForm: TSetupForm;
+  chkDelConfig, chkDelDocs: TNewCheckBox;
+  btnOK, btnCancel: TNewButton;
+  lblMsg: TNewStaticText;
+  GDelConfig, GDelDocs: Boolean;
 
 function ShowUninstallOptionsDialog(): Boolean;
-var
-  W, H, BtnW, BtnH, M, Sp: Integer;
 begin
-  Result := False;
-
-  UninstForm := CreateCustomForm();
-  UninstForm.Caption := 'Eliminar datos del usuario';
-  W := ScaleX(520);
-  H := ScaleY(180);
-  BtnW := ScaleX(100);
-  BtnH := ScaleY(23);
-  M := ScaleX(12);
-  Sp := ScaleY(10);
-
-  UninstForm.ClientWidth := W;
-  UninstForm.ClientHeight := H;
-  UninstForm.Position := poScreenCenter;
-
-  lblMsg := TNewStaticText.Create(UninstForm);
-  lblMsg.Parent := UninstForm;
-  lblMsg.Left := M;
-  lblMsg.Top := M;
-  lblMsg.Width := W - 2*M;
-  lblMsg.AutoSize := False;
-  lblMsg.WordWrap := True;
-  lblMsg.Caption :=
-    'Seleccione qué desea borrar además de los archivos instalados:' + #13#10 +
-    '• Carpeta "config" de la aplicación (archivos de configuración ocultos).' + #13#10 +
-    '• Carpeta "Documentos\Cotizaciones" (data, cotizaciones y logs).';
-
-  chkDelConfig := TNewCheckBox.Create(UninstForm);
-  chkDelConfig.Parent := UninstForm;
-  chkDelConfig.Caption := 'Borrar carpeta de configuración (config) en {app}';
-  chkDelConfig.Left := M;
-  chkDelConfig.Top := lblMsg.Top + ScaleY(60);
-  chkDelConfig.Width := W - 2*M;
-  chkDelConfig.Checked := True;  // por defecto, borrar config
-
-  chkDelDocs := TNewCheckBox.Create(UninstForm);
-  chkDelDocs.Parent := UninstForm;
-  chkDelDocs.Caption := 'Borrar "{userdocs}\Cotizaciones" (incluye data, cotizaciones y logs)';
-  chkDelDocs.Left := M;
-  chkDelDocs.Top := chkDelConfig.Top + ScaleY(24);
-  chkDelDocs.Width := W - 2*M;
-  chkDelDocs.Checked := False;   // por defecto, conservar datos de usuario
-
-  btnOK := TNewButton.Create(UninstForm);
-  btnOK.Parent := UninstForm;
-  btnOK.Caption := SetupMessage(msgButtonOK);
-  btnOK.ModalResult := mrOk;
-  btnOK.Left := W - M - BtnW*2 - ScaleX(8);
-  btnOK.Top := H - M - BtnH;
-  btnOK.Width := BtnW;
-  btnOK.Height := BtnH;
-
-  btnCancel := TNewButton.Create(UninstForm);
-  btnCancel.Parent := UninstForm;
-  btnCancel.Caption := SetupMessage(msgButtonCancel);
-  btnCancel.ModalResult := mrCancel;
-  btnCancel.Left := W - M - BtnW;
-  btnCancel.Top := H - M - BtnH;
-  btnCancel.Width := BtnW;
-  btnCancel.Height := BtnH;
-
-  if UninstForm.ShowModal() = mrOk then
+  if UninstallSilent then
   begin
-    GDelConfig := chkDelConfig.Checked;
-    GDelDocs := chkDelDocs.Checked;
+    GDelConfig := False;
+    GDelDocs := False;
     Result := True;
   end
   else
-    Result := False;  // usuario canceló -> abortar desinstalación
+  begin
+    Result := False;
+    UninstForm := CreateCustomForm();
+    UninstForm.Caption := 'Eliminar datos del usuario';
+    UninstForm.ClientWidth := ScaleX(520);
+    UninstForm.ClientHeight := ScaleY(180);
+    UninstForm.Position := poScreenCenter;
+
+    lblMsg := TNewStaticText.Create(UninstForm);
+    lblMsg.Parent := UninstForm;
+    lblMsg.Left := ScaleX(12);
+    lblMsg.Top := ScaleY(12);
+    lblMsg.Width := UninstForm.ClientWidth - ScaleX(24);
+    lblMsg.AutoSize := False;
+    lblMsg.WordWrap := True;
+    lblMsg.Caption :=
+      'Seleccione qué desea borrar además de los archivos instalados:' + #13#10 +
+      '• Carpeta "config" de la aplicación (archivos de configuración).' + #13#10 +
+      '• Carpeta "Documentos\Cotizaciones" (data, cotizaciones y logs).';
+
+    chkDelConfig := TNewCheckBox.Create(UninstForm);
+    chkDelConfig.Parent := UninstForm;
+    chkDelConfig.Caption := 'Borrar carpeta de configuración (config) en {app}';
+    chkDelConfig.Left := ScaleX(12);
+    chkDelConfig.Top := lblMsg.Top + ScaleY(60);
+    chkDelConfig.Width := UninstForm.ClientWidth - ScaleX(24);
+    chkDelConfig.Checked := True;
+
+    chkDelDocs := TNewCheckBox.Create(UninstForm);
+    chkDelDocs.Parent := UninstForm;
+    chkDelDocs.Caption := 'Borrar "{userdocs}\Cotizaciones" (incluye data, cotizaciones y logs)';
+    chkDelDocs.Left := ScaleX(12);
+    chkDelDocs.Top := chkDelConfig.Top + ScaleY(24);
+    chkDelDocs.Width := UninstForm.ClientWidth - ScaleX(24);
+    chkDelDocs.Checked := False;
+
+    btnOK := TNewButton.Create(UninstForm);
+    btnOK.Parent := UninstForm;
+    btnOK.Caption := SetupMessage(msgButtonOK);
+    btnOK.ModalResult := mrOk;
+    btnOK.Left := UninstForm.ClientWidth - ScaleX(12) - ScaleX(200);
+    btnOK.Top := UninstForm.ClientHeight - ScaleY(12) - ScaleY(23);
+    btnOK.Width := ScaleX(100);
+
+    btnCancel := TNewButton.Create(UninstForm);
+    btnCancel.Parent := UninstForm;
+    btnCancel.Caption := SetupMessage(msgButtonCancel);
+    btnCancel.ModalResult := mrCancel;
+    btnCancel.Left := UninstForm.ClientWidth - ScaleX(12) - ScaleX(100);
+    btnCancel.Top := btnOK.Top;
+    btnCancel.Width := ScaleX(100);
+
+    if UninstForm.ShowModal() = mrOk then
+    begin
+      GDelConfig := chkDelConfig.Checked;
+      GDelDocs := chkDelDocs.Checked;
+      Result := True;
+    end
+    else
+      Result := False;
+  end;
 end;
 
 function InitializeUninstall(): Boolean;
-var
-  AppPath: string;
+var AppPath: string;
 begin
-  // Limpia atributos para que el uninstaller pueda borrar sin trabas
   AppPath := ExpandConstant('{app}');
   AttribClearRecursive(AppPath);
-
-  // Muestra diálogo de opciones (casillas)
   if not ShowUninstallOptionsDialog() then
   begin
-    Result := False;  // aborta desinstalación si cancela
+    Result := False;
     Exit;
   end;
-
   Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  CfgPath, DocsPath: string;
+var CfgPath, DocsPath: string;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    // Borrar config si el usuario lo marcó
     if GDelConfig then
     begin
       CfgPath := ExpandConstant('{app}\config');
       DeleteTreeForce(CfgPath);
     end;
-
-    // Borrar Documentos\Cotizaciones si el usuario lo marcó
     if GDelDocs then
     begin
       DocsPath := ExpandConstant('{userdocs}\Cotizaciones');
       DeleteTreeForce(DocsPath);
     end;
-
-    // Intentar quitar la carpeta de la app si quedó vacía
-    if RemoveDir(ExpandConstant('{app}')) then
-      Log('Carpeta {app} eliminada (vacía).')
-    else
-      Log('Carpeta {app} no se pudo eliminar (puede contener archivos no controlados o estar en uso).');
+    RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
+
 
