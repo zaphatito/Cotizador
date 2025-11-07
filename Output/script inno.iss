@@ -5,7 +5,7 @@
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -33,6 +33,11 @@ CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
 
+WizardStyle=modern
+; (Opcional) Imágenes de asistente:
+; WizardImageFile={#ProjectRoot}\templates\wizard-large.bmp
+; WizardSmallImageFile={#ProjectRoot}\templates\wizard-small.bmp
+
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
@@ -43,7 +48,9 @@ Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
 
 [Files]
+; Bundle generado por PyInstaller
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; (Opcional) Requirements para referencia
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
 [Icons]
@@ -105,7 +112,7 @@ begin
 end;
 
 var
-  ; ====== Páginas de instalación (país/listado/stock) ======
+  // ====== Páginas de instalación (país/listado/stock) ======
   PaisPage: TWizardPage;
   cbPais: TNewComboBox;
 
@@ -115,19 +122,19 @@ var
   StockPage: TWizardPage;
   chkNoStock: TNewCheckBox;
 
-  ; ====== Formulario del desinstalador (casillas para borrar) ======
+  // ====== Formulario del desinstalador (casillas para borrar) ======
   UninstForm: TSetupForm;
   chkDelConfig: TNewCheckBox;
   chkDelDocs: TNewCheckBox;
   btnOK, btnCancel: TNewButton;
   lblMsg: TNewStaticText;
 
-  ; Flags elegidos por el usuario en desinstalación
+  // Flags elegidos por el usuario en desinstalación
   GDelConfig, GDelDocs: Boolean;
 
 procedure InitializeWizard;
 begin
-  ; -------- Página País --------
+  // -------- Página País --------
   PaisPage := CreateCustomPage(
     wpSelectDir,
     'País por defecto',
@@ -144,7 +151,7 @@ begin
   cbPais.Items.Add('Venezuela');
   cbPais.ItemIndex := 0;
 
-  ; -------- Página Listado --------
+  // -------- Página Listado --------
   ListadoPage := CreateCustomPage(
     PaisPage.ID,
     'Tipo de listado',
@@ -161,7 +168,7 @@ begin
   cbListado.Items.Add('Ambos');
   cbListado.ItemIndex := 2;
 
-  ; -------- Página Stock --------
+  // -------- Página Stock --------
   StockPage := CreateCustomPage(
     ListadoPage.ID,
     'Permitir sin stock',
@@ -221,23 +228,23 @@ begin
     if not SaveStringToFile(FJson, ConfJson, False) then
       MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
-    ; Oculta y marca como sistema la carpeta/archivo de config
+    // Oculta y marca como sistema la carpeta/archivo de config
     SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
 
-    ; Si existe manifiesto de updater, también ocultarlo
+    // Si existe manifiesto de updater, también ocultarlo
     CotizadorPath := ConfigFolder + '\cotizador.json';
     if FileExists(CotizadorPath) then
       SetFileAttributes(CotizadorPath, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
 
-    ; Endurecer permisos mínimos (lectura para Users)
+    // Endurecer permisos mínimos (lectura para Users)
     Cmd := ExpandConstant('{cmd}');
     Params := '/c icacls "' + FJson + '" /inheritance:r /grant:r "SYSTEM":F "Administrators":F "Users":R';
     Exec(Cmd, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
 
-; ========= Desinstalación =========
+// ========= Desinstalación =========
 
 function ShowUninstallOptionsDialog(): Boolean;
 var
@@ -268,7 +275,7 @@ begin
   lblMsg.Caption :=
     'Seleccione qué desea borrar además de los archivos instalados:' + #13#10 +
     '• Carpeta "config" de la aplicación (archivos de configuración ocultos).' + #13#10 +
-    '• Carpeta "Documentos\\Cotizaciones" (data, cotizaciones y logs).';
+    '• Carpeta "Documentos\Cotizaciones" (data, cotizaciones y logs).';
 
   chkDelConfig := TNewCheckBox.Create(UninstForm);
   chkDelConfig.Parent := UninstForm;
@@ -276,7 +283,7 @@ begin
   chkDelConfig.Left := M;
   chkDelConfig.Top := lblMsg.Top + ScaleY(60);
   chkDelConfig.Width := W - 2*M;
-  chkDelConfig.Checked := True;  ; <-- por defecto, borrar config
+  chkDelConfig.Checked := True;  // por defecto, borrar config
 
   chkDelDocs := TNewCheckBox.Create(UninstForm);
   chkDelDocs.Parent := UninstForm;
@@ -284,7 +291,7 @@ begin
   chkDelDocs.Left := M;
   chkDelDocs.Top := chkDelConfig.Top + ScaleY(24);
   chkDelDocs.Width := W - 2*M;
-  chkDelDocs.Checked := False;   ; <-- por defecto, conservar datos de usuario
+  chkDelDocs.Checked := False;   // por defecto, conservar datos de usuario
 
   btnOK := TNewButton.Create(UninstForm);
   btnOK.Parent := UninstForm;
@@ -311,23 +318,21 @@ begin
     Result := True;
   end
   else
-  begin
-    Result := False;  ; usuario canceló -> abortar desinstalación
-  end;
+    Result := False;  // usuario canceló -> abortar desinstalación
 end;
 
 function InitializeUninstall(): Boolean;
 var
   AppPath: string;
 begin
-  ; Limpia atributos para que el uninstaller pueda borrar sin trabas
+  // Limpia atributos para que el uninstaller pueda borrar sin trabas
   AppPath := ExpandConstant('{app}');
   AttribClearRecursive(AppPath);
 
-  ; Muestra diálogo de opciones (casillas)
+  // Muestra diálogo de opciones (casillas)
   if not ShowUninstallOptionsDialog() then
   begin
-    Result := False;  ; aborta desinstalación si cancela
+    Result := False;  // aborta desinstalación si cancela
     Exit;
   end;
 
@@ -340,28 +345,25 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    ; Borrar config si el usuario lo marcó
+    // Borrar config si el usuario lo marcó
     if GDelConfig then
     begin
       CfgPath := ExpandConstant('{app}\config');
       DeleteTreeForce(CfgPath);
     end;
 
-    ; Borrar Documentos\Cotizaciones si el usuario lo marcó
+    // Borrar Documentos\Cotizaciones si el usuario lo marcó
     if GDelDocs then
     begin
       DocsPath := ExpandConstant('{userdocs}\Cotizaciones');
       DeleteTreeForce(DocsPath);
     end;
 
-    ; Intentar quitar la carpeta de la app si quedó vacía
+    // Intentar quitar la carpeta de la app si quedó vacía
     if RemoveDir(ExpandConstant('{app}')) then
       Log('Carpeta {app} eliminada (vacía).')
     else
       Log('Carpeta {app} no se pudo eliminar (puede contener archivos no controlados o estar en uso).');
   end;
 end;
-
-
-
 
