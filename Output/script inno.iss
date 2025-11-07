@@ -19,18 +19,23 @@ AppId={{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 VersionInfoVersion={#MyAppVersion}
-DefaultDirName={pf}\{#MyAppName}
+; Usar forma "auto" para Program Files
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
 OutputDir={#ProjectRoot}\Output
 Compression=lzma
 SolidCompression=yes
+; Mostrar solo Instalando/Finalización
 DisableWelcomePage=yes
 DisableDirPage=yes
 DisableProgramGroupPage=yes
-; Mostramos solo Instalando/Finalización
 WizardStyle=modern
-ArchitecturesInstallIn64BitMode=x64
+; Arquitecturas modernas
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+; Evita warning por escribir en {userdocs} con admin
+UsedUserAreasWarning=no
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
@@ -119,6 +124,13 @@ begin
     if Copy(S, i, L) = SubStr then begin Result := i; Exit; end;
 end;
 
+function TrimQuotes(const S: string): string;
+begin
+  Result := S;
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result)-2);
+end;
+
 function LoadStringFromFileSafe(const FileName: string; var S: string): Boolean;
 var
   A: AnsiString;
@@ -128,21 +140,12 @@ begin
     Result := False;
     Exit;
   end;
-
-  // LoadStringFromFile exige var A: AnsiString en Unicode
   Result := LoadStringFromFile(FileName, A);
   if Result then
-    S := String(A)  // convertir explícitamente a UnicodeString
+    S := String(A)
   else
     S := '';
 end;
-function TrimQuotes(const S: string): string;
-begin
-  Result := S;
-  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
-    Result := Copy(Result, 2, Length(Result)-2);
-end;
-
 
 function JsonExtractStr(const Json, Key: string; var OutVal: string): Boolean;
 var LJson, LKey: string; p, q, r: Integer;
@@ -187,9 +190,9 @@ begin
   Result := RegReadStrAnyView(HKLM, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
   if not Result then
     Result := RegReadStrAnyView(HKCU, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
-  if (not Result) and DirExists(ExpandConstant('{pf}\') + '{#MyAppName}') then
+  if (not Result) and DirExists(ExpandConstant('{autopf}\') + '{#MyAppName}') then
   begin
-    PrevDir := ExpandConstant('{pf}\') + '{#MyAppName}';
+    PrevDir := ExpandConstant('{autopf}\') + '{#MyAppName}';
     Result := True;
   end;
 end;
@@ -391,6 +394,4 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
-
-
 

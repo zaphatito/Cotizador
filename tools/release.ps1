@@ -117,7 +117,10 @@ Push-Location $ProjectRoot
 Pop-Location
 
 # 5) Compilar instalador (ISCC)
-& "$ISCC" "$issFull" | Write-Host
+& "$ISCC" "$issFull"
+if ($LASTEXITCODE -ne 0) {
+  throw "Inno Setup falló con código $LASTEXITCODE. Revisa el log anterior."
+}
 
 # 6) SHA256 + actualizar manifest (URL -> media.githubusercontent.com para LFS)
 $setupName = "Setup_SistemaCotizaciones_{0}.exe" -f $next
