@@ -5,7 +5,7 @@
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "1.1.3"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -19,23 +19,30 @@ AppId={{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 VersionInfoVersion={#MyAppVersion}
+
 ; Usar forma "auto" para Program Files
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
+
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
 OutputDir={#ProjectRoot}\Output
 Compression=lzma
 SolidCompression=yes
-; Mostrar solo Instalando/Finalización
-DisableWelcomePage=yes
-DisableDirPage=yes
-DisableProgramGroupPage=yes
+
+; Instalación NUEVA: mostrar todas las páginas
+DisableWelcomePage=no
+DisableDirPage=no
+DisableProgramGroupPage=no
 WizardStyle=modern
+
 ; Arquitecturas modernas
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+
 ; Evita warning por escribir en {userdocs} con admin
 UsedUserAreasWarning=no
+
+; Upgrades amables
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
@@ -64,7 +71,8 @@ Name: "{group}\Carpeta de Logs"; Filename: "{cmd}"; Parameters: "/c start """" "
 Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Solo ejecutar al finalizar si es instalación NUEVA (no reinstalación silenciosa)
+Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstall
 
 [Code]
 
@@ -184,6 +192,17 @@ var
   OldCountry, OldListing: string;
   OldAllow: Boolean;
   PrevDir: string;
+  IsReinstall: Boolean;
+
+  // Controles de las "3 ventanas viejas"
+  PaisPage: TWizardPage;
+  cbPais: TNewComboBox;
+
+  ListadoPage: TWizardPage;
+  cbListado: TNewComboBox;
+
+  StockPage: TWizardPage;
+  chkNoStock: TNewCheckBox;
 
 function TryGetPrevAppDir(): Boolean;
 begin
@@ -206,7 +225,9 @@ begin
   OldAllow := False;
   PrevDir := '';
 
-  if TryGetPrevAppDir() then
+  IsReinstall := TryGetPrevAppDir();
+
+  if IsReinstall then
   begin
     PrevCfg := PrevDir + '\config\config.json';
     if FileExists(PrevCfg) and LoadStringFromFileSafe(PrevCfg, J) then
@@ -221,12 +242,77 @@ begin
   Result := True;
 end;
 
+function IsFreshInstall(): Boolean;
+begin
+  Result := not IsReinstall;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  if (PageID = wpInstalling) or (PageID = wpFinished) then
-    Result := False
+  { En REINSTALACIÓN: ocultar todo excepto Instalando y Finalización }
+  if IsReinstall then
+  begin
+    if (PageID = wpInstalling) or (PageID = wpFinished) then
+      Result := False
+    else
+      Result := True;
+  end
   else
-    Result := True;
+    Result := False;  { Instalación nueva: no saltar páginas }
+end;
+
+procedure InitializeWizard;
+begin
+  if IsReinstall then
+    exit;  { No crear páginas personalizadas en reinstalación }
+
+  { === País === }
+  PaisPage := CreateCustomPage(
+    wpSelectDir,
+    'País por defecto',
+    'Elija el país con el que operará el sistema (afecta moneda y reglas de cantidad).'
+  );
+  cbPais := TNewComboBox.Create(PaisPage.Surface);
+  cbPais.Parent := PaisPage.Surface;
+  cbPais.Left := ScaleX(0);
+  cbPais.Top := ScaleY(8);
+  cbPais.Width := PaisPage.SurfaceWidth;
+  cbPais.Style := csDropDownList;
+  cbPais.Items.Add('Paraguay');
+  cbPais.Items.Add('Perú');
+  cbPais.Items.Add('Venezuela');
+  cbPais.ItemIndex := 0;
+
+  { === Tipo de listado === }
+  ListadoPage := CreateCustomPage(
+    PaisPage.ID,
+    'Tipo de listado',
+    'Elija qué tipo de ítems mostrará el listado/autocompletar.'
+  );
+  cbListado := TNewComboBox.Create(ListadoPage.Surface);
+  cbListado.Parent := ListadoPage.Surface;
+  cbListado.Left := ScaleX(0);
+  cbListado.Top := ScaleY(8);
+  cbListado.Width := ListadoPage.SurfaceWidth;
+  cbListado.Style := csDropDownList;
+  cbListado.Items.Add('Productos');
+  cbListado.Items.Add('Presentaciones');
+  cbListado.Items.Add('Ambos');
+  cbListado.ItemIndex := 2;
+
+  { === Permitir sin stock === }
+  StockPage := CreateCustomPage(
+    ListadoPage.ID,
+    'Permitir sin stock',
+    'Puede permitir listar y cotizar productos/presentaciones sin stock disponible.'
+  );
+  chkNoStock := TNewCheckBox.Create(StockPage.Surface);
+  chkNoStock.Parent := StockPage.Surface;
+  chkNoStock.Caption := 'Permitir listar y cotizar sin stock';
+  chkNoStock.Left := ScaleX(0);
+  chkNoStock.Top := ScaleY(8);
+  chkNoStock.Width := StockPage.SurfaceWidth;
+  chkNoStock.Checked := False;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -236,7 +322,7 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    if PrevDir <> '' then
+    if IsReinstall and (PrevDir <> '') then
     begin
       OldConfigPath := PrevDir + '\config';
       if DirExists(OldConfigPath) then
@@ -254,9 +340,32 @@ begin
     end
     else
     begin
-      PaisSel := 'PARAGUAY';
-      ListadoSelUpper := 'AMBOS';
-      AllowStr := 'false';
+      if not IsReinstall then
+      begin
+        { Tomar de los controles de las 3 páginas }
+        case cbPais.ItemIndex of
+          1: PaisSel := 'PERU';
+          2: PaisSel := 'VENEZUELA';
+        else
+          PaisSel := 'PARAGUAY';
+        end;
+
+        case cbListado.ItemIndex of
+          0: ListadoSelUpper := 'PRODUCTOS';
+          1: ListadoSelUpper := 'PRESENTACIONES';
+        else
+          ListadoSelUpper := 'AMBOS';
+        end;
+
+        if chkNoStock.Checked then AllowStr := 'true' else AllowStr := 'false';
+      end
+      else
+      begin
+        { Reinstalación sin config previa detectable: defaults seguros }
+        PaisSel := 'PARAGUAY';
+        ListadoSelUpper := 'AMBOS';
+        AllowStr := 'false';
+      end;
     end;
 
     ConfigFolder := ExpandConstant('{app}\config');
@@ -283,6 +392,10 @@ begin
       SetFileAttributes(ConfigFolder + '\cotizador.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
   end;
 end;
+
+{ =========================
+  === Desinstalador UI ===
+  ========================= }
 
 var
   UninstForm: TSetupForm;
@@ -394,5 +507,4 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
-
 
