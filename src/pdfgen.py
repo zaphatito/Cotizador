@@ -6,7 +6,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE
-from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, TEMPLATES_DIR, resolve_font_asset
+from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, resolve_font_asset, DATA_DIR
 from .utils  import fmt_money_pdf, nz
 from .pricing import cantidad_para_mostrar
 
@@ -155,8 +155,8 @@ def _register_lufga_if_available() -> tuple[str, str]:
     return "Helvetica", "Helvetica-Bold"
 
 def _next_quote_number(prefix: str) -> str:
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
-    seq_file = os.path.join(TEMPLATES_DIR, f"seq_{prefix}.txt")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    seq_file = os.path.join(DATA_DIR, f"seq_{prefix}.txt")
     n = 0
     try:
         if os.path.exists(seq_file):

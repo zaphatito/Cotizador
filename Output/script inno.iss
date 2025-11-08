@@ -5,7 +5,7 @@
 #define MyAppExeName "SistemaCotizaciones.exe"
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.1.2"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -394,4 +394,5 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
