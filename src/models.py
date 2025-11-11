@@ -100,16 +100,6 @@ class ItemsModel(QAbstractTableModel):
         if index.column() == 2:
             return base | Qt.ItemIsEditable  # cantidad
 
-        if index.column() == 3:
-            # La vista usa NoEditTriggers, pero mantenemos el flag por compatibilidad con delegate/menú
-            try:
-                it = self._items[index.row()]
-                cat = (it.get("categoria") or "").upper()
-            except Exception:
-                cat = ""
-            if CAN_EDIT_UNIT_PRICE or cat == "SERVICIO" or cat == "BOTELLAS":
-                return base | Qt.ItemIsEditable
-
         return base
 
     def data(self, index, role=Qt.DisplayRole):

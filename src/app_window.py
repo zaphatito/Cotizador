@@ -201,7 +201,7 @@ class SistemaCotizaciones(QMainWindow):
         self.table = QTableView(); self.model = ItemsModel(self.items); self.table.setModel(self.model)
 
         # 🔒 SIN edición en celdas: todo por diálogo
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
