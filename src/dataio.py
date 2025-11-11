@@ -9,6 +9,7 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
     cols_lower = {str(c).strip().lower(): c for c in df.columns}
 
     def col(*cands):
+        # Busca coincidencia exacta (normalizada a lower), luego por "contiene"
         for cnd in cands:
             cnd_l = cnd.lower()
             if cnd_l in cols_lower:
@@ -19,14 +20,17 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
                     return orig
         return None
 
-    col_codigo = col("codigo", "código", "cod.", "id", "referencia")
-    col_nombre = col("nombre", "descripcion", "descripción")
-    col_depto = col("departamento", "categoria", "categoría", "rubro")
-    col_genero = col("genero", "género")
-    col_cant   = col("cantidad disponible", "cantidad", "stock", "existencia")
-    col_p_venta= col("precio venta", "p. venta", "precio", "precio unitario")
-    col_p_oferta=col("precio oferta", "p. oferta", "oferta")
-    col_p_min  = col("precio minimo", "precio mínimo", "minimo", "mínimo")
+    # Encabezados típicos + los que nos diste
+    col_codigo  = col("codigo", "código", "cod.", "id", "referencia")
+    col_nombre  = col("nombre", "descripcion", "descripción")
+    col_depto   = col("departamento", "categoria", "categoría", "rubro")
+    col_genero  = col("genero", "género")
+    col_cant    = col("cantidad disponible", "cantidad", "stock", "existencia")
+    # Precio Máximo = precio_venta base
+    col_p_venta = col("precio maximo", "precio máximo",
+                      "precio venta", "p. venta", "precio", "precio unitario")
+    col_p_oferta= col("precio oferta", "p. oferta", "oferta")
+    col_p_min   = col("precio minimo", "precio mínimo", "minimo", "mínimo")
 
     records = []
     for _, row in df.iterrows():
@@ -37,10 +41,13 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
 
         depto_raw = str(row.get(col_depto, "")).strip()
         genero_raw = str(row.get(col_genero, "")).strip()
-        cant = int(to_float(row.get(col_cant, 0) if col_cant else 0, 0))
-        p_venta = to_float(row.get(col_p_venta, 0) if col_p_venta else 0, 0.0)
-        p_oferta= to_float(row.get(col_p_oferta, 0) if col_p_oferta else 0, 0.0)
-        p_min   = to_float(row.get(col_p_min, 0) if col_p_min else 0, 0.0)
+
+        # ⬅️ PRESERVAR DECIMALES: NO convertir a int
+        cant = to_float(row.get(col_cant, 0) if col_cant else 0, 0.0)
+
+        p_venta  = to_float(row.get(col_p_venta, 0)  if col_p_venta  else 0, 0.0)
+        p_oferta = to_float(row.get(col_p_oferta, 0) if col_p_oferta else 0, 0.0)
+        p_min    = to_float(row.get(col_p_min, 0)    if col_p_min    else 0, 0.0)
 
         depto_up = (depto_raw or "").upper()
 
@@ -50,10 +57,11 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
             "categoria": depto_up,
             "departamento_excel": depto_raw,
             "genero": genero_raw,
+            # ⬅️ Guardamos float para que llegue con decimales al Listado
             "cantidad_disponible": cant,
-            "precio_venta": p_venta,
-            "precio_oferta_base": p_oferta,
-            "precio_minimo_base": p_min,
+            "precio_venta": p_venta,                # = Precio Maximo
+            "precio_oferta_base": p_oferta,         # = Precio Oferta
+            "precio_minimo_base": p_min,            # = Precio Minimo
             "__fuente": fuente,
         })
 
@@ -77,22 +85,24 @@ def cargar_excel_productos_desde_inventarios(data_dir: str) -> pd.DataFrame:
     compat_records = []
     for _, r in df.iterrows():
         cat = (r["categoria"] or "").upper()
+
+        # ⬅️ Mantener decimales en el catálogo también
         base = {
             "id": r["id"],
             "nombre": r["nombre"],
             "categoria": r["categoria"],
             "genero": r.get("genero", ""),
-            "cantidad_disponible": int(nz(r.get("cantidad_disponible"), 0)),
+            "cantidad_disponible": nz(r.get("cantidad_disponible"), 0.0),  # float, no int()
         }
 
         if cat == "BOTELLAS":
-            base["precio_unidad"] = nz(r.get("precio_venta"))
-            base[">12 unidades"]  = nz(r.get("precio_oferta_base", r.get("precio_venta")))
-            base[">100 unidades"] = nz(r.get("precio_minimo_base", r.get("precio_oferta_base", r.get("precio_venta"))))
+            base["precio_unidad"]   = nz(r.get("precio_venta"))
+            base[">12 unidades"]    = nz(r.get("precio_oferta_base", r.get("precio_venta")))
+            base[">100 unidades"]   = nz(r.get("precio_minimo_base", r.get("precio_oferta_base", r.get("precio_venta"))))
             base["ml"] = ""
         elif cat in CATS:
             base["precio_base_50g"] = nz(r.get("precio_venta"))
-            base["precio_gramo"] = 0.0
+            base["precio_gramo"]    = 0.0
             base["ml"] = ""
         else:
             base["precio_unitario"] = nz(r.get("precio_venta"))

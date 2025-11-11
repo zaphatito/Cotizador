@@ -1,4 +1,3 @@
-# src/app_window.py
 from __future__ import annotations
 import os, re, datetime
 import pandas as pd
@@ -11,24 +10,19 @@ from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QI
 from PySide6.QtCore import Qt, QTimer, QUrl, QModelIndex, QStringListModel
 
 from .paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_country_asset, resolve_template_path
-
 from .config import (
     APP_COUNTRY, id_label_for_country, listing_allows_products,
-    listing_allows_presentations, ALLOW_NO_STOCK, COUNTRY_CODE
+    listing_allows_presentations, ALLOW_NO_STOCK, COUNTRY_CODE, CATS
 )
-
 from .utils import nz, fmt_money_ui
-from .pricing import precio_unitario_por_categoria, reglas_cantidad, cantidad_para_mostrar
+from .pricing import precio_unitario_por_categoria, cantidad_para_mostrar
 from .presentations import map_pc_to_bottle_code, extract_ml_from_text, ml_from_pres_code_norm
-from .widgets import SelectorTablaSimple, ListadoProductosDialog, CustomProductDialog
-from .models import ItemsModel
+from .widgets import SelectorTablaSimple, ListadoProductosDialog, CustomProductDialog, show_price_picker
+from .models import ItemsModel, CAN_EDIT_UNIT_PRICE
 from .pdfgen import generar_pdf
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
-
-# País que permite editar precio unitario directamente
-CAN_EDIT_UNIT_PRICE = (APP_COUNTRY == "PARAGUAY")
 
 
 def build_completer_strings(productos, botellas_pc):
@@ -37,7 +31,6 @@ def build_completer_strings(productos, botellas_pc):
         for p in productos:
             cat = p.get("categoria", ""); gen = p.get("genero","")
             sugs.append(f"{p['id']} - {p['nombre']} - {cat}" + (f" - {gen}" if gen else ""))
-
     if listing_allows_presentations():
         for pc in botellas_pc:
             sugs.append(f"{pc.get('id')} - Presentación (PC) - {pc.get('nombre','')}")
@@ -78,7 +71,7 @@ class SistemaCotizaciones(QMainWindow):
         self._update_title_with_client(self.entry_cliente.text())
         self._build_completer()
 
-        # 👉 Conectar a la señal para enfocar/scroll al último ítem agregado (venga de donde venga)
+        # Enfocar último ítem al agregar
         self.model.item_added.connect(self._focus_last_row)
 
     def _center_on_screen(self):
@@ -95,13 +88,12 @@ class SistemaCotizaciones(QMainWindow):
             self._shown_once = True
             self._center_on_screen()
 
-    # === Helper: enfoca y desplaza al último item ===
+    # === Helper: enfoca y desplaza al último item
     def _focus_last_row(self, row_index: int):
         try:
             r = row_index if isinstance(row_index, int) else (self.model.rowCount() - 1)
             if r < 0: return
             idx0 = self.model.index(r, 0)
-            # Seleccionar fila, desplazar y (si no hay modal) poner foco en la tabla
             self.table.selectRow(r)
             self.table.setCurrentIndex(idx0)
             self.table.scrollTo(idx0, QAbstractItemView.PositionAtBottom)
@@ -123,7 +115,7 @@ class SistemaCotizaciones(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
 
-    # ===== Helpers de estilo (responsive, sin forzar colores) =====
+    # ===== Helpers de estilo =====
     def _apply_btn_responsive(self, btn: QPushButton, min_w: int = 80, min_h: int = 28):
         sp = QSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         btn.setSizePolicy(sp)
@@ -137,10 +129,10 @@ class SistemaCotizaciones(QMainWindow):
         tbtn = QToolButton()
         tbtn.setText(text)
         tbtn.setToolTip(tooltip)
-        tbtn.setAutoRaise(True)                 # respeta tema claro/oscuro
+        tbtn.setAutoRaise(True)
         tbtn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         tbtn.setCursor(Qt.PointingHandCursor)
-        tbtn.setFixedSize(34, 34)               # cuadrado y compacto
+        tbtn.setFixedSize(34, 34)
         tbtn.clicked.connect(on_click)
         return tbtn
 
@@ -161,7 +153,7 @@ class SistemaCotizaciones(QMainWindow):
         form_cli.addRow("Teléfono:", self.entry_telefono)
         grp_cli.setLayout(form_cli); main.addWidget(grp_cli)
 
-        # --- Barra superior (como tu diseño: Cambiar, Cotizaciones, [📘], Listado)
+        # --- Barra superior
         htop = QHBoxLayout()
         btn_cambiar = QPushButton("Cambiar productos")
         self._apply_btn_responsive(btn_cambiar, 120, 36)
@@ -184,7 +176,7 @@ class SistemaCotizaciones(QMainWindow):
         htop.addWidget(btn_listado)
         main.addLayout(htop)
 
-        # --- Búsqueda (con Agregar Servicio como en tu mock)
+        # --- Búsqueda
         grp_bus = QGroupBox("Búsqueda de Productos")
         vbus = QVBoxLayout(); hbus = QHBoxLayout()
         self.entry_producto = QLineEdit()
@@ -207,9 +199,12 @@ class SistemaCotizaciones(QMainWindow):
         # --- Tabla seleccionados
         grp_tab = QGroupBox("Productos Seleccionados"); vtab = QVBoxLayout()
         self.table = QTableView(); self.model = ItemsModel(self.items); self.table.setModel(self.model)
+
+        # 🔒 SIN edición en celdas: todo por diálogo
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -220,8 +215,8 @@ class SistemaCotizaciones(QMainWindow):
 
         # Acciones del menú contextual
         self.act_edit         = QAction("Editar observación…", self);      self.act_edit.triggered.connect(self.editar_observacion)
-        self.act_edit_price   = QAction("Editar precio unitario…", self);  self.act_edit_price.triggered.connect(self.editar_precio_unitario)
-        self.act_clear_price  = QAction("Quitar reescritura de precio", self); self.act_clear_price.triggered.connect(self.quitar_reescritura_precio)
+        self.act_edit_price   = QAction("Editar precio…", self);           self.act_edit_price.triggered.connect(self.editar_precio_unitario)
+        self.act_clear_price  = QAction("Quitar precio personalizado", self); self.act_clear_price.triggered.connect(self.quitar_reescritura_precio)
         self.act_del          = QAction("Eliminar", self);                  self.act_del.triggered.connect(self.eliminar_producto)
 
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -231,7 +226,7 @@ class SistemaCotizaciones(QMainWindow):
 
         vtab.addWidget(self.table); grp_tab.setLayout(vtab); main.addWidget(grp_tab)
 
-        # --- Botonera final (responsiva, sin colores)
+        # --- Botonera final
         hact = QHBoxLayout()
         btn_prev = QPushButton("Previsualizar");      self._apply_btn_responsive(btn_prev, 120, 36); btn_prev.clicked.connect(self.previsualizar_datos)
         btn_gen  = QPushButton("Generar Cotización"); self._apply_btn_responsive(btn_gen, 140, 36); btn_gen.clicked.connect(self.generar_cotizacion)
@@ -239,7 +234,7 @@ class SistemaCotizaciones(QMainWindow):
         for w in (btn_prev, btn_gen, btn_lim): hact.addWidget(w)
         main.addLayout(hact)
 
-    # ===== Menú contextual y doble-click =====
+    # ===== Menú contextual y doble-clic =====
     def mostrar_menu_tabla(self, pos):
         index = self.table.indexAt(pos)
         if not index.isValid(): return
@@ -250,17 +245,15 @@ class SistemaCotizaciones(QMainWindow):
         item = self.items[row]
 
         menu = QMenu(self)
-
         cat = (item.get("categoria") or "").upper()
 
-        # 👉 Precio: editable siempre si es SERVICIO, o si es Paraguay
+        # Precio: siempre si es SERVICIO; o países que permiten editar
         can_edit_price = (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE
         if can_edit_price:
             menu.addAction(self.act_edit_price)
             self.act_clear_price.setEnabled(item.get("precio_override") is not None)
             menu.addAction(self.act_clear_price)
 
-        # Observación solo en BOTELLAS o SERVICIO
         if cat in ("BOTELLAS", "SERVICIO"):
             if menu.actions(): menu.addSeparator()
             menu.addAction(self.act_edit)
@@ -272,11 +265,17 @@ class SistemaCotizaciones(QMainWindow):
     def _double_click_tabla(self, index: QModelIndex):
         if not index.isValid(): return
         col = index.column()
-        if col in (0, 1):  # sólo si hace doble click en código o nombre
-            row = index.row()
-            if row < 0 or row >= len(self.items): return
-            item = self.items[row]
-            cat = (item.get("categoria") or "").upper()
+        row = index.row()
+        if row < 0 or row >= len(self.items): return
+        item = self.items[row]
+        cat = (item.get("categoria") or "").upper()
+
+        if col == 3:  # columna Precio → abrir selector modal
+            if (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE or (cat == "BOTELLAS"):
+                self._abrir_selector_precio(row)
+            return
+
+        if col in (0, 1):  # Código o Producto → Observación (solo si aplica)
             if cat in ("BOTELLAS", "SERVICIO"):
                 self._abrir_dialogo_observacion(row, item)
 
@@ -297,8 +296,6 @@ class SistemaCotizaciones(QMainWindow):
             self._agregar_por_codigo(cod)
             QTimer.singleShot(0, self.entry_producto.clear)
             if self._completer.popup(): self._completer.popup().hide()
-            # ❌ No volver a forzar foco a entry para no romper el scroll al último
-
         self._completer.activated[str].connect(add_from_completion)
 
     def _on_return_pressed(self):
@@ -313,19 +310,15 @@ class SistemaCotizaciones(QMainWindow):
                 self._agregar_por_codigo(cod)
                 QTimer.singleShot(0, self.entry_producto.clear)
                 popup.hide()
-                # ❌ No forzar foco a la caja de texto
                 return
-
         if self._suppress_next_return:
             self._suppress_next_return = False
             return
-
         text = self.entry_producto.text().strip()
         if not text: return
         cod = text.split(" - ")[0].strip()
         self._agregar_por_codigo(cod)
         self.entry_producto.clear()
-        # ❌ No forzar foco a la caja de texto
 
     # ===== Agregar producto personalizado/servicio
     def agregar_producto_personalizado(self):
@@ -346,8 +339,9 @@ class SistemaCotizaciones(QMainWindow):
             "precio": unit_price,
             "total": round(unit_price * qty, 2),
             "observacion": data.get("observacion", ""),
-            "stock_disponible": -1,  # -1 => sin chequeo
+            "stock_disponible": -1.0,  # sin chequeo (float)
             "precio_override": None,
+            "precio_tier": None,
         }
         self.model.add_item(item)
         log.info("Producto personalizado agregado: %s x%d %0.2f", item["codigo"], qty, unit_price)
@@ -370,7 +364,7 @@ class SistemaCotizaciones(QMainWindow):
                      and (b.get("categoria", "").upper() == "BOTELLAS")),
                     None
                 )
-                if bot is not None and int(nz(bot.get("cantidad_disponible"), 0)) <= 0 and not ALLOW_NO_STOCK:
+                if bot is not None and float(nz(bot.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
                     QMessageBox.warning(self, "Sin botellas", "❌ No hay botellas disponibles para esta presentación.")
                     return
                 self._selector_pc(pc); return
@@ -390,12 +384,11 @@ class SistemaCotizaciones(QMainWindow):
         if not listing_allows_products():
             QMessageBox.warning(self, "Restringido por configuración", "El tipo de listado actual no permite Productos."); return
 
-        if int(nz(prod.get("cantidad_disponible"), 0)) <= 0 and not ALLOW_NO_STOCK:
+        if float(nz(prod.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
             QMessageBox.warning(self, "Sin stock", "❌ Este producto no tiene stock disponible."); return
 
         cat = (prod.get("categoria") or "").upper()
-        min_u, _ = reglas_cantidad(cat)
-        qty_default = float(min_u)
+        qty_default = 0.001 if (APP_COUNTRY == "PERU" and cat in CATS) else 1.0
         unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
 
         item = {
@@ -408,12 +401,34 @@ class SistemaCotizaciones(QMainWindow):
             "precio": float(unit_price),
             "total": round(float(unit_price) * qty_default, 2),
             "observacion": "",
-            "stock_disponible": int(nz(prod.get("cantidad_disponible"), 0)),
+            "stock_disponible": float(nz(prod.get("cantidad_disponible"), 0.0)),  # float
             "precio_override": None,
+            "precio_tier": "UNITARIO" if cat == "BOTELLAS" else None,
         }
         self.model.add_item(item)
 
-    # ========== Flujos de presentaciones ==========
+    # ===== Cambiar precio (modal, 3 tiers + personalizado) =====
+    def _abrir_selector_precio(self, row: int):
+        if row < 0 or row >= len(self.items): return
+        item = self.items[row]
+        payload = show_price_picker(self, self._app_icon, item)
+        if not payload:  # cancelado
+            return
+
+        # Aplicar elección
+        item["precio_override"] = None
+        if payload["mode"] == "custom":
+            item["precio_override"] = float(payload["price"])
+            item["precio_tier"] = None
+        else:
+            item["precio_tier"] = payload["tier"].upper()
+
+        # Recalcular y refrescar fila completa
+        self._recalc_price_from_rules(item)
+        top = self.model.index(row, 0); bottom = self.model.index(row, self.model.columnCount() - 1)
+        self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+
+    # ========== Flujos de presentaciones (igual que antes, con floats) ==========
     def _selector_pc(self, pc: dict):
         mapped_code = map_pc_to_bottle_code(str(pc.get("id","")))
         botella_ref = next(
@@ -444,7 +459,7 @@ class SistemaCotizaciones(QMainWindow):
             "nombre": p.get("nombre",""),
             "categoria": p.get("categoria",""),
             "genero": p.get("genero",""),
-        } for p in self.productos if (ALLOW_NO_STOCK or int(nz(p.get("cantidad_disponible"), 0)) > 0) and base_has_match(p)]
+        } for p in self.productos if (ALLOW_NO_STOCK or float(nz(p.get("cantidad_disponible"), 0.0)) > 0.0) and base_has_match(p)]
         if not filas_base:
             QMessageBox.warning(self, "Sin bases", "No hay productos base compatibles para este PC."); return
 
@@ -475,15 +490,15 @@ class SistemaCotizaciones(QMainWindow):
         codigo_final = f"{pc.get('id','')}{base.get('id','')}"
         ml = ml_botella
 
-        stock_bot = int(nz(botella_ref.get("cantidad_disponible"), 0)) if botella_ref else None
-        stock_base = int(nz(base.get("cantidad_disponible"), 0))
+        stock_bot  = float(nz(botella_ref.get("cantidad_disponible"), 0.0)) if botella_ref else None
+        stock_base = float(nz(base.get("cantidad_disponible"), 0.0))
         if stock_bot is not None:
             if stock_bot > 0 and stock_base > 0: stock_ref = min(stock_bot, stock_base)
             elif stock_bot > 0:                  stock_ref = stock_bot
             elif stock_base > 0:                 stock_ref = stock_base
-            else:                                stock_ref = 0
+            else:                                stock_ref = 0.0
         else:
-            stock_ref = stock_base if stock_base > 0 else 0
+            stock_ref = stock_base if stock_base > 0 else 0.0
 
         item = {
             "_prod": {"precio_unitario": unit_price},
@@ -496,8 +511,9 @@ class SistemaCotizaciones(QMainWindow):
             "total": round(float(unit_price) * 1.0, 2),
             "fragancia": base.get("nombre","") if dep_base in ("ESENCIA","ESENCIAS") else "",
             "observacion": "",
-            "stock_disponible": int(stock_ref),
+            "stock_disponible": float(stock_ref),
             "precio_override": None,
+            "precio_tier": None,
         }
         self.model.add_item(item)
 
@@ -508,7 +524,7 @@ class SistemaCotizaciones(QMainWindow):
             p for p in self.productos
             if (p.get("categoria","").upper() == dep)
             and ((not gen) or (str(p.get("genero","")).strip().lower() == gen))
-            and (ALLOW_NO_STOCK or int(nz(p.get("cantidad_disponible"), 0)) > 0)
+            and (ALLOW_NO_STOCK or float(nz(p.get("cantidad_disponible"), 0.0)) > 0.0)
         ]
         if not base_candidates:
             QMessageBox.warning(self, "Sin coincidencias", f"No hay productos base para {dep} / {pres.get('GENERO','')}"); return
@@ -533,7 +549,8 @@ class SistemaCotizaciones(QMainWindow):
                     None
                 )
                 if not bot: continue
-                if int(nz(bot.get("cantidad_disponible"), 0)) <= 0 and not ALLOW_NO_STOCK: continue
+                if float(nz(bot.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
+                    continue
                 ml_b = extract_ml_from_text(bot.get("nombre","")) or extract_ml_from_text(b.get("nombre",""))
                 if ml_b != ml_pres: continue
                 bot_opts.append(b)
@@ -555,11 +572,11 @@ class SistemaCotizaciones(QMainWindow):
             codigo_final = f"{base.get('id','')}{pres.get('CODIGO_NORM') or pres.get('CODIGO')}"
             ml = ml_from_pres_code_norm(pres.get('CODIGO_NORM') or pres.get('CODIGO') or "")
 
-        stock_base = int(nz(base.get("cantidad_disponible"), 0))
+        stock_base = float(nz(base.get("cantidad_disponible"), 0.0))
         stock_ref = stock_base
         if botella:
-            stock_bot = int(nz(next((bb for bb in self.productos
-                                     if str(bb.get("id","")).upper() == map_pc_to_bottle_code(str(botella.get("id",""))) and (bb.get("categoria","").upper()=="BOTELLAS")), {}).get("cantidad_disponible", 0)))
+            stock_bot = float(nz(next((bb for bb in self.productos
+                                       if str(bb.get("id","")).upper() == map_pc_to_bottle_code(str(botella.get("id",""))) and (bb.get("categoria","").upper()=="BOTELLAS")), {}).get("cantidad_disponible", 0.0)))
             if stock_base > 0 and stock_bot > 0:
                 stock_ref = min(stock_base, stock_bot)
             elif stock_bot > 0:
@@ -576,14 +593,14 @@ class SistemaCotizaciones(QMainWindow):
             "total": round(float(unit_price) * 1.0, 2),
             "fragancia": base.get("nombre","") if dep in ("ESENCIA","ESENCIAS") else "",
             "observacion": "",
-            "stock_disponible": int(stock_ref),
+            "stock_disponible": float(stock_ref),
             "precio_override": None,
+            "precio_tier": None,
         }
         self.model.add_item(item)
 
     # ===== Abrir manual (usa resolve_template_path del módulo paths)
     def abrir_manual(self):
-        # Busca primero en templates/<PAIS>/manual_usuario_sistema.pdf, luego en templates/
         ruta = resolve_country_asset("manual_usuario_sistema.pdf", COUNTRY_CODE)
         if not ruta or not os.path.exists(ruta):
             QMessageBox.warning(
@@ -625,31 +642,33 @@ class SistemaCotizaciones(QMainWindow):
         self._abrir_dialogo_observacion(row, item)
 
     def editar_precio_unitario(self):
-        # Permitir siempre si es SERVICIO; o Paraguay para cualquier ítem
+        # Abre SIEMPRE diálogo modal (nada de editores en celda)
         row = self._ctx_row
         if row is None:
             sel = self.table.selectionModel().selectedRows()
             if not sel: return
             row = sel[0].row()
-        if row < 0 or row >= len(self.items): return
-
-        item = self.items[row]
-        cat = (item.get("categoria") or "").upper()
-        if not (CAN_EDIT_UNIT_PRICE or cat == "SERVICIO"):
-            return
-
-        idx_price = self.model.index(row, 3)
-        if not idx_price.isValid(): return
-        self.table.setCurrentIndex(idx_price)
-        self.table.edit(idx_price)
+        self._abrir_selector_precio(row)
 
     def _recalc_price_from_rules(self, item: dict):
+        from .models import _price_from_tier
+        from .pricing import precio_unitario_por_categoria
         cat = (item.get("categoria") or "").upper()
         qty = float(nz(item.get("cantidad"), 0.0))
-        base_prod = item.get("_prod", {})
-        unit_price = precio_unitario_por_categoria(cat, base_prod, qty)
+        base_prod = item.get("_prod", {}) or {}
+
+        override = item.get("precio_override", None)
+        if override is not None:
+            unit_price = float(override)
+        elif cat == "BOTELLAS" and item.get("precio_tier"):
+            unit_price = _price_from_tier(base_prod, item["precio_tier"])
+            if not unit_price:
+                unit_price = precio_unitario_por_categoria(cat, base_prod, qty)
+        else:
+            unit_price = precio_unitario_por_categoria(cat, base_prod, qty)
+
         item["precio"] = float(unit_price)
-        item["total"] = round(float(unit_price) * qty, 2)
+        item["total"]  = round(float(unit_price) * qty, 2)
 
     def quitar_reescritura_precio(self):
         sel = self.table.selectionModel().selectedRows()
@@ -707,12 +726,13 @@ class SistemaCotizaciones(QMainWindow):
             vals = [it["codigo"], prod, qty_txt, fmt_money_ui(nz(it.get("precio"))), fmt_money_ui(nz(it.get("total")))]
             for col, val in enumerate(vals): tbl.setItem(r, col, QTableWidgetItem(str(val)))
 
+            # Chequeo de stock con float (visual)
             try:
                 cat_u = (it.get("categoria") or "").upper()
-                disp = int(nz(it.get("stock_disponible"), 0))
-                cant = float(nz(it.get("cantidad"), 0))
+                disp = float(nz(it.get("stock_disponible"), 0.0))
+                cant = float(nz(it.get("cantidad"), 0.0))
                 mult = 50.0 if (APP_COUNTRY in ("VENEZUELA", "PARAGUAY") and cat_u in ("ESENCIA","AROMATERAPIA","ESENCIAS")) else 1.0
-                if cant * mult > disp and disp >= 0:
+                if cant * mult > disp and disp >= 0.0:
                     qty_item = tbl.item(r, 2)
                     if qty_item: qty_item.setForeground(QBrush(Qt.red))
             except Exception:
@@ -741,8 +761,7 @@ class SistemaCotizaciones(QMainWindow):
         v.addWidget(QLabel(f"<b>Insumos/Otros:</b> {fmt_money_ui(otros_total)}"))
         v.addWidget(QLabel(f"<b>Total General:</b> {fmt_money_ui(total_general)}"))
 
-        btn = QPushButton("Cerrar"); btn.clicked.connect(dlg.accept); v.addWidget(btn)
-        dlg.exec()
+        btn = QPushButton("Cerrar"); btn.clicked.connect(dlg.accept); v.addWidget(btn); dlg.exec()
 
     def generar_cotizacion(self):
         c = self.entry_cliente.text(); ci = self.entry_cedula.text(); t = self.entry_telefono.text()
