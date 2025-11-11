@@ -17,10 +17,10 @@ pytest -q tests/test_presentations.py
 
 
 # ejecutable
-
+# para hacerla obligatoria usar -mandatory
 powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 
-
+powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch -mandatory
 
 
 # Desactivar entorno virtual

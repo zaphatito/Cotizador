@@ -9,6 +9,7 @@ param(
   [string]$IssPath  = "Output\script inno.iss",
   # Ruta del venv (si no, detecta .venv/venv)
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv"
+  [switch]$Mandatory
 )
 
 $ErrorActionPreference = "Stop"
@@ -135,7 +136,7 @@ $manifestObj = [ordered]@{
   version   = $next
   url       = $exeUrl
   sha256    = $sha
-  mandatory = $true
+  mandatory = [bool]$Mandatory
   notes     = "Release $next"
 }
 $manifestJson = ($manifestObj | ConvertTo-Json -Depth 5)
