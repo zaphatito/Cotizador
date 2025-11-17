@@ -333,8 +333,8 @@ def generar_pdf(datos: dict) -> str:
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
 
         # izquierdas
-        c.drawString( _anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"]),   header_y, "CÓDIGO")
-        c.drawString( _anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"]), header_y, "PRODUCTO")
+        c.drawString(_anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"]),   header_y, "CÓDIGO")
+        c.drawString(_anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"]), header_y, "PRODUCTO")
 
         # derechas (alineadas al MISMO ancla de números)
         c.drawRightString(_anchor_x("cantidad", shift_x), header_y, "CANTIDAD")
@@ -381,8 +381,10 @@ def generar_pdf(datos: dict) -> str:
         while idx < n_items:
             it = all_items[idx]
             full_name = it["producto"]
-            if it.get("fragancia"):   full_name += f" ({it['fragancia']})"
-            if it.get("observacion"): full_name += f" | {it['observacion']}"
+            if it.get("fragancia"):
+                full_name += f" ({it['fragancia']})"
+            if it.get("observacion"):
+                full_name += f" | {it['observacion']}"
 
             body_fs = 10 if is_alt else 9
             prod_lines, code_lines, n_lines = _cell_wrap_heights(full_name, str(it["codigo"]), body_fs)
@@ -403,6 +405,7 @@ def generar_pdf(datos: dict) -> str:
 
             qty_txt = cantidad_para_mostrar(it)
             c.drawRightString(ax_cantidad, row_y, qty_txt)
+            # precio y subtotal ya vienen en moneda actual desde _build_items_for_pdf()
             c.drawRightString(ax_precio,   row_y, fmt_money_pdf(float(nz(it.get("precio")))))
             c.drawRightString(ax_subtotal, row_y, fmt_money_pdf(float(nz(it.get("total")))))
 
@@ -431,33 +434,52 @@ def generar_pdf(datos: dict) -> str:
                 break
 
         if is_last_page:
-            # Totales
-            total_bruto = round(sum(float(nz(i.get("total"))) for i in all_items), 2)
-            pres_validas = [i for i in all_items if (i.get("categoria") or "") == "PRESENTACION" and i.get("ml") and int(i["ml"]) >= 30]
-            total_pres_bruto = round(sum(float(nz(i.get("total"))) for i in pres_validas), 2)
-            cnt_pres = sum(int(nz(i.get("cantidad"), 0)) for i in pres_validas)
-            desc_pct = 0.20 if cnt_pres >= 20 else 0.15 if cnt_pres >= 10 else 0.10 if cnt_pres >= 5 else 0.05 if cnt_pres >= 3 else 0
-            descuento_valor = round(total_pres_bruto * desc_pct, 2)
-            total_final = round(total_bruto - descuento_valor, 2)
+            # ======== NUEVA LÓGICA DE TOTALES =========
+            # Usa los campos que manda la app (ya en moneda actual):
+            #   - subtotal_bruto: suma sin descuentos
+            #   - descuento_total: suma de descuentos
+            #   - total_general: total final
+            subtotal_bruto   = float(nz(datos.get("subtotal_bruto"), 0.0))
+            descuento_total  = float(nz(datos.get("descuento_total"), 0.0))
+            total_general    = float(nz(datos.get("total_general"), 0.0))
 
-            values = (total_bruto, -descuento_valor, total_final)
-            shows  = (L["SHOW_LABELS"]["BRUTO"], L["SHOW_LABELS"]["DESC"], L["SHOW_LABELS"]["FINAL"])
+            # Fallback suave para versiones viejas / datos incompletos:
+            if subtotal_bruto == 0 and descuento_total == 0 and total_general == 0:
+                # Si los items vienen con 'subtotal' y 'descuento', los usamos
+                subtotal_bruto = round(
+                    sum(float(nz(i.get("subtotal", nz(i.get("total"), 0.0)))) for i in all_items),
+                    2
+                )
+                descuento_total = round(
+                    sum(float(nz(i.get("descuento", 0.0))) for i in all_items),
+                    2
+                )
+                total_general = round(subtotal_bruto - descuento_total, 2)
+
+            values = (subtotal_bruto, descuento_total, total_general)
+            shows  = (
+                L["SHOW_LABELS"].get("BRUTO", True),
+                L["SHOW_LABELS"].get("DESC",  True),
+                L["SHOW_LABELS"].get("FINAL", True),
+            )
 
             for i in range(3):
                 y  = Y(L["TOTALS_Ys_PX"][i])
                 lx = X(L["TOTALS_LABEL_X_PXs"][i])
                 vx = X(L["TOTALS_VALUE_X_PXs"][i])
 
+                # Label (según SHOW_LABELS del layout)
                 if shows[i]:
                     c.setFont(FONT_BOLD, L["TOTALS_FONT_SIZES"][i])
                     c.setFillColor(L["TOTALS_COLOR_LABEL"])
                     c.drawRightString(lx, y, L["TOTALS_LABEL_TEXTS"][i])
 
+                # Valor
                 c.setFont(FONT_REG, L["TOTALS_FONT_SIZES"][i])
                 c.setFillColor(TEXT_COLOR if is_alt else colors.black)
                 val = values[i]
                 txt = fmt_money_pdf(val if i != 1 else abs(val))
-                if i == 1:
+                if i == 1 and val != 0:
                     txt = f"- {txt}"
                 c.drawRightString(vx, y, txt)
         else:

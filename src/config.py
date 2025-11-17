@@ -20,8 +20,10 @@ def _windows_documents_dir() -> str:
     return os.path.join(os.path.expanduser("~"), "Documents")
 
 def _ensure_dir(p: str) -> str:
-    try: os.makedirs(p, exist_ok=True)
-    except Exception: pass
+    try:
+        os.makedirs(p, exist_ok=True)
+    except Exception:
+        pass
     return p
 
 # --------------------------
@@ -31,14 +33,23 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _candidate_config_dirs() -> List[str]:
     dirs: List[str] = []
+    # 1) Si está "frozen" (PyInstaller), priorizar carpeta junto al ejecutable
     if getattr(sys, "frozen", False):
         dirs.append(os.path.join(os.path.dirname(sys.executable), "config"))
+
+    # 2) Carpeta "config" relativa al cwd
     dirs.append(os.path.join(os.getcwd(), "config"))
+
+    # 3) Carpeta "config" relativa a este módulo
     dirs.append(os.path.join(_THIS_DIR, "config"))
-    out, seen = [], set()
+
+    # Eliminar duplicados conservando orden
+    out: List[str] = []
+    seen: set[str] = set()
     for d in dirs:
         if d not in seen:
-            seen.add(d); out.append(d)
+            seen.add(d)
+            out.append(d)
     return out
 
 def _pick_config_path() -> Tuple[str, str]:
@@ -47,6 +58,7 @@ def _pick_config_path() -> Tuple[str, str]:
             p = os.path.join(d, fname)
             if os.path.exists(p):
                 return d, p
+    # Si no existe, crear en el primer candidato
     base = _candidate_config_dirs()[0]
     _ensure_dir(base)
     return base, os.path.join(base, "config.json")
@@ -61,19 +73,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "listing_type": "AMBOS",   # "PRODUCTOS" | "PRESENTACIONES" | "AMBOS"
     "allow_no_stock": False,
 
-    # ==== NUEVO: Auto-updater ====
-    # Forma de comprobar e instalar actualizaciones al iniciar:
-    # "ASK"     => pregunta y lanza instalador con UI
-    # "SILENT"  => instala en silencio (recomendado añadir flags) 
-    # "OFF"     => deshabilitado
-    "update_mode": "ASK",
+    # ==== Auto-updater ====
+    "update_mode": "ASK",              # "ASK" | "SILENT" | "OFF"
     "update_check_on_startup": True,
-    # Coloca aquí tu JSON de manifiesto (GitHub Raw, S3, tu servidor, etc.)
-    "update_manifest_url": "",  # ej: "https://tu-dominio/updates/cotizador.json"
-    # Flags opcionales para Inno Setup (cuando no quieras UI: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS)
+    "update_manifest_url": "",         # ej: "https://tu-dominio/updates/cotizador.json"
     "update_flags": "/CLOSEAPPLICATIONS",
 
-    # Campos de logging opcionales:
+    # logging opcional:
     # "log_dir": "C:/Users/<usuario>/Documents/Cotizaciones/logs"
     # "log_level": "INFO"  # ERROR, WARNING, INFO, DEBUG
 }
@@ -97,17 +103,19 @@ def load_app_config() -> Dict[str, Any]:
         val = str(raw.get("country", cfg["country"])).strip().upper()
         if val in ("PARAGUAY", "PERU", "VENEZUELA"):
             cfg["country"] = val
+
         # listing_type
         lt = str(raw.get("listing_type", cfg["listing_type"])).strip().upper()
         if lt in ("PRODUCTOS", "PRESENTACIONES", "AMBOS"):
             cfg["listing_type"] = lt
+
         # allow_no_stock
         try:
             cfg["allow_no_stock"] = bool(raw.get("allow_no_stock", cfg["allow_no_stock"]))
         except Exception:
             pass
 
-        # ==== NUEVO: claves de update ====
+        # ==== claves de update ====
         umode = str(raw.get("update_mode", cfg["update_mode"])).strip().upper()
         if umode in ("ASK", "SILENT", "OFF"):
             cfg["update_mode"] = umode
@@ -144,11 +152,33 @@ ALLOW_NO_STOCK: bool  = APP_CONFIG["allow_no_stock"]
 # --------------------------
 def currency_for_country(country: str) -> str:
     c = (country or "").upper()
-    if c == "PERU":       return "PEN"
-    if c == "VENEZUELA":  return "USD"
-    return "PYG"  # default PY
+    # Moneda base por país:
+    if c == "PERU":
+        return "PEN"   # Sol
+    if c == "VENEZUELA":
+        return "USD"   # Dólar
+    # Default: Paraguay
+    return "PYG"       # Guaraní
 
-APP_CURRENCY: str = currency_for_country(APP_COUNTRY)
+def secondary_currency_for_country(country: str) -> str:
+    """
+    Moneda secundaria por país:
+      - PARAGUAY   → ARS (Peso argentino)
+      - VENEZUELA  → VES (Bolívar)
+      - PERU       → BOB (Boliviano)
+    """
+    c = (country or "").upper()
+    if c == "PARAGUAY":
+        return "ARS"
+    if c == "VENEZUELA":
+        return "VES"
+    if c == "PERU":
+        return "BOB"
+    # Fallback genérico
+    return "USD"
+
+APP_CURRENCY: str       = currency_for_country(APP_COUNTRY)
+SECONDARY_CURRENCY: str = secondary_currency_for_country(APP_COUNTRY)
 
 def _country_suffix(country: str) -> str:
     m = {"VENEZUELA": "VE", "PERU": "PE", "PARAGUAY": "PY"}
@@ -158,8 +188,10 @@ COUNTRY_CODE: str = _country_suffix(APP_COUNTRY)
 
 def id_label_for_country(country: str) -> str:
     c = (country or "").upper()
-    if c == "PERU":       return "DNI/RUC"
-    if c == "VENEZUELA":  return "CEDULA / RIF"
+    if c == "PERU":
+        return "DNI/RUC"
+    if c == "VENEZUELA":
+        return "CEDULA / RIF"
     return "CEDULA / RUC"
 
 # --------------------------
@@ -170,6 +202,67 @@ def listing_allows_products() -> bool:
 
 def listing_allows_presentations() -> bool:
     return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
+
+# --------------------------
+# Contexto dinámico de moneda
+# --------------------------
+# Moneda en la que se muestran los precios en la UI (por defecto, la base).
+CURRENT_CURRENCY: str = APP_CURRENCY
+# Factor por el cual se multiplica un monto en moneda base para mostrarlo
+# en la moneda actual. Si CURRENT_CURRENCY == APP_CURRENCY, es 1.0.
+_CURRENCY_RATE: float = 1.0
+
+def get_currency_context() -> Tuple[str, str, float]:
+    """
+    Devuelve (moneda_actual, moneda_secundaria, factor_base_a_actual).
+
+    - moneda_actual: código de la moneda que se está mostrando en la UI.
+    - moneda_secundaria: código de la moneda secundaria para el país actual.
+    - factor_base_a_actual:
+        * 1.0 cuando moneda_actual == APP_CURRENCY
+        * >1 o <1 cuando se trabaja en la moneda secundaria
+    """
+    return CURRENT_CURRENCY, SECONDARY_CURRENCY, _CURRENCY_RATE
+
+def set_currency_context(new_currency: str, rate: float) -> None:
+    """
+    Configura la moneda actual de la UI y la tasa:
+
+    new_currency:
+        - APP_CURRENCY  → se trabaja en moneda base (factor = 1.0)
+        - SECONDARY_CURRENCY → se trabaja en secundaria (factor > 0)
+
+    rate:
+        - cuántas unidades de 'new_currency' equivale 1 unidad de APP_CURRENCY.
+          Ej: si APP_CURRENCY='USD' y new_currency='VES', y 1 USD = 40 VES → rate=40.
+    """
+    global CURRENT_CURRENCY, _CURRENCY_RATE
+    new = (new_currency or APP_CURRENCY).upper()
+    if new == APP_CURRENCY:
+        CURRENT_CURRENCY = APP_CURRENCY
+        _CURRENCY_RATE = 1.0
+    else:
+        CURRENT_CURRENCY = new
+        try:
+            r = float(rate)
+            _CURRENCY_RATE = r if r > 0 else 1.0
+        except Exception:
+            _CURRENCY_RATE = 1.0
+
+def convert_from_base(amount: float) -> float:
+    """
+    Convierte un monto desde la moneda base (APP_CURRENCY) a la moneda
+    actualmente seleccionada en la UI usando la tasa configurada.
+    Si no hay tasa válida, devuelve el mismo monto.
+    """
+    try:
+        _, _, rate = get_currency_context()
+        return float(amount) * float(rate)
+    except Exception:
+        try:
+            return float(amount)
+        except Exception:
+            return 0.0
 
 # --------------------------
 # Logging (rutas y nivel)
@@ -191,9 +284,11 @@ if LOG_LEVEL not in ("ERROR", "WARNING", "INFO", "DEBUG"):
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",
     "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "ALLOW_NO_STOCK",
-    "APP_CURRENCY", "COUNTRY_CODE",
+    "APP_CURRENCY", "SECONDARY_CURRENCY", "COUNTRY_CODE",
     "CATS",
-    "currency_for_country", "id_label_for_country",
+    "currency_for_country", "secondary_currency_for_country",
+    "id_label_for_country",
     "listing_allows_products", "listing_allows_presentations",
+    "get_currency_context", "set_currency_context", "convert_from_base",
     "LOG_DIR", "LOG_LEVEL",
 ]
