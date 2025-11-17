@@ -8,7 +8,7 @@ param(
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
   # Ruta del venv (si no, detecta .venv/venv)
-  [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv"
+  [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
   [switch]$Mandatory
 )
 
