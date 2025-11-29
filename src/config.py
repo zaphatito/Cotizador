@@ -19,6 +19,7 @@ def _windows_documents_dir() -> str:
             pass
     return os.path.join(os.path.expanduser("~"), "Documents")
 
+
 def _ensure_dir(p: str) -> str:
     try:
         os.makedirs(p, exist_ok=True)
@@ -26,10 +27,12 @@ def _ensure_dir(p: str) -> str:
         pass
     return p
 
+
 # --------------------------
 # Detección de carpeta y archivo de configuración
 # --------------------------
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def _candidate_config_dirs() -> List[str]:
     dirs: List[str] = []
@@ -52,6 +55,7 @@ def _candidate_config_dirs() -> List[str]:
             out.append(d)
     return out
 
+
 def _pick_config_path() -> Tuple[str, str]:
     for d in _candidate_config_dirs():
         for fname in ("config.json", "app_config.json"):
@@ -62,6 +66,7 @@ def _pick_config_path() -> Tuple[str, str]:
     base = _candidate_config_dirs()[0]
     _ensure_dir(base)
     return base, os.path.join(base, "config.json")
+
 
 CONFIG_DIR, CONFIG_PATH = _pick_config_path()
 
@@ -87,6 +92,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 # Categorías a granel usadas por pricing/app_window/etc.
 CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
 
+
 def _load_json(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -94,6 +100,7 @@ def _load_json(path: str) -> Dict[str, Any]:
             return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
 
 def load_app_config() -> Dict[str, Any]:
     cfg = DEFAULT_CONFIG.copy()
@@ -138,6 +145,7 @@ def load_app_config() -> Dict[str, Any]:
             cfg["log_level"] = str(raw["log_level"]).strip().upper()
     return cfg
 
+
 APP_CONFIG = load_app_config()
 
 # --------------------------
@@ -160,31 +168,56 @@ def currency_for_country(country: str) -> str:
     # Default: Paraguay
     return "PYG"       # Guaraní
 
-def secondary_currency_for_country(country: str) -> str:
+
+def secondary_currencies_for_country(country: str) -> List[str]:
     """
-    Moneda secundaria por país:
-      - PARAGUAY   → ARS (Peso argentino)
-      - VENEZUELA  → VES (Bolívar)
-      - PERU       → BOB (Boliviano)
+    Lista de monedas secundarias por país.
+
+    La idea es permitir MÁS de una moneda secundaria por país.
+    Ejemplo:
+      - PARAGUAY   → ["ARS", "BRL"]   (peso argentino, real brasileño)
+      - VENEZUELA  → ["VES"]
+      - PERU       → ["BOB"]
     """
     c = (country or "").upper()
     if c == "PARAGUAY":
-        return "ARS"
+        # Ya existía ARS; añadimos BRL como segunda moneda secundaria.
+        return ["ARS", "BRL"]
     if c == "VENEZUELA":
-        return "VES"
+        return ["VES"]
     if c == "PERU":
-        return "BOB"
+        return ["BOB"]
+    # Fallback: sin secundarias
+    return []
+
+
+def secondary_currency_for_country(country: str) -> str:
+    """
+    Versión legacy: devuelve SOLO la moneda secundaria principal
+    (la primera de la lista de secondary_currencies_for_country).
+
+    Se mantiene para compatibilidad con código existente.
+    """
+    lst = secondary_currencies_for_country(country)
+    if lst:
+        return lst[0]
     # Fallback genérico
     return "USD"
 
-APP_CURRENCY: str       = currency_for_country(APP_COUNTRY)
-SECONDARY_CURRENCY: str = secondary_currency_for_country(APP_COUNTRY)
+
+APP_CURRENCY: str               = currency_for_country(APP_COUNTRY)
+SECONDARY_CURRENCIES: List[str] = secondary_currencies_for_country(APP_COUNTRY)
+# Moneda secundaria "principal" (para compatibilidad)
+SECONDARY_CURRENCY: str         = secondary_currency_for_country(APP_COUNTRY)
+
 
 def _country_suffix(country: str) -> str:
     m = {"VENEZUELA": "VE", "PERU": "PE", "PARAGUAY": "PY"}
     return m.get((country or "").upper(), "PY")
 
+
 COUNTRY_CODE: str = _country_suffix(APP_COUNTRY)
+
 
 def id_label_for_country(country: str) -> str:
     c = (country or "").upper()
@@ -194,14 +227,17 @@ def id_label_for_country(country: str) -> str:
         return "CEDULA / RIF"
     return "CEDULA / RUC"
 
+
 # --------------------------
 # Reglas de listado
 # --------------------------
 def listing_allows_products() -> bool:
     return APP_LISTING_TYPE in ("PRODUCTOS", "AMBOS")
 
+
 def listing_allows_presentations() -> bool:
     return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
+
 
 # --------------------------
 # Contexto dinámico de moneda
@@ -212,25 +248,39 @@ CURRENT_CURRENCY: str = APP_CURRENCY
 # en la moneda actual. Si CURRENT_CURRENCY == APP_CURRENCY, es 1.0.
 _CURRENCY_RATE: float = 1.0
 
+
 def get_currency_context() -> Tuple[str, str, float]:
     """
-    Devuelve (moneda_actual, moneda_secundaria, factor_base_a_actual).
+    Devuelve (moneda_actual, moneda_secundaria_principal, factor_base_a_actual).
 
     - moneda_actual: código de la moneda que se está mostrando en la UI.
-    - moneda_secundaria: código de la moneda secundaria para el país actual.
+    - moneda_secundaria_principal: la primera de las monedas secundarias
+      para el país actual (SECONDARY_CURRENCY).
     - factor_base_a_actual:
         * 1.0 cuando moneda_actual == APP_CURRENCY
-        * >1 o <1 cuando se trabaja en la moneda secundaria
+        * >1 o <1 cuando se trabaja en una moneda alternativa (secundaria)
     """
     return CURRENT_CURRENCY, SECONDARY_CURRENCY, _CURRENCY_RATE
+
+
+def get_secondary_currencies() -> List[str]:
+    """
+    Devuelve la lista de monedas secundarias disponibles para el país actual.
+
+    Incluye SECONDARY_CURRENCY como primer elemento (si existe).
+    Esto está pensado para poblar combos / botones en la UI.
+    """
+    return SECONDARY_CURRENCIES[:]
+
 
 def set_currency_context(new_currency: str, rate: float) -> None:
     """
     Configura la moneda actual de la UI y la tasa:
 
     new_currency:
-        - APP_CURRENCY  → se trabaja en moneda base (factor = 1.0)
-        - SECONDARY_CURRENCY → se trabaja en secundaria (factor > 0)
+        - APP_CURRENCY              → se trabaja en moneda base (factor = 1.0)
+        - Cualquier otra (por ej. alguna de get_secondary_currencies())
+          → se trabaja en esa moneda, usando 'rate'.
 
     rate:
         - cuántas unidades de 'new_currency' equivale 1 unidad de APP_CURRENCY.
@@ -249,10 +299,13 @@ def set_currency_context(new_currency: str, rate: float) -> None:
         except Exception:
             _CURRENCY_RATE = 1.0
 
+
 def convert_from_base(amount: float) -> float:
     """
-    Convierte un monto desde la moneda base (APP_CURRENCY) a la moneda
-    actualmente seleccionada en la UI usando la tasa configurada.
+    Inv: amount SIEMPRE viene expresado en la moneda base (APP_CURRENCY).
+
+    Convierte ese monto a la moneda actualmente seleccionada en la UI
+    usando la tasa configurada.
     Si no hay tasa válida, devuelve el mismo monto.
     """
     try:
@@ -264,12 +317,14 @@ def convert_from_base(amount: float) -> float:
         except Exception:
             return 0.0
 
+
 # --------------------------
 # Logging (rutas y nivel)
 # --------------------------
 def _default_log_dir() -> str:
     base = _windows_documents_dir()
     return _ensure_dir(os.path.join(base, "Cotizaciones", "logs"))
+
 
 _raw_log_dir = APP_CONFIG.get("log_dir", "").strip() if isinstance(APP_CONFIG.get("log_dir"), str) else ""
 if _raw_log_dir:
@@ -281,14 +336,15 @@ LOG_LEVEL: str = str(APP_CONFIG.get("log_level", "INFO")).strip().upper()
 if LOG_LEVEL not in ("ERROR", "WARNING", "INFO", "DEBUG"):
     LOG_LEVEL = "INFO"
 
+
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",
     "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "ALLOW_NO_STOCK",
-    "APP_CURRENCY", "SECONDARY_CURRENCY", "COUNTRY_CODE",
+    "APP_CURRENCY", "SECONDARY_CURRENCY", "SECONDARY_CURRENCIES", "COUNTRY_CODE",
     "CATS",
-    "currency_for_country", "secondary_currency_for_country",
+    "currency_for_country", "secondary_currency_for_country", "secondary_currencies_for_country",
     "id_label_for_country",
     "listing_allows_products", "listing_allows_presentations",
-    "get_currency_context", "set_currency_context", "convert_from_base",
+    "get_currency_context", "get_secondary_currencies", "set_currency_context", "convert_from_base",
     "LOG_DIR", "LOG_LEVEL",
 ]

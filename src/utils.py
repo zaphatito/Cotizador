@@ -1,3 +1,4 @@
+# src/utils.py
 import math
 from .config import APP_CURRENCY, get_currency_context
 
@@ -73,6 +74,10 @@ def _symbol_ui(cur: str) -> str:
     # Boliviano
     if c == "BOB":
         return "Bs"
+    
+    # Real brasileño
+    if c == "BRL":
+        return "R$"
 
     # Fallback genérico
     return c
@@ -107,6 +112,10 @@ def _symbol_pdf(cur: str) -> str:
     # Boliviano
     if c == "BOB":
         return "Bs"
+    
+    # Real brasileño
+    if c == "BRL":
+        return "R$"
 
     # Fallback genérico
     return c

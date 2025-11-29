@@ -1,7 +1,7 @@
 {
-    "version":  "1.1.6",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.1.6.exe",
-    "sha256":  "512BCB26B5DC9C4C046EEA92E47A3596231552A661226BD3635D689BAD4EEBF9",
+    "version":  "1.1.7",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.1.7.exe",
+    "sha256":  "0AB9B5252BD6D66A8B51319C9289733EBBDC4C9CD9FFAB8DA6944C532AE71FBE",
     "mandatory":  true,
-    "notes":  "Release 1.1.6"
+    "notes":  "Release 1.1.7"
 }

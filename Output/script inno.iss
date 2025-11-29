@@ -4,8 +4,9 @@
 #define MyAppName    "Sistema de Cotizaciones"
 #define MyAppExeName "SistemaCotizaciones.exe"
 
+
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.6"
+#define MyAppVersion "1.1.7"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -18,6 +19,8 @@
 AppId={{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppPublisher=SistemaCotizacionesPerfumes
+VersionInfoCompany=SistemaCotizacionesPerfumes
 VersionInfoVersion={#MyAppVersion}
 
 ; Usar forma "auto" para Program Files
@@ -507,6 +510,7 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
 
 

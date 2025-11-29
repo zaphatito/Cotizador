@@ -1,12 +1,31 @@
+# src/widgets.py
 from __future__ import annotations
+
 from decimal import Decimal, InvalidOperation
+from typing import Optional
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QLineEdit, QTableWidget, QHeaderView, QAbstractItemView,
-    QTableWidgetItem, QPushButton, QLabel, QFormLayout, QHBoxLayout, QGroupBox,
-    QDoubleSpinBox, QDialogButtonBox, QFrame, QWidget, QTabWidget
+    QDialog,
+    QVBoxLayout,
+    QLineEdit,
+    QTableWidget,
+    QHeaderView,
+    QAbstractItemView,
+    QTableWidgetItem,
+    QPushButton,
+    QLabel,
+    QFormLayout,
+    QHBoxLayout,
+    QGroupBox,
+    QDoubleSpinBox,
+    QDialogButtonBox,
+    QFrame,
+    QWidget,
+    QTabWidget,
+    QMessageBox,
+    QRadioButton,
 )
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QBrush
 from PySide6.QtCore import Qt
 
 from .config import (
@@ -14,11 +33,15 @@ from .config import (
     listing_allows_presentations,
     ALLOW_NO_STOCK,
     convert_from_base,
+    APP_COUNTRY,
+    id_label_for_country,
+    CATS,
+    get_currency_context,
 )
-from .pricing import precio_base_para_listado
-    # asegúrate que soporte PRECIO_PRESENT para presentaciones
+from .pricing import precio_base_para_listado, cantidad_para_mostrar
 from .utils import fmt_money_ui, nz
 from .presentations import map_pc_to_bottle_code  # mantenido por compatibilidad
+
 
 # ===== helpers =====
 def _fmt_trim_decimal(x) -> str:
@@ -33,6 +56,7 @@ def _fmt_trim_decimal(x) -> str:
         except Exception:
             return str(x)
 
+
 def _first_nonzero(d: dict, keys: list[str]) -> float:
     for k in keys:
         try:
@@ -44,7 +68,554 @@ def _first_nonzero(d: dict, keys: list[str]) -> float:
     return 0.0
 
 
+# ===================== Diálogos genéricos extra =====================
+
+
+def show_currency_dialog(
+    parent: QWidget,
+    app_icon: QIcon,
+    base_currency: str,
+    secondary_currency: str,
+    exchange_rate: Optional[float],
+    saved_rates: Optional[dict[str, float]] = None,
+) -> Optional[dict]:
+    """
+    Diálogo de moneda y tasas de cambio.
+
+    Ahora soporta TODAS las monedas disponibles para el país:
+      - Moneda base (no necesita tasa).
+      - Varias monedas secundarias (cada una con su tasa propia).
+
+    Devuelve un dict con:
+      {
+          "currency": "<moneda_seleccionada>",
+          "is_base": True|False,
+          "rate": <tasa_para_moneda_seleccionada (1.0 si es base)>,
+          "rates": { "<sec1>": <tasa>, "<sec2>": <tasa>, ... }
+      }
+    o None si se cancela.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Moneda y tasas de cambio")
+    dlg.resize(380, 260)
+    if not app_icon.isNull():
+        dlg.setWindowIcon(app_icon)
+
+    v = QVBoxLayout(dlg)
+
+    # --- monedas disponibles ---
+    from .config import APP_CURRENCY, get_secondary_currencies, get_currency_context
+
+    base = (base_currency or APP_CURRENCY).upper()
+
+    # Lista de secundarias del país
+    sec_list = [c.upper() for c in (get_secondary_currencies() or []) if c]
+    # Compat: si no viene nada en config pero igual te pasan una "secondary_currency"
+    if secondary_currency:
+        sec = secondary_currency.upper()
+        if sec not in sec_list:
+            sec_list.append(sec)
+
+    # Si no hay secundarias, solo mostramos la base
+    all_codes = [base] + [c for c in sec_list if c != base]
+    all_codes = list(dict.fromkeys(all_codes))  # dedupe preservando orden
+
+    # Tasas conocidas (por moneda secundaria)
+    rates: dict[str, float] = {}
+    if saved_rates:
+        for code in sec_list:
+            try:
+                val = float(saved_rates.get(code, 0.0))
+            except Exception:
+                val = 0.0
+            rates[code] = val if val > 0 else 0.0
+
+    # Fallback legacy: solo viene "exchange_rate" (1 moneda secundaria)
+    if not rates and exchange_rate and sec_list:
+        try:
+            val = float(exchange_rate)
+        except Exception:
+            val = 0.0
+        if val > 0:
+            rates[sec_list[0]] = val
+
+    # Código de moneda actualmente activa en la UI
+    cur, _sec_principal, rate_global = get_currency_context()
+    cur = (cur or "").upper()
+    if cur not in all_codes:
+        cur = base
+
+    # --- Radios de selección de moneda ---
+    v.addWidget(QLabel("Seleccione la moneda en la que desea trabajar:"))
+
+    radios: dict[str, QRadioButton] = {}
+    for code in all_codes:
+        if code == base:
+            text = f"Moneda principal ({code})"
+        else:
+            text = f"Moneda secundaria ({code})"
+        rb = QRadioButton(text)
+        radios[code] = rb
+        v.addWidget(rb)
+
+    # Preseleccionar la moneda actual
+    if cur in radios:
+        radios[cur].setChecked(True)
+    else:
+        radios[base].setChecked(True)
+
+    # --- Bloque de tasas (solo para secundarias) ---
+    grp_tasas = QGroupBox("Tasa de cambio")
+    tasas_layout = QVBoxLayout(grp_tasas)
+
+    rate_rows: dict[str, tuple[QWidget, QDoubleSpinBox]] = {}
+    for code in sec_list:
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(QLabel(f"1 {base} ="))
+        sp = QDoubleSpinBox()
+        sp.setDecimals(6)
+        sp.setMinimum(0.000001)
+        sp.setMaximum(999999999.0)
+
+        # valor inicial para esta moneda
+        initial = rates.get(code, 0.0)
+        if initial <= 0.0:
+            # Si es la moneda actual, usar rate_global como sugerencia
+            if code == cur and cur != base and rate_global and rate_global > 0:
+                initial = float(rate_global)
+            else:
+                initial = 1.0
+        sp.setValue(initial)
+
+        h.addWidget(sp, 1)
+        h.addWidget(QLabel(code))
+        tasas_layout.addWidget(row)
+
+        rate_rows[code] = (row, sp)
+
+    if not sec_list:
+        grp_tasas.setVisible(False)
+
+    v.addWidget(grp_tasas)
+
+    # --- lógica de visibilidad ---
+    def _apply_visibility():
+        # moneda seleccionada
+        selected_code = None
+        for code, rb in radios.items():
+            if rb.isChecked():
+                selected_code = code
+                break
+        if not selected_code:
+            selected_code = base
+
+        # Si es la moneda principal, no se muestra el input de tasa
+        if selected_code == base or not sec_list:
+            grp_tasas.setVisible(False)
+        else:
+            grp_tasas.setVisible(True)
+            # Solo se muestra el input de ESA moneda secundaria
+            for code, (row, _sp) in rate_rows.items():
+                row.setVisible(code == selected_code)
+
+    for code, rb in radios.items():
+        rb.toggled.connect(_apply_visibility)
+
+    _apply_visibility()
+
+    # --- botones OK / Cancel ---
+    bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    v.addWidget(bb)
+
+    result: dict | None = None
+
+    def on_accept():
+        nonlocal result
+        # Moneda seleccionada
+        selected_code = None
+        for code, rb in radios.items():
+            if rb.isChecked():
+                selected_code = code
+                break
+        if not selected_code:
+            selected_code = base
+
+        is_base = (selected_code == base)
+
+        # Guardar tasas
+        rate_for_selected = 1.0
+        new_rates: dict[str, float] = {}
+
+        for code, (row, sp) in rate_rows.items():
+            val = float(sp.value())
+            if val <= 0:
+                val = 0.0
+            new_rates[code] = val
+
+        # Validar tasa si es secundaria
+        if not is_base:
+            r = new_rates.get(selected_code, 0.0)
+            if r <= 0:
+                QMessageBox.warning(
+                    parent,
+                    "Tasa requerida",
+                    f"Ingrese una tasa válida para la moneda secundaria {selected_code}.",
+                )
+                return
+            rate_for_selected = r
+
+        result = {
+            "currency": selected_code,
+            "is_base": is_base,
+            "rate": rate_for_selected,
+            "rates": new_rates,
+        }
+        dlg.accept()
+
+    bb.accepted.connect(on_accept)
+    bb.rejected.connect(dlg.reject)
+
+    if dlg.exec() != QDialog.Accepted or result is None:
+        return None
+    return result
+
+
+def show_discount_dialog_for_item(
+    parent: QWidget,
+    app_icon: QIcon,
+    item: dict,
+    base_currency: str,
+) -> Optional[dict]:
+    """
+    Diálogo para editar el descuento de una fila.
+
+    Devuelve un payload listo para setData en la columna Descuento:
+      {"mode": "clear"} |
+      {"mode": "percent", "percent": pct} |
+      {"mode": "amount", "amount": monto_base}
+    """
+    it = item
+
+    try:
+        precio_base = float(nz(it.get("precio"), 0.0))
+    except Exception:
+        precio_base = 0.0
+
+    qty = float(nz(it.get("cantidad"), 0.0))
+    subtotal_base = float(
+        nz(it.get("subtotal_base"), round(precio_base * qty, 2))
+    )
+    d_pct = float(nz(it.get("descuento_pct"), 0.0))
+    d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
+
+    # Convertir a moneda actual para mostrar
+    precio_ui = convert_from_base(precio_base)
+    subtotal_ui = convert_from_base(subtotal_base)
+    d_monto_ui = convert_from_base(d_monto_base)
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Editar descuento")
+    dlg.resize(420, 260)
+    if not app_icon.isNull():
+        dlg.setWindowIcon(app_icon)
+
+    v = QVBoxLayout(dlg)
+    v.addWidget(
+        QLabel(f"<b>{it.get('codigo','')}</b> — {it.get('producto','')}")
+    )
+
+    # --- Resumen de línea ---
+    info = QGroupBox("Resumen de línea")
+    info_layout = QFormLayout(info)
+    info_layout.addRow("Cantidad:", QLabel(str(qty)))
+    info_layout.addRow("Precio unitario:", QLabel(fmt_money_ui(precio_ui)))
+    info_layout.addRow("Subtotal:", QLabel(fmt_money_ui(subtotal_ui)))
+    v.addWidget(info)
+
+    # --- Bloque de descuento ---
+    grp = QGroupBox("Descuento")
+    form = QFormLayout(grp)
+
+    sp_pct = QDoubleSpinBox()
+    sp_pct.setDecimals(4)
+    sp_pct.setSingleStep(0.0001)
+    sp_pct.setMinimum(0.0)
+    sp_pct.setMaximum(100.0)
+    sp_pct.setValue(d_pct if d_pct > 0 else 0.0)
+
+    sp_amt = QDoubleSpinBox()
+    sp_amt.setDecimals(2)
+    sp_amt.setMinimum(0.0)
+    sp_amt.setMaximum(max(subtotal_ui, 0.0))
+    sp_amt.setValue(d_monto_ui if d_monto_ui > 0 else 0.0)
+
+    form.addRow("Porcentaje (%):", sp_pct)
+    form.addRow("Monto:", sp_amt)
+    v.addWidget(grp)
+
+    lbl_preview = QLabel()
+    v.addWidget(lbl_preview)
+
+    # --- Sincronización % ↔ monto ---
+    updating = {"from": None}
+
+    def _update_preview():
+        pct = float(sp_pct.value())
+        amt = float(sp_amt.value())
+        total_ui = subtotal_ui - amt
+        if pct <= 0 and amt <= 0:
+            lbl_preview.setText("Sin descuento aplicado.")
+        else:
+            lbl_preview.setText(
+                f"Descuento: {fmt_money_ui(amt)} ({pct:.4f}%) → "
+                f"Total: {fmt_money_ui(total_ui)}"
+            )
+
+    def update_from_pct(val):
+        if updating["from"] == "amt":
+            return
+        updating["from"] = "pct"
+        try:
+            pct = float(val)
+        except Exception:
+            pct = 0.0
+        pct = max(0.0, min(pct, 100.0))
+        if subtotal_ui > 0:
+            amt = round(subtotal_ui * pct / 100.0, 2)
+        else:
+            amt = 0.0
+        sp_amt.setValue(amt)
+        updating["from"] = None
+        _update_preview()
+
+    def update_from_amt(val):
+        if updating["from"] == "pct":
+            return
+        updating["from"] = "amt"
+        try:
+            amt = float(val)
+        except Exception:
+            amt = 0.0
+        amt = max(0.0, min(amt, subtotal_ui))
+        if subtotal_ui > 0:
+            pct = (amt / subtotal_ui) * 100.0
+        else:
+            pct = 0.0
+        sp_pct.setValue(pct)
+        updating["from"] = None
+        _update_preview()
+
+    sp_pct.valueChanged.connect(update_from_pct)
+    sp_amt.valueChanged.connect(update_from_amt)
+    _update_preview()
+
+    bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    v.addWidget(bb)
+
+    payload: dict = {}
+
+    def on_accept():
+        pct = float(sp_pct.value())
+        amt_ui = float(sp_amt.value())
+
+        if subtotal_base <= 0 or (pct <= 0 and amt_ui <= 0):
+            payload.clear()
+            payload.update({"mode": "clear"})
+        else:
+            # Convertir monto desde moneda actual a base
+            cur, _, rate = get_currency_context()
+            if cur == base_currency or not rate:
+                amt_base = amt_ui
+            else:
+                # rate ~ base→moneda_actual
+                amt_base = amt_ui / float(rate)
+
+            if pct > 0:
+                payload.clear()
+                payload.update({"mode": "percent", "percent": pct})
+            else:
+                payload.clear()
+                payload.update({"mode": "amount", "amount": amt_base})
+
+        dlg.accept()
+
+    bb.accepted.connect(on_accept)
+    bb.rejected.connect(dlg.reject)
+
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    return payload
+
+
+def show_observation_dialog(
+    parent: QWidget,
+    app_icon: QIcon,
+    initial_text: str,
+) -> Optional[str]:
+    """
+    Diálogo simple para editar la observación de un ítem.
+
+    Devuelve el nuevo texto o None si se cancela.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Editar Observación")
+    dlg.resize(320, 120)
+    if not app_icon.isNull():
+        dlg.setWindowIcon(app_icon)
+
+    v = QVBoxLayout(dlg)
+    v.addWidget(QLabel("Ingrese observación (ej: Color ámbar):"))
+    entry = QLineEdit()
+    entry.setText(initial_text or "")
+    v.addWidget(entry)
+    btn = QPushButton("Guardar")
+    v.addWidget(btn)
+
+    result: dict[str, Optional[str]] = {"text": None}
+
+    def _save():
+        result["text"] = entry.text().strip()
+        dlg.accept()
+
+    btn.clicked.connect(_save)
+
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    return result["text"]
+
+
+def show_preview_dialog(
+    parent: QWidget,
+    app_icon: QIcon,
+    cliente: str,
+    cedula: str,
+    telefono: str,
+    items: list[dict],
+) -> None:
+    """
+    Diálogo de previsualización de cotización.
+
+    Solo muestra datos; no modifica nada.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Previsualización de Cotización")
+    dlg.resize(860, 520)
+    if not app_icon.isNull():
+        parent.setWindowIcon(app_icon)
+        dlg.setWindowIcon(app_icon)
+
+    v = QVBoxLayout(dlg)
+    id_lbl = id_label_for_country(APP_COUNTRY)
+    v.addWidget(QLabel(f"<b>Nombre:</b> {cliente}"))
+    v.addWidget(QLabel(f"<b>{id_lbl}:</b> {cedula}"))
+    v.addWidget(QLabel(f"<b>Teléfono:</b> {telefono}"))
+
+    tbl = QTableWidget(0, 6)
+    tbl.setHorizontalHeaderLabels(
+        ["Código", "Producto", "Cantidad", "Precio", "Descuento", "Subtotal"]
+    )
+    tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    tbl.setSelectionMode(QAbstractItemView.NoSelection)
+
+    subtotal_bruto_base = 0.0
+    descuento_total_base = 0.0
+    total_neto_base = 0.0
+
+    for it in items:
+        r = tbl.rowCount()
+        tbl.insertRow(r)
+        prod = it.get("producto", "")
+        if it.get("fragancia"):
+            prod += f" ({it['fragancia']})"
+        if it.get("observacion"):
+            prod += f" | {it['observacion']}"
+
+        qty_txt = cantidad_para_mostrar(it)
+
+        precio_base = float(nz(it.get("precio"), 0.0))
+        total_line_base = float(nz(it.get("total"), 0.0))
+        subtotal_line_base = float(
+            nz(
+                it.get("subtotal_base"),
+                precio_base * nz(it.get("cantidad"), 0.0),
+            )
+        )
+        d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
+        d_pct = float(nz(it.get("descuento_pct"), 0.0))
+
+        subtotal_bruto_base += subtotal_line_base
+        descuento_total_base += d_monto_base
+        total_neto_base += total_line_base
+
+        precio_ui = fmt_money_ui(convert_from_base(precio_base))
+        subtotal_ui = fmt_money_ui(convert_from_base(total_line_base))
+
+        if d_pct > 0:
+            desc_txt = f"-{d_pct:.1f}%"
+        elif d_monto_base > 0:
+            desc_txt = "-" + fmt_money_ui(convert_from_base(d_monto_base))
+        else:
+            desc_txt = "—"
+
+        vals = [
+            it.get("codigo", ""),
+            prod,
+            qty_txt,
+            precio_ui,
+            desc_txt,
+            subtotal_ui,
+        ]
+        for col, val in enumerate(vals):
+            tbl.setItem(r, col, QTableWidgetItem(str(val)))
+
+        # Chequeo de stock con float (visual) en cantidad
+        try:
+            cat_u = (it.get("categoria") or "").upper()
+            disp = float(nz(it.get("stock_disponible"), 0.0))
+            cant = float(nz(it.get("cantidad"), 0.0))
+            mult = 50.0 if (
+                APP_COUNTRY in ("VENEZUELA", "PARAGUAY") and cat_u in CATS
+            ) else 1.0
+            if cant * mult > disp and disp >= 0.0:
+                qty_item = tbl.item(r, 2)
+                if qty_item:
+                    qty_item.setForeground(QBrush(Qt.red))
+        except Exception:
+            pass
+
+    v.addWidget(tbl)
+
+    # Totales generales
+    v.addWidget(
+        QLabel(
+            f"<b>Subtotal sin descuento:</b> "
+            f"{fmt_money_ui(convert_from_base(subtotal_bruto_base))}"
+        )
+    )
+    v.addWidget(
+        QLabel(
+            f"<b>Descuento total:</b> "
+            f"-{fmt_money_ui(convert_from_base(descuento_total_base))}"
+        )
+    )
+    v.addWidget(
+        QLabel(
+            f"<b>Total General:</b> "
+            f"{fmt_money_ui(convert_from_base(total_neto_base))}"
+        )
+    )
+
+    btn = QPushButton("Cerrar")
+    btn.clicked.connect(dlg.accept)
+    v.addWidget(btn)
+    dlg.exec()
+
+
 # ===================== Diálogos de listado / custom =====================
+
 
 class SelectorTablaSimple(QDialog):
     def __init__(self, parent, titulo, filas, app_icon: QIcon = QIcon()):
@@ -172,7 +743,6 @@ class CustomProductDialog(QDialog):
 
     def _guardar(self):
         from .utils import to_float
-        from PySide6.QtWidgets import QMessageBox
 
         codigo = self.edCodigo.text().strip()
         nombre = self.edNombre.text().strip()
@@ -244,13 +814,13 @@ class ListadoProductosDialog(QDialog):
 
     def __init__(
         self,
-        parent,
+        self_parent,
         productos,
         presentaciones,
         on_select,
         app_icon: QIcon = QIcon(),
     ):
-        super().__init__(parent)
+        super().__init__(self_parent)
         self.setWindowTitle("Listado de Productos")
         self.resize(720, 480)
         if not app_icon.isNull():
@@ -543,13 +1113,17 @@ class ListadoProductosDialog(QDialog):
             self._on_select(codigo)
 
 
+# ================== Selector de precio (modal, robusto) ==================
+# (Trabaja en moneda base internamente; lo que muestra se adapta a la moneda actual)
+
+
 def show_discount_editor(
     parent,
     app_icon: QIcon,
     base_unit_price: float,
     quantity: float,
     current_pct: float = 0.0,
-) -> dict | None:
+) -> Optional[dict]:
     """
     Diálogo genérico para configurar descuento de un ítem.
 
@@ -592,14 +1166,13 @@ def show_discount_editor(
 
     form = QFormLayout()
     sp_pct = QDoubleSpinBox()
-    # Más precisión en el porcentaje para poder clavar montos redondos
     sp_pct.setDecimals(6)
     sp_pct.setSingleStep(0.0001)
     sp_pct.setRange(0.0, 100.0)
     sp_pct.setSuffix(" %")
 
     sp_monto = QDoubleSpinBox()
-    sp_monto.setDecimals(2)  # montos siguen con 2 decimales
+    sp_monto.setDecimals(2)
     sp_monto.setRange(0.0, float(total_ui) if total_ui > 0 else 0.0)
     sp_monto.setButtonSymbols(QDoubleSpinBox.NoButtons)
 
@@ -643,7 +1216,7 @@ def show_discount_editor(
     bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     v.addWidget(bb)
 
-    payload = {}
+    payload: dict = {}
 
     def accept():
         pct = float(sp_pct.value())
@@ -656,7 +1229,7 @@ def show_discount_editor(
         # Convertir a base con la misma proporción
         amount_base = total_base * pct / 100.0 if total_base > 0 else 0.0
 
-        payload["pct"] = pct              # ahora con muchos más decimales
+        payload["pct"] = pct
         payload["amount_ui"] = amount_ui
         payload["amount_base"] = amount_base
         dlg.accept()
@@ -669,10 +1242,7 @@ def show_discount_editor(
     return payload
 
 
-# ================== Selector de precio (modal, robusto) ==================
-# (Trabaja en moneda base internamente; lo que muestra se adapta a la moneda actual)
-
-def show_price_picker(parent, app_icon: QIcon, item: dict) -> dict | None:
+def show_price_picker(parent, app_icon: QIcon, item: dict) -> Optional[dict]:
     """
     Devuelve:
       {"mode":"tier", "tier": "unitario|oferta|minimo|base", "price": float}
@@ -876,7 +1446,7 @@ def show_price_picker(parent, app_icon: QIcon, item: dict) -> dict | None:
     bb = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
     v.addWidget(bb)
 
-    payload = {"mode": None}
+    payload: dict = {"mode": None}
 
     def accept():
         if btn_c.isChecked():
