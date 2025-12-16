@@ -1,35 +1,60 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# === Rutas base ===
-# OJO: el release.ps1 hace Push-Location al root; por eso usamos cwd.
 ROOT = Path.cwd()
 MAIN = ROOT / "main.py"
 ICON_PATH = ROOT / "templates" / "logo_sistema.ico"
 
-# ===== DATA que deben viajar en el bundle =====
 datas = []
 
-# 1) Manifiesto del updater -> {app}\config
 cfg = ROOT / "config" / "cotizador.json"
 if cfg.exists():
     datas.append((str(cfg), "config"))
 
-# 2) Templates completos (preserva subcarpetas)
-#    (No usar Tree; usar par (src_dir, dest_dir) para PyInstaller 6.x)
 datas.append((str(ROOT / "templates"), "templates"))
 
-# 3) Archivos de PySide6 (plugins/platforms, etc.) sin .py
-datas += collect_data_files("PySide6", include_py_files=False)
+# Solo lo que tú usas (Widgets/Gui/Core)
+hiddenimports = [
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
+    "shiboken6",
+]
 
-# ===== Hidden imports (Qt) =====
-hiddenimports = []
-hiddenimports += collect_submodules("PySide6")
-hiddenimports += collect_submodules("shiboken6")
+excludes = [
+    "PySide6.scripts",
+    "project_lib",
+
+    # WebEngine (EL GIGANTE)
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebChannel",
+
+    # QML / Quick
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickControls2",
+    "PySide6.QtQuickWidgets",
+
+    # 3D / tools
+    "PySide6.Qt6Quick3D",  # por si acaso (algunas instalaciones)
+    "PySide6.Qt3DCore",
+    "PySide6.Qt3DInput",
+    "PySide6.Qt3DLogic",
+    "PySide6.Qt3DRender",
+    "PySide6.QtDesigner",
+
+    # Pdf (solo exclúyelo si NO usas QtPdf)
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+
+    # Multimedia (si no lo usas)
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
+]
 
 a = Analysis(
     [str(MAIN)],
@@ -40,7 +65,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PySide6.scripts', 'project_lib'],  # <- sin punto final
+    excludes=excludes,
+    optimize=2,
     noarchive=False,
 )
 

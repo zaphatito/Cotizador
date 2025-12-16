@@ -111,10 +111,13 @@ function Remove-Dir-Robust([string]$path) {
   } catch {}
 }
 Remove-Dir-Robust $distDir
+$buildRoot = Join-Path $ProjectRoot "build"
+$buildDir  = Join-Path $buildRoot  "SistemaCotizaciones"
+Remove-Dir-Robust $buildDir
 
 # 4.3 Ejecutar PyInstaller
 Push-Location $ProjectRoot
-& $py -m PyInstaller -y $SpecPath
+& $py -m PyInstaller -y --clean $SpecPath
 Pop-Location
 
 # 5) Compilar instalador (ISCC)
