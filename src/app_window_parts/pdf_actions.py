@@ -153,6 +153,7 @@ class PdfActionsMixin:
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=ruta,
                 items_pdf=datos["items"],
+                cliente_nombre=c,
                 printer_name="TICKERA",
                 width=48,          # si tu DIP SW-5 está en 42, cambia a 42
                 top_mm=0.0,        # para no sumar margen arriba

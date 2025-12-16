@@ -64,6 +64,7 @@ def build_ticket_text(
     items: list[dict],
     *,
     quote_number: str,
+    cliente_nombre: str = "",
     width: int = DEFAULT_TICKET_WIDTH,
     qty_text_fn: Optional[Callable[[dict], str]] = None,
     obs_max_len: int = 12,
@@ -88,8 +89,13 @@ def build_ticket_text(
     lines: list[str] = []
 
     qn = (quote_number or "").strip()
-    header = f"COTIZACION #{qn}" if qn else "COTIZACION"
-    lines.append(header[:width])                 # NO center() (lo centra ESC a 1)
+    header1 = f"COTIZACION #{qn}" if qn else "COTIZACION"
+    lines.append(header1[:width])
+
+    cli = (cliente_nombre or "").strip()
+    if cli:
+        lines.append(f"Nombre: {cli}"[:width])   # <-- NUEVO (2da línea)
+
     lines.append(("-" * width)[:width])
 
     for it in items:
@@ -143,9 +149,25 @@ def build_escpos_payload(
     if not lines:
         return b""
 
-    header_line = (lines[0] or "").strip()
-    sep_line = lines[1] if len(lines) > 1 else ""
-    body_lines = lines[2:] if len(lines) > 2 else []
+    header1 = (lines[0] or "").strip()
+    header2 = ""
+    sep_line = ""
+    body_start = 1
+
+    if len(lines) >= 2 and (lines[1] or "").startswith("-"):
+        # caso: no hay nombre, la 2da línea es separador
+        sep_line = lines[1]
+        body_start = 2
+    else:
+        # caso: hay nombre y luego separador
+        if len(lines) >= 2:
+            header2 = (lines[1] or "").strip()
+        if len(lines) >= 3:
+            sep_line = lines[2]
+        body_start = 3
+
+    body_lines = lines[body_start:] if len(lines) > body_start else []
+
 
     top_units = _mm_to_units(top_mm)
     bottom_units = _mm_to_units(bottom_mm)
@@ -168,7 +190,9 @@ def build_escpos_payload(
     # header center + bold
     out += b"\x1b\x61\x01"
     out += b"\x1b\x45\x01"
-    out += header_line.encode("ascii", errors="ignore") + b"\n"
+    out += header1.encode("ascii", errors="ignore") + b"\n"
+    if header2:
+        out += header2.encode("ascii", errors="ignore") + b"\n"
     out += b"\x1b\x45\x00"
 
     # body left
