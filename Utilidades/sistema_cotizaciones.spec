@@ -54,7 +54,7 @@ excludes = [
     # Multimedia (si no lo usas)
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
-    
+
     # Pillow: no uso AVIF
     "PIL._avif",
     "PIL.AvifImagePlugin",
@@ -71,7 +71,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
-    optimize=2,
+    optimize=1,
     noarchive=False,
 )
 
