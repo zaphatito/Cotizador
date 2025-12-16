@@ -6,6 +6,7 @@ from .dataio import cargar_excel_productos_desde_inventarios
 from .presentations import cargar_presentaciones
 from .app_window import SistemaCotizaciones
 from .logging_setup import get_logger
+from .config import COUNTRY_CODE, APP_CONFIG
 
 log = get_logger(__name__)
 
@@ -13,7 +14,7 @@ def run_app():
     set_win_app_id()
     app = QApplication(sys.argv)
 
-    from .config import COUNTRY_CODE, APP_CONFIG
+    
     app_icon = load_app_icon(COUNTRY_CODE)
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
