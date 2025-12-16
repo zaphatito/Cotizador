@@ -24,7 +24,9 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch -mandator
 
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch
 
-powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch -mandatory
+powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch 
+-mandatory
+-PruneOpenGLSW
 
 
 

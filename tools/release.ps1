@@ -7,12 +7,16 @@ param(
   [string]$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
-  # Ruta del venv (si no, detecta .venv/venv)
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
-  [switch]$Mandatory
+  [switch]$Mandatory,
+
+  # ✅ Solo si ya probaste en varias PCs y quieres ahorrar ~20MB
+  [switch]$PruneOpenGLSW
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Get-VersionTuple($v) {
   $parts = $v -split '\.'; while($parts.Count -lt 3){ $parts += '0' }
@@ -31,6 +35,20 @@ function Bump-Version($v, $kind) {
 function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) {
   $enc = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+function Remove-Dir-Robust([string]$path) {
+  if (!(Test-Path $path)) { return }
+  try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
+  for ($i=0; $i -lt 6; $i++) {
+    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 600 }
+  }
+  try {
+    $tmp = "$path._old_" + (Get-Random)
+    Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
+    Start-Sleep 2
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  } catch {}
 }
 
 # --- Detectar venv (primera pasada) ---
@@ -93,32 +111,59 @@ if ($env:VIRTUAL_ENV -and (Test-Path (Join-Path $env:VIRTUAL_ENV "Scripts\python
   throw "No encuentro el Python del venv. Activa el venv o crea .venv en la raíz."
 }
 
-# 4.2 Limpieza robusta
+# 4.2 Limpieza robusta del dist (el build lo mandaremos fuera de OneDrive)
 $distRoot = Join-Path $ProjectRoot "dist"
 $distDir  = Join-Path $distRoot "SistemaCotizaciones"
-Get-Process SistemaCotizaciones -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-function Remove-Dir-Robust([string]$path) {
-  if (!(Test-Path $path)) { return }
-  try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
-  for ($i=0; $i -lt 5; $i++) {
-    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 500 }
-  }
-  try {
-    $tmp = "$path._old_" + (Get-Random)
-    Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
-    Start-Sleep 2
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  } catch {}
-}
-Remove-Dir-Robust $distDir
-$buildRoot = Join-Path $ProjectRoot "build"
-$buildDir  = Join-Path $buildRoot  "SistemaCotizaciones"
-Remove-Dir-Robust $buildDir
 
-# 4.3 Ejecutar PyInstaller
+Get-Process SistemaCotizaciones -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Remove-Dir-Robust $distDir
+
+# ✅ Workpath fuera de OneDrive para evitar locks (este es el fix real)
+$workRoot = Join-Path $env:LOCALAPPDATA "Cotizador\pyi_work"
+Remove-Dir-Robust $workRoot
+
+# 4.3 Ejecutar PyInstaller (SIN --clean; ya limpiaste tú)
 Push-Location $ProjectRoot
-& $py -m PyInstaller -y --clean $SpecPath
+& $py -m PyInstaller -y --workpath $workRoot --distpath $distRoot $SpecPath
+$pyiExit = $LASTEXITCODE
 Pop-Location
+
+if ($pyiExit -ne 0) {
+  throw "PyInstaller falló con código $pyiExit. (Suele ser lock de OneDrive/AV; ya movimos el workpath fuera de OneDrive)."
+}
+
+# Verifica que exista el output esperado antes de Inno
+$builtExe = Join-Path $distDir "SistemaCotizaciones.exe"
+if (!(Test-Path $builtExe)) {
+  throw "PyInstaller terminó pero no se encontró: $builtExe"
+}
+
+# 4.4 PODA post-build (reduce tamaño)
+$internal = Join-Path $distDir "_internal"
+
+$pruneFiles = @(
+  "PIL\_avif.cp313-win_amd64.pyd",
+  "PySide6\Qt6Qml.dll",
+  "PySide6\Qt6Quick.dll",
+  "PySide6\Qt6Pdf.dll",
+  "PySide6\qmlls.exe"
+)
+
+foreach ($rel in $pruneFiles) {
+  $p = Join-Path $internal $rel
+  if (Test-Path $p) {
+    Remove-Item $p -Force
+    Write-Host "Removed: $p"
+  }
+}
+
+if ($PruneOpenGLSW) {
+  $opengl = Join-Path $internal "PySide6\opengl32sw.dll"
+  if (Test-Path $opengl) {
+    Remove-Item $opengl -Force
+    Write-Host "Removed (optional): $opengl"
+  }
+}
 
 # 5) Compilar instalador (ISCC)
 & "$ISCC" "$issFull"
@@ -151,7 +196,6 @@ Write-Host "  url     = $exeUrl"
 Write-Host "  sha256  = $sha"
 
 # 7) Git (LFS + commit)
-# Asegura LFS operativo
 try { git lfs env | Out-Null } catch { git lfs install | Out-Null }
 
 $attrPath = Join-Path $ProjectRoot ".gitattributes"

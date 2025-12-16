@@ -54,6 +54,11 @@ excludes = [
     # Multimedia (si no lo usas)
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
+    
+    # Pillow: no uso AVIF
+    "PIL._avif",
+    "PIL.AvifImagePlugin",
+
 ]
 
 a = Analysis(
