@@ -35,7 +35,7 @@ def _cut_cmd(mode: str, extra_units: int) -> bytes:
     GS V (ESC/POS)
       Function A: 1D 56 m            m=0/48 full, m=1/49 partial
       Function B: 1D 56 m n          m=65 full_feed, m=66 partial_feed
-    Function B: feed to (cut pos + n * vertical motion unit) and cut. :contentReference[oaicite:4]{index=4}
+    Function B: feed to (cut pos + n * vertical motion unit) and cut.
     """
     m = (mode or "").strip().lower()
     n = max(0, min(255, int(extra_units)))
@@ -94,7 +94,7 @@ def build_ticket_text(
 
     cli = (cliente_nombre or "").strip()
     if cli:
-        lines.append(f"Nombre: {cli}"[:width])   # <-- NUEVO (2da línea)
+        lines.append(f"Nombre: {cli}"[:width])
 
     lines.append(("-" * width)[:width])
 
@@ -127,8 +127,11 @@ def build_ticket_text(
             else:
                 disp_code = disp_code[:code_col]
 
-        code_print = disp_code[:code_col].ljust(code_col)
-        qty_print = qty_txt[:qty_col].rjust(qty_col)
+        # --- CAMBIO: rellenar la separación con guiones ---
+        code_print = disp_code[:code_col].ljust(code_col, "-")
+        qty_raw = qty_txt[:qty_col]
+        qty_print = qty_raw.rjust(qty_col, "-")
+        # -------------------------------------------------
         lines.append(f"{code_print}{qty_print}")
 
     if len(lines) <= 2:
@@ -168,7 +171,6 @@ def build_escpos_payload(
 
     body_lines = lines[body_start:] if len(lines) > body_start else []
 
-
     top_units = _mm_to_units(top_mm)
     bottom_units = _mm_to_units(bottom_mm)
 
@@ -202,8 +204,7 @@ def build_escpos_payload(
     for ln in body_lines:
         out += (ln or "").encode("ascii", errors="ignore") + b"\n"
 
-    # IMPORTANTE:
-    # - GS V Function B (65/66) ya "feed hasta posición de corte + n" y corta. :contentReference[oaicite:5]{index=5}
+    # GS V Function B (65/66) ya "feed hasta posición de corte + n" y corta.
     out += _cut_cmd(cut_mode, bottom_units)
 
     return bytes(out)
