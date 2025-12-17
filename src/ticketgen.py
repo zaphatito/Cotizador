@@ -67,7 +67,7 @@ def build_ticket_text(
     cliente_nombre: str = "",
     width: int = DEFAULT_TICKET_WIDTH,
     qty_text_fn: Optional[Callable[[dict], str]] = None,
-    obs_max_len: int = 12,
+    obs_max_len: int = 50,
 ) -> str:
     if not items:
         return ""
