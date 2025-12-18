@@ -20,6 +20,7 @@ DEFAULT_BOTTOM_MM = 10.0  # <-- lo que pediste: cortar 10mm después del último
 # - "full_feed" / "partial_feed": feed hasta posición de corte + extra y cortan (recomendado)
 # - "full_save"/"partial_save": alias de *_feed (tu impresora no soporta reverse-feed 103/104)
 DEFAULT_CUT_MODE = "full_feed"
+OBS_MAX_LEN = 50
 
 
 def _mm_to_units(mm: float) -> int:
@@ -67,7 +68,7 @@ def build_ticket_text(
     cliente_nombre: str = "",
     width: int = DEFAULT_TICKET_WIDTH,
     qty_text_fn: Optional[Callable[[dict], str]] = None,
-    obs_max_len: int = 50,
+    obs_max_len: int = OBS_MAX_LEN,
 ) -> str:
     if not items:
         return ""

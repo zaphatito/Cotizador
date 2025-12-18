@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.10"
+#define MyAppVersion "1.1.11"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -55,9 +55,11 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Dirs]
 ; No borrar datos de usuario nunca en upgrades
-Name: "{userdocs}\Cotizaciones\data";         Flags: uninsneveruninstall
-Name: "{userdocs}\Cotizaciones\cotizaciones"; Flags: uninsneveruninstall
-Name: "{userdocs}\Cotizaciones\logs";         Flags: uninsneveruninstall
+Name: "{userdocs}\Cotizaciones\data";           Flags: uninsneveruninstall
+Name: "{userdocs}\Cotizaciones\cotizaciones";   Flags: uninsneveruninstall
+Name: "{userdocs}\Cotizaciones\logs";           Flags: uninsneveruninstall
+; Backups de configuración (para upgrades)
+Name: "{userdocs}\Cotizaciones\config_backups"; Flags: uninsneveruninstall
 
 [Files]
 ; Bundle de PyInstaller
@@ -190,11 +192,32 @@ begin
   Result := False;
 end;
 
+function BoolToJson(const B: Boolean): string;
+begin
+  if B then Result := 'true' else Result := 'false';
+end;
+
+function SanitizeFilePart(const S: string): string;
+var i: Integer; c: Char;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    c := S[i];
+    if (c >= '0') and (c <= '9') then Result := Result + c else
+    if (c >= 'A') and (c <= 'Z') then Result := Result + c else
+    if (c >= 'a') and (c <= 'z') then Result := Result + c else
+    if (c = '.') or (c = '-') or (c = '_') then Result := Result + c
+    else Result := Result + '_';
+  end;
+end;
+
 var
   HaveOldConfig: Boolean;
   OldCountry, OldListing: string;
   OldAllow: Boolean;
   PrevDir: string;
+  PrevVersion: string;
   IsReinstall: Boolean;
 
   // Controles de las "3 ventanas viejas"
@@ -219,6 +242,55 @@ begin
   end;
 end;
 
+procedure BackupPreviousConfig();
+var
+  PrevCfg, J: string;
+  BackupDir, Tag, FullPath, MiniPath, LastPath: string;
+  AllowStr: string;
+  C, L: string;
+  A: Boolean;
+begin
+  if (not IsReinstall) or (PrevDir = '') then Exit;
+
+  PrevCfg := PrevDir + '\config\config.json';
+  J := '';
+  if not LoadStringFromFileSafe(PrevCfg, J) then Exit;
+
+  BackupDir := ExpandConstant('{userdocs}\Cotizaciones\config_backups');
+  ForceDir(BackupDir);
+
+  Tag := '';
+  if PrevVersion <> '' then
+    Tag := 'v' + SanitizeFilePart(PrevVersion) + '_';
+  Tag := Tag + GetDateTimeString('yyyymmdd_hhnnss', '', '');
+
+  FullPath := BackupDir + '\config_full_' + Tag + '.json';
+  SaveStringToFile(FullPath, J, False);
+
+  LastPath := BackupDir + '\config_full_last.json';
+  SaveStringToFile(LastPath, J, False);
+
+  { Backup mínimo con las 3 claves pedidas }
+  C := OldCountry; L := OldListing; A := OldAllow;
+
+  if C = '' then JsonExtractStr(J, 'country', C);
+  if L = '' then JsonExtractStr(J, 'listing_type', L);
+  if not JsonExtractBool(J, 'allow_no_stock', A) then A := False;
+
+  AllowStr := BoolToJson(A);
+
+  MiniPath := BackupDir + '\config_settings_' + Tag + '.json';
+  SaveStringToFile(
+    MiniPath,
+    '{' + #13#10 +
+    '  "country": "' + UpperCase(C) + '",' + #13#10 +
+    '  "listing_type": "' + UpperCase(L) + '",' + #13#10 +
+    '  "allow_no_stock": ' + AllowStr + #13#10 +
+    '}',
+    False
+  );
+end;
+
 function InitializeSetup(): Boolean;
 var PrevCfg, J: string;
 begin
@@ -227,11 +299,16 @@ begin
   OldListing := '';
   OldAllow := False;
   PrevDir := '';
+  PrevVersion := '';
 
   IsReinstall := TryGetPrevAppDir();
 
   if IsReinstall then
   begin
+    { Intentar leer versión anterior (opcional, para tag de backup) }
+    if not RegReadStrAnyView(HKLM, UNINST_KEY, 'DisplayVersion', PrevVersion) then
+      RegReadStrAnyView(HKCU, UNINST_KEY, 'DisplayVersion', PrevVersion);
+
     PrevCfg := PrevDir + '\config\config.json';
     if FileExists(PrevCfg) and LoadStringFromFileSafe(PrevCfg, J) then
     begin
@@ -322,11 +399,16 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   PaisSel, ListadoSelUpper, AllowStr: string;
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
+  PrevMiniPath: string;
 begin
   if CurStep = ssInstall then
   begin
     if IsReinstall and (PrevDir <> '') then
     begin
+      { Respaldar config anterior antes de borrarla }
+      BackupPreviousConfig();
+
+      { Limpiar config anterior en carpeta antigua }
       OldConfigPath := PrevDir + '\config';
       if DirExists(OldConfigPath) then
         DeleteTreeForce(OldConfigPath);
@@ -339,7 +421,7 @@ begin
     begin
       PaisSel := UpperCase(OldCountry);
       ListadoSelUpper := UpperCase(OldListing);
-      if OldAllow then AllowStr := 'true' else AllowStr := 'false';
+      AllowStr := BoolToJson(OldAllow);
     end
     else
     begin
@@ -360,7 +442,7 @@ begin
           ListadoSelUpper := 'AMBOS';
         end;
 
-        if chkNoStock.Checked then AllowStr := 'true' else AllowStr := 'false';
+        AllowStr := BoolToJson(chkNoStock.Checked);
       end
       else
       begin
@@ -389,10 +471,27 @@ begin
     if not SaveStringToFile(FJson, ConfJson, False) then
       MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
+    { Snapshot mínimo dentro de \config }
+    if IsReinstall and HaveOldConfig then
+    begin
+      PrevMiniPath := ConfigFolder + '\config.previous.json';
+      SaveStringToFile(
+        PrevMiniPath,
+        '{' + #13#10 +
+        '  "country": "' + UpperCase(OldCountry) + '",' + #13#10 +
+        '  "listing_type": "' + UpperCase(OldListing) + '",' + #13#10 +
+        '  "allow_no_stock": ' + BoolToJson(OldAllow) + #13#10 +
+        '}',
+        False
+      );
+    end;
+
     SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
     if FileExists(ConfigFolder + '\cotizador.json') then
       SetFileAttributes(ConfigFolder + '\cotizador.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
+    if FileExists(ConfigFolder + '\config.previous.json') then
+      SetFileAttributes(ConfigFolder + '\config.previous.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
   end;
 end;
 
@@ -510,17 +609,4 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
-
-
-
-
-
-
-
-
-
-
-
-
-
 

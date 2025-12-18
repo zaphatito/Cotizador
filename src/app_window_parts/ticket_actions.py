@@ -9,6 +9,7 @@ from ..pricing import cantidad_para_mostrar
 from ..ticketgen import (
     DEFAULT_PRINTER_NAME,
     DEFAULT_TICKET_WIDTH,
+    OBS_MAX_LEN,
     build_ticket_text,
     write_ticket_cmd_for_pdf,
 )
@@ -52,7 +53,7 @@ def generar_ticket_para_cotizacion(
             cliente_nombre=cliente_nombre,     # <-- NUEVO
             width=width,
             qty_text_fn=cantidad_para_mostrar,
-            obs_max_len=12,
+            obs_max_len=OBS_MAX_LEN,
         )
         if not ticket_text.strip():
             return {}
