@@ -5,12 +5,11 @@ Actualizador automático para Sistema de Cotizaciones.
 - type="files": descarga solo archivos cambiados y aplica con updater/apply_update.exe
 - fallback legacy: url + sha256 (Setup_*.exe)
 
-Modo "reintentar luego":
-- Si hay update pero falla por red/verificación/etc., NO bloquea el arranque.
-- Guarda un estado local con backoff y reintenta en el próximo arranque (SILENT).
-
-UI:
-- Si se pasa ui_cb, va emitiendo eventos para mostrar progreso.
+Mejoras:
+- Cuando falla FILES, muestra el error en UI y hace fallback.
+- El instalador YA NO se ejecuta desde la app: se ejecuta desde apply_update.exe (después de cerrar).
+- Evita cache viejo agregando ?ts= a TODAS las descargas (incluye media.githubusercontent.com)
+- Ignora sqlModels/app.sqlite3 y updater/apply_update.exe
 """
 
 import os
@@ -24,11 +23,8 @@ import time
 import urllib.request
 from typing import Dict, Any, Tuple, Optional, Callable
 
-
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
 
-
-# ----------------- ui helper -----------------
 
 def _emit(ui: UiCb, kind: str, **payload) -> None:
     if not ui:
@@ -38,8 +34,6 @@ def _emit(ui: UiCb, kind: str, **payload) -> None:
     except Exception:
         pass
 
-
-# ----------------- base helpers -----------------
 
 def _parse_version(v: str) -> tuple[int, int, int]:
     parts = re.findall(r"\d+", str(v or ""))
@@ -71,14 +65,16 @@ def _is_git_lfs_pointer_file(path: str) -> bool:
     except Exception:
         return False
 
-def _http_get_raw(url: str, timeout: int = 12, log=None) -> bytes:
+def _cachebust(url: str) -> str:
     sep = "&" if "?" in url else "?"
-    bust = f"{sep}_ts={int(time.time())}"
-    u = url + bust if "raw.githubusercontent.com" in url else url
+    return f"{url}{sep}ts={int(time.time())}"
+
+def _http_get_raw(url: str, timeout: int = 12, log=None) -> bytes:
+    u = _cachebust(url) if "raw.githubusercontent.com" in url else url
     req = urllib.request.Request(
         u,
         headers={
-            "User-Agent": "Cotizador-Updater/1.5",
+            "User-Agent": "Cotizador-Updater/1.6",
             "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
@@ -107,18 +103,12 @@ def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any
             log.warning(f"Updater: JSON inválido. Error={e}. Inicio respuesta='{head[:240]}'")
         return {}, text
 
-def _download(
-    url: str,
-    dest: str,
-    timeout: int = 120,
-    log=None,
-    ui: UiCb = None,
-    rel_label: str = "",
-) -> None:
+def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None, rel: str = "") -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "Cotizador-Updater/1.5"})
+    u = _cachebust(_normalize_github_url(url))  # ✅ cachebust también para media
+    req = urllib.request.Request(u, headers={"User-Agent": "Cotizador-Updater/1.6", "Cache-Control": "no-cache"})
     if log:
-        log.debug(f"Updater: GET {url} -> {dest}")
+        log.debug(f"Updater: GET {u} -> {dest}")
 
     with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
         total = 0
@@ -129,19 +119,16 @@ def _download(
 
         read = 0
         last_ui = 0.0
-
         while True:
             chunk = r.read(1024 * 64)
             if not chunk:
                 break
             f.write(chunk)
             read += len(chunk)
-
-            # throttling ui (cada 120ms)
             now = time.time()
             if ui and (now - last_ui) >= 0.12:
                 last_ui = now
-                _emit(ui, "download_bytes", rel=rel_label, read=read, total=total)
+                _emit(ui, "download_bytes", rel=rel, read=read, total=total)
 
 def _sha256_file(path: str) -> str:
     h = hashlib.sha256()
@@ -173,9 +160,6 @@ def _dst_for_rel(rel: str) -> str:
 def _normalize_rel(rel: str) -> str:
     return rel.replace("\\", "/").strip().lower()
 
-
-# ----------------- ignore rules -----------------
-
 def _build_ignore_set(app_config: Dict[str, Any]) -> set[str]:
     ignore: set[str] = set()
     user_list = app_config.get("update_ignore_paths", [])
@@ -183,24 +167,17 @@ def _build_ignore_set(app_config: Dict[str, Any]) -> set[str]:
         for x in user_list:
             if isinstance(x, str) and x.strip():
                 ignore.add(_normalize_rel(x))
-
-    # hard rules: NUNCA tocar estas rutas
     ignore.add("config/config.json")
     ignore.add("sqlmodels/app.sqlite3")
-
-    # ✅ IMPORTANTÍSIMO: evita que el aplicador se intente sobrescribir a sí mismo
-    ignore.add("updater/apply_update.exe")
+    ignore.add("updater/apply_update.exe")  # ✅ no auto-reemplazar el aplicador
     return ignore
 
 
-# ----------------- retry-later state -----------------
+# ----------------- retry-later -----------------
 
 def _state_path() -> str:
     d = os.path.join(_app_root(), "updater")
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
+    os.makedirs(d, exist_ok=True)
     return os.path.join(d, "update_state.json")
 
 def _read_state(log=None) -> Dict[str, Any]:
@@ -242,7 +219,6 @@ def _should_backoff(state: Dict[str, Any]) -> bool:
 
 def _mark_failure(app_config: Dict[str, Any], state: Dict[str, Any], remote_version: str, err: Exception, log=None) -> int:
     base, maxs = _retry_params(app_config)
-
     pending = str(state.get("pending_version") or "")
     fail_count = int(state.get("fail_count") or 0)
     if pending != remote_version:
@@ -256,14 +232,10 @@ def _mark_failure(app_config: Dict[str, Any], state: Dict[str, Any], remote_vers
     state["last_error"] = str(err)[:240]
     state["last_fail_ts"] = int(time.time())
     state["next_retry_ts"] = int(time.time() + delay)
-
     _write_state(state, log=log)
 
     if log:
-        log.warning(
-            "Updater: falló update (v%s). Reintentar en %ss (fail_count=%s). Error=%s",
-            remote_version, delay, fail_count, state["last_error"]
-        )
+        log.warning("Updater: falló update v%s; retry en %ss; err=%s", remote_version, delay, state["last_error"])
     return delay
 
 def _clear_failure(state: Dict[str, Any], log=None) -> None:
@@ -276,7 +248,30 @@ def _clear_failure(state: Dict[str, Any], log=None) -> None:
         _write_state(state, log=log)
 
 
-# ----------------- FILES mode -----------------
+# ----------------- runner (apply_update.exe) -----------------
+
+def _apply_exe(app_config: Dict[str, Any]) -> str:
+    rel_apply = str(app_config.get("update_apply_exe", "") or "").strip() or r"updater\apply_update.exe"
+    return os.path.join(_app_root(), rel_apply.replace("/", os.sep).replace("\\", os.sep))
+
+def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui: UiCb = None, log=None) -> None:
+    apply_exe = _apply_exe(app_config)
+    if not os.path.exists(apply_exe):
+        raise RuntimeError(f"No existe apply_update.exe: {apply_exe}")
+
+    plan_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", f"plan_{plan.get('version','0.0.0')}.json")
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, "w", encoding="utf-8") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=2)
+
+    pid = os.getpid()
+    restart_exe = sys.executable
+    _emit(ui, "status", text="Actualización iniciada. Cerrando para aplicar…")
+
+    subprocess.Popen([apply_exe, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe], close_fds=True)
+
+
+# ----------------- FILES -----------------
 
 def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
     base_url = str(manifest.get("base_url", "") or "").strip()
@@ -302,7 +297,6 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
         "delete": [],
     }
 
-    # delete[]
     deletes = manifest.get("delete", [])
     if isinstance(deletes, list):
         for rel in deletes:
@@ -315,7 +309,6 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
                 continue
             plan["delete"].append(_dst_for_rel(rel))
 
-    # Primero determinamos qué archivos realmente necesitan bajarse (para poder mostrar total)
     need_items: list[dict[str, str]] = []
     for f in files:
         if not isinstance(f, dict):
@@ -326,9 +319,7 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
             continue
         if not _is_safe_relpath(rel):
             continue
-
-        rel_n = _normalize_rel(rel)
-        if rel_n in ignore:
+        if _normalize_rel(rel) in ignore:
             continue
 
         dst = _dst_for_rel(rel)
@@ -344,7 +335,6 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
     _emit(ui, "progress_total", total=len(need_items))
     _emit(ui, "status", text=f"Archivos a actualizar: {len(need_items)}")
 
-    # Descargar + verificar
     for idx, it in enumerate(need_items, start=1):
         rel = it["rel"]
         sha = it["sha"]
@@ -354,16 +344,10 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
         url = _normalize_github_url(base_url + rel)
         staged = os.path.join(staging_root, rel.replace("/", os.sep))
 
-        _download(url, staged, timeout=180, log=log, ui=ui, rel_label=rel)
+        _download(url, staged, timeout=180, log=log, ui=ui, rel=rel)
 
         if _is_git_lfs_pointer_file(staged):
-            url2 = _normalize_github_url(url)
-            if url2 != url:
-                if log:
-                    log.info("Updater: archivo fue pointer LFS; reintentando con media.githubusercontent.com")
-                _download(url2, staged, timeout=180, log=log, ui=ui, rel_label=rel)
-            else:
-                raise RuntimeError(f"Pointer LFS en {rel}")
+            raise RuntimeError(f"Pointer LFS en {rel}")
 
         _emit(ui, "status", text=f"Verificando: {rel}")
         calc = _sha256_file(staged).lower()
@@ -376,30 +360,13 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
 
     return plan
 
-def _run_files_update(plan: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> None:
-    rel_apply = str(app_config.get("update_apply_exe", "") or "").strip() or r"updater\apply_update.exe"
-    apply_exe = os.path.join(_app_root(), rel_apply.replace("/", os.sep).replace("\\", os.sep))
-    if not os.path.exists(apply_exe):
-        raise RuntimeError(f"No existe apply_update.exe: {apply_exe}")
 
-    plan_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", f"plan_{plan.get('version','0.0.0')}.json")
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-    with open(plan_path, "w", encoding="utf-8") as f:
-        json.dump(plan, f, ensure_ascii=False, indent=2)
+# ----------------- INSTALLER (descarga + plan para apply_update) -----------------
 
-    _emit(ui, "status", text="Aplicando actualización...")
-    pid = os.getpid()
-    restart_exe = sys.executable
-
-    subprocess.Popen([apply_exe, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe], close_fds=True)
-
-
-# ----------------- installer fallback -----------------
-
-def _run_installer_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> None:
+def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
     url = str(manifest.get("url", "")).strip()
     if not url:
-        raise RuntimeError("Manifiesto sin 'url' (installer fallback)")
+        raise RuntimeError("Manifiesto sin 'url' (installer)")
     url = _normalize_github_url(url)
 
     sha256 = str(manifest.get("sha256", "")).strip().lower()
@@ -411,48 +378,41 @@ def _run_installer_update(manifest: Dict[str, Any], app_config: Dict[str, Any], 
     if ("/VERYSILENT" not in upper) and ("/SILENT" not in upper):
         extra_flags = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"] + extra_flags
 
+    version = str(manifest.get("version") or "0.0.0").strip()
+
     fd, tmp = tempfile.mkstemp(suffix=".exe", prefix="CotizadorSetup_")
     os.close(fd)
 
-    try:
-        _emit(ui, "status", text="Descargando instalador...")
-        _download(url, tmp, timeout=240, log=log, ui=ui, rel_label="Setup")
+    _emit(ui, "status", text="Descargando instalador…")
+    _download(url, tmp, timeout=240, log=log, ui=ui, rel="Setup")
 
-        if _is_git_lfs_pointer_file(tmp):
-            url2 = _normalize_github_url(url)
-            if url2 != url:
-                if log:
-                    log.info("Updater: Setup fue pointer LFS; reintentando con media.githubusercontent.com")
-                _download(url2, tmp, timeout=240, log=log, ui=ui, rel_label="Setup")
-            else:
-                raise RuntimeError("Setup descargado como pointer LFS")
+    if _is_git_lfs_pointer_file(tmp):
+        raise RuntimeError("Setup descargado como pointer LFS")
 
-        if sha256:
-            _emit(ui, "status", text="Verificando instalador...")
-            calc = _sha256_file(tmp).lower()
-            if calc != sha256:
-                raise RuntimeError("Setup no superó verificación SHA-256")
-    except Exception:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-        raise
+    if sha256:
+        _emit(ui, "status", text="Verificando instalador…")
+        calc = _sha256_file(tmp).lower()
+        if calc != sha256:
+            raise RuntimeError("Setup no superó verificación SHA-256")
 
-    _emit(ui, "status", text="Ejecutando instalador...")
-    subprocess.Popen([tmp] + extra_flags, close_fds=True)
+    plan: Dict[str, Any] = {
+        "version": version,
+        "staging_root": "",
+        "files": [],
+        "delete": [],
+        "installer": {
+            "path": tmp,
+            "args": extra_flags,
+            "wait": True,
+            "delete_after": True,
+        },
+    }
+    return plan
 
 
 # ----------------- entrypoint -----------------
 
 def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = None, parent=None, log=None) -> Dict[str, Any]:
-    """
-    Devuelve dict con status para que la app decida:
-    - NO_UPDATE
-    - UPDATE_STARTED (files/installer)
-    - FAILED_RETRY_LATER (con retry_in)
-    - BACKOFF
-    """
     try:
         if not app_config.get("update_check_on_startup", True):
             return {"status": "DISABLED"}
@@ -477,7 +437,7 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
         except Exception:
             local_version = "0.0.0"
 
-        _emit(ui, "status", text="Buscando actualizaciones...")
+        _emit(ui, "status", text="Buscando actualizaciones…")
         manifest, _raw = _http_get_json(manifest_url, timeout=12, log=log)
         remote_version = str(manifest.get("version", "")).strip()
         if not remote_version:
@@ -489,32 +449,38 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
             return {"status": "NO_UPDATE", "local": local_version, "remote": remote_version}
 
         _emit(ui, "status", text=f"Actualización encontrada: {local_version} → {remote_version}")
-
         pkg_type = str(manifest.get("type", "") or "").strip().lower() or "installer"
 
         try:
             if pkg_type == "files":
-                _emit(ui, "status", text="Preparando actualización (files)...")
+                _emit(ui, "status", text="Preparando actualización (files)…")
                 plan = _plan_files_update(manifest, app_config, log=log, ui=ui)
                 if not plan.get("files") and not plan.get("delete"):
                     _clear_failure(state, log=log)
                     _emit(ui, "status", text="No hay cambios que aplicar.")
                     return {"status": "NO_CHANGES"}
 
-                _run_files_update(plan, app_config, log=log, ui=ui)
+                _spawn_apply(plan, app_config, ui=ui, log=log)
                 return {"status": "UPDATE_STARTED", "method": "files", "remote": remote_version}
 
-            else:
-                _emit(ui, "status", text="Preparando actualización (installer)...")
-                _run_installer_update(manifest, app_config, log=log, ui=ui)
-                return {"status": "UPDATE_STARTED", "method": "installer", "remote": remote_version}
+            # installer directo
+            _emit(ui, "status", text="Preparando actualización (installer)…")
+            plan = _plan_installer(manifest, app_config, log=log, ui=ui)
+            _spawn_apply(plan, app_config, ui=ui, log=log)
+            return {"status": "UPDATE_STARTED", "method": "installer", "remote": remote_version}
 
         except Exception as e:
-            # fallback al instalador si hay url
+            # mostrar el error real antes del fallback
+            _emit(ui, "status", text=f"Error en actualización: {e}")
+            if log:
+                log.exception("Updater: fallo; intentando fallback instalador")
+
             try:
+                # fallback si hay url
                 if str(manifest.get("url", "") or "").strip():
-                    _emit(ui, "status", text="Fallback: usando instalador...")
-                    _run_installer_update(manifest, app_config, log=log, ui=ui)
+                    _emit(ui, "status", text="Fallback: usando instalador…")
+                    plan = _plan_installer(manifest, app_config, log=log, ui=ui)
+                    _spawn_apply(plan, app_config, ui=ui, log=log)
                     return {"status": "UPDATE_STARTED", "method": "installer_fallback", "remote": remote_version}
             except Exception as e2:
                 if log:
@@ -526,6 +492,6 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
 
     except Exception as e:
         if log:
-            log.exception("Updater: error inesperado; se continúa con la app: %s", e)
+            log.exception("Updater: error inesperado: %s", e)
         _emit(ui, "failed", error=str(e), retry_in=0)
         return {"status": "FAILED_RETRY_LATER", "error": str(e), "retry_in": 0}

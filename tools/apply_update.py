@@ -10,7 +10,6 @@ import time
 IS_WIN = os.name == "nt"
 
 
-# -------- UI opcional (Tkinter) --------
 class _TkUI:
     def __init__(self, total_steps: int):
         self.ok = False
@@ -150,8 +149,9 @@ def main() -> int:
 
     deletes = [p for p in (plan.get("delete", []) or []) if isinstance(p, str) and p]
     files = [it for it in (plan.get("files", []) or []) if isinstance(it, dict)]
+    installer = plan.get("installer") if isinstance(plan.get("installer"), dict) else None
 
-    total_steps = 1 + len(deletes) + len(files) + 1  # wait + actions + restart
+    total_steps = 2 + len(deletes) + len(files) + (3 if installer else 0)  # wait + cleanup + actions + installer + restart
     ui = _TkUI(total_steps)
 
     ui.set_text("Cerrando la aplicación…")
@@ -177,7 +177,31 @@ def main() -> int:
             ui.close()
             return 20
 
-    # Cleanup
+    # Run installer if present (wait it)
+    if installer:
+        inst_path = str(installer.get("path") or "")
+        inst_args = installer.get("args") or []
+        wait = bool(installer.get("wait", True))
+        delete_after = bool(installer.get("delete_after", True))
+
+        ui.advance("Ejecutando instalador…")
+        try:
+            proc = subprocess.Popen([inst_path] + list(inst_args), close_fds=True)
+        except Exception:
+            ui.close()
+            return 30
+
+        if wait:
+            ui.advance("Instalando…")
+            rc = proc.wait()
+            if rc != 0:
+                ui.close()
+                return 31
+
+        if delete_after and inst_path:
+            _safe_remove(inst_path)
+
+    # Cleanup staging
     ui.advance("Limpiando…")
     staging_root = plan.get("staging_root") or ""
     if isinstance(staging_root, str) and staging_root:

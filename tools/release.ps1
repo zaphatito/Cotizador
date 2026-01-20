@@ -84,7 +84,6 @@ $workRoot = Join-Path $env:LOCALAPPDATA "Cotizador\pyi_work"
 Remove-Dir-Robust $workRoot
 
 Push-Location $ProjectRoot
-& $py -m PyInstaller -y
 & $py -m PyInstaller -y --workpath $workRoot --distpath $distRoot $SpecPath
 $pyiExit = $LASTEXITCODE
 Pop-Location

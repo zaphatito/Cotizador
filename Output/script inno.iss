@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.2.1"
+#define MyAppVersion "2.2.2"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -608,6 +608,7 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
 
 
