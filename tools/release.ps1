@@ -11,17 +11,36 @@ param(
   [switch]$Mandatory,
   [switch]$PruneOpenGLSW
 )
+Write-Host ("PSBoundParameters=" + ($PSBoundParameters | ConvertTo-Json -Compress))
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Get-VersionTuple($v) { $parts = $v -split '\.'; while($parts.Count -lt 3){ $parts += '0' }; return ,([int]$parts[0]),([int]$parts[1]),([int]$parts[2]) }
-function Bump-Version($v, $kind) {
-  $M,$m,$p = Get-VersionTuple $v
-  switch ($kind) { "major" { $M++; $m=0; $p=0 } "minor" { $m++; $p=0 } default { $p++ } }
-  return "$M.$m.$p"
+function Parse-Semver([string]$v) {
+  $v = ($v ?? "").Trim()
+  if ($v -notmatch '^\s*(\d+)\.(\d+)\.(\d+)\s*$') {
+    throw "Versión inválida '$v'. Debe ser SEMVER: M.m.p (ej: 1.1.13)"
+  }
+  [pscustomobject]@{
+    Major = [int]$Matches[1]
+    Minor = [int]$Matches[2]
+    Patch = [int]$Matches[3]
+  }
 }
+
+function Bump-Version([string]$v, [string]$kind) {
+  $pv = Parse-Semver $v
+  $kind = ($kind ?? "").ToLowerInvariant()
+
+  switch ($kind) {
+    "major" { return "{0}.{1}.{2}" -f ($pv.Major + 1), 0, 0 }
+    "minor" { return "{0}.{1}.{2}" -f $pv.Major, ($pv.Minor + 1), 0 }
+    "patch" { return "{0}.{1}.{2}" -f $pv.Major, $pv.Minor, ($pv.Patch + 1) }
+    default { throw "Bump inválido '$kind' (use major/minor/patch)" }
+  }
+}
+
 function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) { $enc = New-Object System.Text.UTF8Encoding($false); [System.IO.File]::WriteAllText($Path, $Text, $enc) }
 function Remove-Dir-Robust([string]$path) {
   if (!(Test-Path $path)) { return }
@@ -59,6 +78,28 @@ $cur = $Matches[1]
 $prev = $cur
 $next = Bump-Version $cur $Bump
 Write-Host "Versión actual: $cur  ->  Nueva versión: $next"
+$curV  = Parse-Semver $cur
+$nextV = Parse-Semver $next
+
+# Guard rails: si minor/patch toca major/minor -> aborta
+switch (($Bump ?? "").ToLowerInvariant()) {
+  "minor" {
+    if ($nextV.Major -ne $curV.Major) { throw "BUG: minor cambió major ($cur -> $next). Abortando." }
+    if ($nextV.Minor -ne ($curV.Minor + 1)) { throw "BUG: minor no incrementó correctamente ($cur -> $next). Abortando." }
+    if ($nextV.Patch -ne 0) { throw "BUG: minor debe resetear patch a 0 ($cur -> $next). Abortando." }
+  }
+  "patch" {
+    if ($nextV.Major -ne $curV.Major -or $nextV.Minor -ne $curV.Minor) { throw "BUG: patch cambió major/minor ($cur -> $next). Abortando." }
+    if ($nextV.Patch -ne ($curV.Patch + 1)) { throw "BUG: patch no incrementó correctamente ($cur -> $next). Abortando." }
+  }
+  "major" {
+    if ($nextV.Major -ne ($curV.Major + 1) -or $nextV.Minor -ne 0 -or $nextV.Patch -ne 0) {
+      throw "BUG: major inválido ($cur -> $next). Abortando."
+    }
+  }
+}
+
+Write-Host "Bump='$Bump' OK. ($cur -> $next)"
 
 $verTxt = $verTxt -replace '__version__\s*=\s*"[^"]+"', "__version__ = `"$next`""
 Set-Content -Path $verFile -Value $verTxt -Encoding UTF8
