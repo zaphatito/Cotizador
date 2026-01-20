@@ -21,9 +21,10 @@ from PySide6.QtWidgets import (
     QToolButton,
     QSizePolicy,
     QApplication,
+    QAbstractItemDelegate,
 )
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices
-from PySide6.QtCore import Qt, QUrl, QModelIndex
+from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer
 
 from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR
 from ..config import APP_COUNTRY, id_label_for_country
@@ -51,20 +52,98 @@ class UiMixin:
             self._shown_once = True
             self._center_on_screen()
 
+    # =============================
+    # FLUJO ENTER ENTRE INPUTS
+    # =============================
+    def _wire_enter_flow(self):
+        # Cliente -> Documento -> Teléfono -> Producto
+        try:
+            self.entry_cliente.returnPressed.connect(self._go_doc)
+            self.entry_cedula.returnPressed.connect(self._go_phone)
+            self.entry_telefono.returnPressed.connect(self._go_product_search)
+        except Exception:
+            pass
+
+    def _go_doc(self):
+        try:
+            self.entry_cedula.setFocus()
+            self.entry_cedula.selectAll()
+        except Exception:
+            pass
+
+    def _go_phone(self):
+        try:
+            self.entry_telefono.setFocus()
+            self.entry_telefono.selectAll()
+        except Exception:
+            pass
+
+    def _go_product_search(self):
+        self._focus_product_search(clear=True)
+
+    def _focus_product_search(self, *, clear: bool = False):
+        try:
+            self.entry_producto.setFocus()
+            if clear:
+                self.entry_producto.clear()
+            self.entry_producto.selectAll()
+        except Exception:
+            pass
+
+    # =============================
+    # FLUJO: al agregar item -> editar cantidad
+    # y al terminar cantidad (Enter) -> volver a buscar
+    # =============================
     def _focus_last_row(self, row_index: int):
+        """
+        Cuando se agrega un item (signal item_added), enfocamos la fila y abrimos editor de cantidad (col 3).
+        """
         try:
             r = row_index if isinstance(row_index, int) else (self.model.rowCount() - 1)
             if r < 0:
                 return
-            idx0 = self.model.index(r, 0)
+
+            # Columna 3 = Cantidad (según tu UI)
+            idx_qty = self.model.index(r, 3)
+
             self.table.selectRow(r)
-            self.table.setCurrentIndex(idx0)
-            self.table.scrollTo(idx0, QAbstractItemView.PositionAtBottom)
+            self.table.setCurrentIndex(idx_qty)
+            self.table.scrollTo(idx_qty, QAbstractItemView.PositionAtBottom)
+
+            # Abrir editor de cantidad y enfocar
             if QApplication.activeModalWidget() is None:
                 self.table.setFocus()
+
+            # QTimer para que el edit se abra bien (luego del repaint/selección)
+            QTimer.singleShot(0, lambda: self.table.edit(idx_qty))
+
         except Exception:
             pass
 
+    def _on_qty_editor_closed(self, editor, hint):
+        """
+        Cuando termina la edición de cantidad:
+        - si fue por Enter / NextItem => volver al input de producto y limpiar.
+        """
+        try:
+            idx = self.table.currentIndex()
+            if not idx.isValid():
+                return
+            if idx.column() != 3:
+                return
+
+            # Enter normalmente cierra con EditNextItem. En algunos estilos puede venir NoHint.
+            if hint not in (QAbstractItemDelegate.EditNextItem, QAbstractItemDelegate.NoHint, QAbstractItemDelegate.SubmitModelCache):
+                return
+        except Exception:
+            # si algo falla, igual intentamos volver
+            pass
+
+        QTimer.singleShot(0, lambda: self._focus_product_search(clear=True))
+
+    # =============================
+    # UI
+    # =============================
     def abrir_carpeta_data(self):
         if not os.path.isdir(DATA_DIR):
             QMessageBox.warning(
@@ -121,15 +200,11 @@ class UiMixin:
         grp_cli.setLayout(form_cli)
         main.addWidget(grp_cli)
 
+        # ✅ Enter flow entre inputs cliente/doc/tlf/producto
+        self._wire_enter_flow()
+
         # --- Barra superior
         htop = QHBoxLayout()
-        btn_cambiar = QPushButton("Cambiar productos")
-        self._apply_btn_responsive(btn_cambiar, 120, 36)
-        btn_cambiar.clicked.connect(self.abrir_carpeta_data)
-
-        btn_cotizaciones = QPushButton("Cotizaciones")
-        self._apply_btn_responsive(btn_cotizaciones, 120, 36)
-        btn_cotizaciones.clicked.connect(self.abrir_carpeta_cotizaciones)
 
         self.btn_moneda = self._make_tool_icon(
             "💱", "Cambiar moneda y configurar tasa", self.abrir_dialogo_moneda_y_tasa
@@ -142,8 +217,6 @@ class UiMixin:
         self._apply_btn_responsive(btn_listado, 140, 36)
         btn_listado.clicked.connect(self.abrir_listado_productos)
 
-        htop.addWidget(btn_cambiar)
-        htop.addWidget(btn_cotizaciones)
         htop.addWidget(self.btn_moneda)
         htop.addWidget(self.lbl_moneda)
         htop.addStretch(1)
@@ -156,8 +229,11 @@ class UiMixin:
         grp_bus = QGroupBox("Búsqueda de Productos")
         vbus = QVBoxLayout()
         hbus = QHBoxLayout()
+
         self.entry_producto = QLineEdit()
         self.entry_producto.setPlaceholderText("Código, nombre, categoría o tipo")
+
+        # Mantienes tu lógica actual al presionar Enter en producto
         self.entry_producto.returnPressed.connect(self._on_return_pressed)
 
         lbl_bus = QLabel("Código o Nombre:")
@@ -182,7 +258,13 @@ class UiMixin:
         self.model = ItemsModel(self.items)
         self.table.setModel(self.model)
 
-        self.table.setItemDelegateForColumn(3, QuantityDelegate(self.table))
+        # ✅ Guardamos el delegate para enganchar closeEditor (Enter en cantidad)
+        self.qty_delegate = QuantityDelegate(self.table)
+        self.table.setItemDelegateForColumn(3, self.qty_delegate)
+        try:
+            self.qty_delegate.closeEditor.connect(self._on_qty_editor_closed)
+        except Exception:
+            pass
 
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
@@ -226,6 +308,7 @@ class UiMixin:
 
         # --- Botonera final
         hact = QHBoxLayout()
+
         btn_prev = QPushButton("Previsualizar")
         self._apply_btn_responsive(btn_prev, 120, 36)
         btn_prev.clicked.connect(self.previsualizar_datos)

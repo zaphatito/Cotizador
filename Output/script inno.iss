@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.1.11"
+#define MyAppVersion "1.1.12"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -23,8 +23,11 @@ AppPublisher=SistemaCotizacionesPerfumes
 VersionInfoCompany=SistemaCotizacionesPerfumes
 VersionInfoVersion={#MyAppVersion}
 
-; Usar forma "auto" para Program Files
-DefaultDirName={autopf}\{#MyAppName}
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+
+; Instalar por usuario (para poder actualizar sin admin)
+DefaultDirName={localappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 
 OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
@@ -61,9 +64,16 @@ Name: "{userdocs}\Cotizaciones\logs";           Flags: uninsneveruninstall
 ; Backups de configuración (para upgrades)
 Name: "{userdocs}\Cotizaciones\config_backups"; Flags: uninsneveruninstall
 
+; DB vive en {app}\sqlModels
+Name: "{app}\sqlModels"
+
 [Files]
-; Bundle de PyInstaller
-Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Bundle de PyInstaller (EXCLUYE la DB para no sobreescribir en upgrades)
+Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "sqlModels\app.sqlite3"
+
+; Seed de DB SOLO si no existe (instalación nueva)
+Source: "{#BuildDir}\sqlModels\app.sqlite3"; DestDir: "{app}\sqlModels"; Flags: ignoreversion onlyifdoesntexist
+
 ; Referencia (opcional)
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
@@ -220,7 +230,6 @@ var
   PrevVersion: string;
   IsReinstall: Boolean;
 
-  // Controles de las "3 ventanas viejas"
   PaisPage: TWizardPage;
   cbPais: TNewComboBox;
 
@@ -235,9 +244,9 @@ begin
   Result := RegReadStrAnyView(HKLM, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
   if not Result then
     Result := RegReadStrAnyView(HKCU, UNINST_KEY, 'Inno Setup: App Path', PrevDir);
-  if (not Result) and DirExists(ExpandConstant('{autopf}\') + '{#MyAppName}') then
+  if (not Result) and DirExists(ExpandConstant('{localappdata}\{#MyAppName}')) then
   begin
-    PrevDir := ExpandConstant('{autopf}\') + '{#MyAppName}';
+    PrevDir := ExpandConstant('{localappdata}\{#MyAppName}');
     Result := True;
   end;
 end;
@@ -270,7 +279,6 @@ begin
   LastPath := BackupDir + '\config_full_last.json';
   SaveStringToFile(LastPath, J, False);
 
-  { Backup mínimo con las 3 claves pedidas }
   C := OldCountry; L := OldListing; A := OldAllow;
 
   if C = '' then JsonExtractStr(J, 'country', C);
@@ -305,7 +313,6 @@ begin
 
   if IsReinstall then
   begin
-    { Intentar leer versión anterior (opcional, para tag de backup) }
     if not RegReadStrAnyView(HKLM, UNINST_KEY, 'DisplayVersion', PrevVersion) then
       RegReadStrAnyView(HKCU, UNINST_KEY, 'DisplayVersion', PrevVersion);
 
@@ -329,7 +336,6 @@ end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  { En REINSTALACIÓN: ocultar todo excepto Instalando y Finalización }
   if IsReinstall then
   begin
     if (PageID = wpInstalling) or (PageID = wpFinished) then
@@ -338,15 +344,14 @@ begin
       Result := True;
   end
   else
-    Result := False;  { Instalación nueva: no saltar páginas }
+    Result := False;
 end;
 
 procedure InitializeWizard;
 begin
   if IsReinstall then
-    exit;  { No crear páginas personalizadas en reinstalación }
+    exit;
 
-  { === País === }
   PaisPage := CreateCustomPage(
     wpSelectDir,
     'País por defecto',
@@ -363,7 +368,6 @@ begin
   cbPais.Items.Add('Venezuela');
   cbPais.ItemIndex := 0;
 
-  { === Tipo de listado === }
   ListadoPage := CreateCustomPage(
     PaisPage.ID,
     'Tipo de listado',
@@ -380,7 +384,6 @@ begin
   cbListado.Items.Add('Ambos');
   cbListado.ItemIndex := 2;
 
-  { === Permitir sin stock === }
   StockPage := CreateCustomPage(
     ListadoPage.ID,
     'Permitir sin stock',
@@ -405,10 +408,7 @@ begin
   begin
     if IsReinstall and (PrevDir <> '') then
     begin
-      { Respaldar config anterior antes de borrarla }
       BackupPreviousConfig();
-
-      { Limpiar config anterior en carpeta antigua }
       OldConfigPath := PrevDir + '\config';
       if DirExists(OldConfigPath) then
         DeleteTreeForce(OldConfigPath);
@@ -427,7 +427,6 @@ begin
     begin
       if not IsReinstall then
       begin
-        { Tomar de los controles de las 3 páginas }
         case cbPais.ItemIndex of
           1: PaisSel := 'PERU';
           2: PaisSel := 'VENEZUELA';
@@ -446,7 +445,6 @@ begin
       end
       else
       begin
-        { Reinstalación sin config previa detectable: defaults seguros }
         PaisSel := 'PARAGUAY';
         ListadoSelUpper := 'AMBOS';
         AllowStr := 'false';
@@ -462,16 +460,17 @@ begin
       '  "country": "' + PaisSel + '",' + #13#10 +
       '  "listing_type": "' + ListadoSelUpper + '",' + #13#10 +
       '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
-      '  "update_mode": "ASK",' + #13#10 +
+      '  "update_mode": "SILENT",' + #13#10 +
       '  "update_check_on_startup": true,' + #13#10 +
       '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
-      '  "update_flags": "/CLOSEAPPLICATIONS"' + #13#10 +
+      '  "update_apply_exe": "updater\\apply_update.exe",' + #13#10 +
+      '  "update_ignore_paths": ["sqlModels/app.sqlite3"],' + #13#10 +
+      '  "update_flags": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS"' + #13#10 +
       '}';
 
     if not SaveStringToFile(FJson, ConfJson, False) then
       MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
 
-    { Snapshot mínimo dentro de \config }
     if IsReinstall and HaveOldConfig then
     begin
       PrevMiniPath := ConfigFolder + '\config.previous.json';

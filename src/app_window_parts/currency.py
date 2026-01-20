@@ -1,12 +1,10 @@
 # src/app_window_parts/currency.py
 from __future__ import annotations
 
-import os
-import datetime
-
 from PySide6.QtCore import Qt
 
 from ..config import (
+    APP_CURRENCY,
     get_currency_context,
     set_currency_context,
     get_secondary_currencies,
@@ -14,204 +12,58 @@ from ..config import (
 from ..logging_setup import get_logger
 from ..widgets import show_currency_dialog
 
+from ..db_path import resolve_db_path
+from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.rates_repo import load_rates, set_rate
+
 log = get_logger(__name__)
 
 
 class CurrencyMixin:
-    # ---------------------------
-    # Formato histórico por línea (ESTRICTO):
-    #   YYYY-MM-DD HH:MM:SS CODE=RATE
-    #
-    # Ej:
-    #   2025-12-16 09:31:05 ARS=12.200000
-    #   2025-12-16 09:35:11 BRL=1.300000
-    #
-    # Reglas:
-    # - SOLO se usan tasas del día actual.
-    # - Para el mismo día y código, gana la ÚLTIMA por timestamp.
-    # - Líneas legacy sin timestamp quedan ignoradas (histórico viejo).
-    # ---------------------------
-
-    def _parse_rate_line(
-        self, line: str
-    ) -> tuple[datetime.datetime | None, str | None, float | None]:
-        """
-        Devuelve (ts, code, rate) o (None, None, None) si no parsea o no cumple formato.
-
-        Acepta:
-          - "YYYY-MM-DD HH:MM:SS CODE=RATE"
-          - "YYYY-MM-DD|HH:MM:SS|CODE=RATE"  (compat separador '|')
-          - "YYYY-MM-DD HH:MM:SS|CODE=RATE"  (mixto)
-        IGNORA (en modo estricto):
-          - "YYYY-MM-DD CODE=RATE" (sin hora)
-          - "CODE=RATE" (sin fecha)
-          - "123.45" (solo número)
-        """
-        s = (line or "").strip()
-        if not s or s.startswith("#"):
-            return (None, None, None)
-
-        # Normaliza separadores opcionales
-        s = s.replace("|", " ")
-        parts = s.split()
-        if len(parts) < 3:
-            # mínimo: fecha, hora, code=rate
-            return (None, None, None)
-
-        # Parse fecha
-        date_s = parts[0].strip()
-        time_s = parts[1].strip()
-        rest = " ".join(parts[2:]).strip()
-
-        try:
-            d = datetime.date.fromisoformat(date_s)
-        except Exception:
-            return (None, None, None)
-
-        # Parse hora (exigir HH:MM:SS)
-        try:
-            t = datetime.time.fromisoformat(time_s)  # requiere HH:MM:SS
-        except Exception:
-            return (None, None, None)
-
-        if "=" not in rest:
-            return (None, None, None)
-
-        code, val = rest.split("=", 1)
-        code = code.strip().upper()
-        val = val.strip().replace(",", ".")
-        if not code:
-            return (None, None, None)
-
-        try:
-            num = float(val)
-        except Exception:
-            return (None, None, None)
-
-        ts = datetime.datetime.combine(d, t)
-        return (ts, code, num)
+    """
+    Moneda + tasas 100% en SQLite (exchange_rates).
+    Además: dispara rates_updated si existe self._quote_events.
+    """
 
     def _load_exchange_rate_file(self) -> dict[str, float]:
-        """
-        Lee tasa.txt y devuelve SOLO las tasas del día actual.
-
-        - Si no hay tasas hoy, devuelve {} (no usa días anteriores ni legacy sin fecha).
-        - Si hay varias tasas hoy para el mismo código, toma la de mayor timestamp.
-        """
-        if not self._tasa_path or not os.path.exists(self._tasa_path):
-            return {}
-
-        today = datetime.date.today()
-        # (opcional) para ordenar/log bonito
-        sec_list = [c.upper() for c in (get_secondary_currencies() or []) if c]
-
-        latest_ts_by_code: dict[str, datetime.datetime] = {}
-        rates_today: dict[str, float] = {}
-
         try:
-            with open(self._tasa_path, "r", encoding="utf-8") as f:
-                for raw in f:
-                    line = raw.strip()
-                    if not line or line.startswith("#"):
-                        continue
-
-                    ts, code, rate = self._parse_rate_line(line)
-                    if ts is None or code is None or rate is None:
-                        continue
-                    if rate <= 0:
-                        continue
-
-                    # Solo HOY
-                    if ts.date() != today:
-                        continue
-
-                    prev_ts = latest_ts_by_code.get(code)
-                    if prev_ts is None or ts > prev_ts:
-                        latest_ts_by_code[code] = ts
-                        rates_today[code] = float(rate)
-
-            # Orden “bonito”: secundarias primero, luego el resto
-            if rates_today:
-                ordered = {}
-                for c in sec_list:
-                    if c in rates_today:
-                        ordered[c] = rates_today[c]
-                for c in sorted(rates_today.keys()):
-                    if c not in ordered:
-                        ordered[c] = rates_today[c]
-
-                log.info(
-                    "Tasas cargadas (solo HOY=%s) desde %s: %s",
-                    today.isoformat(),
-                    self._tasa_path,
-                    ordered,
-                )
-                return ordered
-
-            log.info(
-                "No hay tasas registradas para HOY=%s en %s. Se usarán como 'sin configurar'.",
-                today.isoformat(),
-                self._tasa_path,
-            )
-            return {}
-
-        except Exception as e:
-            log.warning("No se pudo leer tasa.txt (%s): %s", self._tasa_path, e)
-            return {}
-
-    def _save_exchange_rate_file(self, rates: dict[str, float]) -> None:
-        """
-        APPEND histórico: agrega entradas con timestamp completo.
-
-        Formato:
-          YYYY-MM-DD HH:MM:SS CODE=RATE
-
-        Solo escribe tasas > 0.
-        """
-        try:
-            os.makedirs(os.path.dirname(self._tasa_path), exist_ok=True)
-
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            lines: list[str] = []
-            for code, val in (rates or {}).items():
-                if not code:
-                    continue
+            db_path = resolve_db_path()
+            con = connect(db_path)
+            ensure_schema(con)
+            rates = load_rates(con, self.base_currency)
+            con.close()
+            out: dict[str, float] = {}
+            for k, v in (rates or {}).items():
                 try:
-                    num = float(val)
+                    out[str(k).upper()] = float(v)
                 except Exception:
                     continue
-                if num <= 0:
-                    continue
-                lines.append(f"{now} {str(code).upper()}={num:.6f}")
+            return out
+        except Exception:
+            return {}
 
-            if not lines:
-                return
-
-            file_exists = os.path.exists(self._tasa_path)
-            needs_leading_newline = False
-            if file_exists:
-                try:
-                    # si el archivo no termina en \n, agregamos uno
-                    with open(self._tasa_path, "rb") as fb:
-                        fb.seek(0, os.SEEK_END)
-                        if fb.tell() > 0:
-                            fb.seek(-1, os.SEEK_END)
-                            last = fb.read(1)
-                            needs_leading_newline = (last != b"\n")
-                except Exception:
-                    needs_leading_newline = True
-
-            with open(self._tasa_path, "a", encoding="utf-8") as f:
-                if file_exists and needs_leading_newline:
-                    f.write("\n")
-                elif file_exists and os.path.getsize(self._tasa_path) > 0:
-                    f.write("\n")
-                f.write("\n".join(lines))
-
-            log.info("Tasas append (%s) en %s: %s", now, self._tasa_path, rates)
-        except Exception as e:
-            log.warning("No se pudo guardar tasa.txt (%s): %s", self._tasa_path, e)
+    def _save_exchange_rate_file(self, rates: dict[str, float] | None = None) -> None:
+        payload = rates if rates is not None else (getattr(self, "_rates", None) or {})
+        if not payload:
+            return
+        try:
+            db_path = resolve_db_path()
+            con = connect(db_path)
+            ensure_schema(con)
+            with tx(con):
+                for cur, rate in payload.items():
+                    if not cur:
+                        continue
+                    try:
+                        r = float(rate)
+                    except Exception:
+                        continue
+                    if r <= 0:
+                        continue
+                    set_rate(con, self.base_currency, str(cur).upper(), r)
+            con.close()
+        except Exception:
+            pass
 
     def _update_currency_label(self):
         if not hasattr(self, "lbl_moneda"):
@@ -222,7 +74,7 @@ class CurrencyMixin:
         cur = (cur or "").upper()
 
         if cur == base:
-            if self._rates:
+            if getattr(self, "_rates", None):
                 parts = []
                 for code, val in sorted(self._rates.items()):
                     try:
@@ -234,7 +86,7 @@ class CurrencyMixin:
             else:
                 txt = f"Moneda: {base} (tasas secundarias sin configurar)"
         else:
-            r = self._rates.get(cur)
+            r = (getattr(self, "_rates", {}) or {}).get(cur)
             if not r or r <= 0:
                 try:
                     r = float(rate_ctx)
@@ -260,7 +112,7 @@ class CurrencyMixin:
             self.base_currency,
             self.secondary_currency,
             exchange_rate,
-            saved_rates=self._rates,
+            saved_rates=getattr(self, "_rates", None) or {},
         )
         if not result:
             return
@@ -269,28 +121,25 @@ class CurrencyMixin:
     def _apply_currency_settings(self, settings: dict):
         base = self.base_currency
 
-        cur, _sec_principal, _r = get_currency_context()
-        old_currency = cur
+        cur_old, _sec_principal, _r = get_currency_context()
+        old_currency = (cur_old or "").upper()
 
         selected = (settings.get("currency") or base).upper()
         is_base = bool(settings.get("is_base", selected == base))
-        try:
-            selected_rate = float(settings.get("rate", 1.0))
-        except Exception:
-            selected_rate = 1.0
-        if selected_rate <= 0:
-            selected_rate = 1.0
-
-        prev_rates = dict(getattr(self, "_rates", {}) or {})
 
         rates = settings.get("rates") or {}
-        new_rates = {
-            (str(code).upper()): float(val)
-            for code, val in rates.items()
-            if isinstance(code, str)
-        }
+        new_rates: dict[str, float] = {}
+        for code, val in rates.items():
+            if not isinstance(code, str):
+                continue
+            try:
+                f = float(val)
+            except Exception:
+                f = 0.0
+            new_rates[code.upper()] = f if f > 0 else 0.0
 
-        # Guardar histórico SOLO de lo que cambió
+        # guardar cambios en DB
+        prev_rates = dict(getattr(self, "_rates", {}) or {})
         changed = {
             code: val
             for code, val in new_rates.items()
@@ -301,19 +150,31 @@ class CurrencyMixin:
 
         self._rates = new_rates
 
+        # aplicar contexto de moneda
         if is_base or selected == base:
             set_currency_context(base, 1.0)
         else:
-            set_currency_context(selected, selected_rate)
+            r = float(new_rates.get(selected, 0.0))
+            if r <= 0:
+                # si no hay tasa válida, forzar 1.0 para no romper UI
+                r = 1.0
+            set_currency_context(selected, r)
 
         self._update_currency_label()
 
+        # refrescar tabla
         if self.model.rowCount() > 0:
             top = self.model.index(0, 0)
-            bottom = self.model.index(
-                self.model.rowCount() - 1, self.model.columnCount() - 1
-            )
+            bottom = self.model.index(self.model.rowCount() - 1, self.model.columnCount() - 1)
             self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+
+        # ✅ disparar rates_updated para que otras ventanas recarguen tasas
+        qe = getattr(self, "_quote_events", None)
+        if qe is not None:
+            try:
+                qe.rates_updated.emit()
+            except Exception:
+                pass
 
         cur_new, _sec2, r_new = get_currency_context()
         log.info(

@@ -3,7 +3,9 @@ import os, pandas as pd
 from .utils import to_float, nz
 from .config import CATS
 
+
 def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
+    # ✅ todas las hojas desde la línea 5
     df = pd.read_excel(path, sheet_name=0, header=4, engine="openpyxl")
     df = df.dropna(how="all")
     cols_lower = {str(c).strip().lower(): c for c in df.columns}
@@ -20,17 +22,24 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
                     return orig
         return None
 
-    # Encabezados típicos + los que nos diste
+    # Encabezados típicos
     col_codigo  = col("codigo", "código", "cod.", "id", "referencia")
     col_nombre  = col("nombre", "descripcion", "descripción")
     col_depto   = col("departamento", "categoria", "categoría", "rubro")
     col_genero  = col("genero", "género")
     col_cant    = col("cantidad disponible", "cantidad", "stock", "existencia")
-    # Precio Máximo = precio_venta base
-    col_p_venta = col("precio maximo", "precio máximo",
-                      "precio venta", "p. venta", "precio", "precio unitario")
-    col_p_oferta= col("precio oferta", "p. oferta", "oferta")
-    col_p_min   = col("precio minimo", "precio mínimo", "minimo", "mínimo")
+
+    col_p_max   = col("precio maximo", "precio máximo", "precio máximo s/ igv", "precio maximo s/ igv")
+    col_p_min   = col("precio minimo", "precio mínimo", "precio mínimo s/ igv", "precio minimo s/ igv")
+    col_p_oferta= col("precio oferta", "precio oferta s/ igv", "p. oferta", "oferta")
+
+    # Si alguna no existe, fallback conservador (pero NO preferente)
+    if col_p_max is None:
+        col_p_max = col("precio venta", "p. venta", "p venta", "precio", "precio unitario")
+    if col_p_oferta is None:
+        col_p_oferta = col("p. oferta", "oferta")
+    if col_p_min is None:
+        col_p_min = col("minimo", "mínimo")
 
     records = []
     for _, row in df.iterrows():
@@ -45,9 +54,10 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
         # ⬅️ PRESERVAR DECIMALES: NO convertir a int
         cant = to_float(row.get(col_cant, 0) if col_cant else 0, 0.0)
 
-        p_venta  = to_float(row.get(col_p_venta, 0)  if col_p_venta  else 0, 0.0)
-        p_oferta = to_float(row.get(col_p_oferta, 0) if col_p_oferta else 0, 0.0)
-        p_min    = to_float(row.get(col_p_min, 0)    if col_p_min    else 0, 0.0)
+        # ✅ Mapeo exacto
+        p_max = to_float(row.get(col_p_max, 0) if col_p_max else 0, 0.0)
+        p_of  = to_float(row.get(col_p_oferta, 0) if col_p_oferta else 0, 0.0)
+        p_min = to_float(row.get(col_p_min, 0) if col_p_min else 0, 0.0)
 
         depto_up = (depto_raw or "").upper()
 
@@ -57,15 +67,18 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
             "categoria": depto_up,
             "departamento_excel": depto_raw,
             "genero": genero_raw,
-            # ⬅️ Guardamos float para que llegue con decimales al Listado
             "cantidad_disponible": cant,
-            "precio_venta": p_venta,                # = Precio Maximo
-            "precio_oferta_base": p_oferta,         # = Precio Oferta
-            "precio_minimo_base": p_min,            # = Precio Minimo
+
+            # ✅ tu lógica: precio_venta = Precio Maximo
+            "precio_venta": p_max,
+            "precio_oferta_base": p_of,
+            "precio_minimo_base": p_min,
+
             "__fuente": fuente,
         })
 
     return pd.DataFrame(records)
+
 
 def cargar_excel_productos_desde_inventarios(data_dir: str) -> pd.DataFrame:
     rutas = [
@@ -86,13 +99,12 @@ def cargar_excel_productos_desde_inventarios(data_dir: str) -> pd.DataFrame:
     for _, r in df.iterrows():
         cat = (r["categoria"] or "").upper()
 
-        # ⬅️ Mantener decimales en el catálogo también
         base = {
             "id": r["id"],
             "nombre": r["nombre"],
             "categoria": r["categoria"],
             "genero": r.get("genero", ""),
-            "cantidad_disponible": nz(r.get("cantidad_disponible"), 0.0),  # float, no int()
+            "cantidad_disponible": nz(r.get("cantidad_disponible"), 0.0),
         }
 
         if cat == "BOTELLAS":

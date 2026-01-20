@@ -1,23 +1,76 @@
 # src/config.py
 from __future__ import annotations
-import os, sys, json
+
+import os
+import sys
+import json
 from typing import Dict, Any, Tuple, List
 
-# --------------------------
-# Utilidades de rutas
-# --------------------------
-def _windows_documents_dir() -> str:
-    if os.name == "nt":
-        try:
-            from ctypes import windll, create_unicode_buffer
-            CSIDL_PERSONAL = 5
-            SHGFP_TYPE_CURRENT = 0
-            buf = create_unicode_buffer(260)
-            if windll.shell32.SHGetFolderPathW(None, CSIDL_PERSONAL, None, SHGFP_TYPE_CURRENT, buf) == 0:
-                return buf.value
-        except Exception:
-            pass
-    return os.path.join(os.path.expanduser("~"), "Documents")
+from .paths import DATA_DIR, user_docs_dir
+from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.settings_repo import get_setting, ensure_defaults, settings_is_empty, set_setting
+
+# Defaults (DB) como strings (solo se usan si NO hay config.json o para completar keys faltantes)
+DEFAULT_CONFIG_STR: dict[str, str] = {
+    "country": "PARAGUAY",
+    "listing_type": "AMBOS",
+    "allow_no_stock": "0",
+
+    "update_mode": "ASK",
+    "update_check_on_startup": "1",
+    "update_manifest_url": "",
+    "update_flags": "/CLOSEAPPLICATIONS",
+
+    "log_dir": "",
+    "log_level": "INFO",
+}
+
+# Categorías granel
+CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _base_dir_for_app() -> str:
+    if _is_frozen():
+        return os.path.dirname(sys.executable)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _can_write_sqlite(db_path: str) -> bool:
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        import sqlite3
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE IF NOT EXISTS __write_test(x INTEGER)")
+        con.execute("DROP TABLE __write_test")
+        con.commit()
+        con.close()
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_db_path_no_log() -> str:
+    primary = os.path.join(_base_dir_for_app(), "sqlModels", "app.sqlite3")
+    fallback = os.path.join(DATA_DIR, "app.sqlite3")
+    if _can_write_sqlite(primary):
+        return primary
+    return fallback
+
+
+def _resolve_db_path_for_config() -> str:
+    """
+    Usa la MISMA DB que el resto de la app.
+    Si db_path.resolve_db_path falla, cae al fallback interno.
+    """
+    try:
+        from .db_path import resolve_db_path
+        return resolve_db_path()
+    except Exception:
+        return _resolve_db_path_no_log()
 
 
 def _ensure_dir(p: str) -> str:
@@ -28,187 +81,235 @@ def _ensure_dir(p: str) -> str:
     return p
 
 
-# --------------------------
-# Detección de carpeta y archivo de configuración
-# --------------------------
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+def _normalize_path(p: str) -> str:
+    if not p:
+        return ""
+    try:
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(str(p))))
+    except Exception:
+        return str(p)
 
 
-def _candidate_config_dirs() -> List[str]:
-    dirs: List[str] = []
-    # 1) Si está "frozen" (PyInstaller), priorizar carpeta junto al ejecutable
-    if getattr(sys, "frozen", False):
-        dirs.append(os.path.join(os.path.dirname(sys.executable), "config"))
+def _candidate_config_paths() -> list[str]:
+    """
+    Busca un config json SOLO para SEED inicial.
+    Prioriza:
+      - <exe>/config/config.json (frozen)
+      - <root>/config/config.json (dev)
+      - cwd/config/config.json
+    y lo mismo para app_config.json.
+    """
+    base = _base_dir_for_app()
+    cands = []
 
-    # 2) Carpeta "config" relativa al cwd
-    dirs.append(os.path.join(os.getcwd(), "config"))
+    # frozen / install
+    cands.append(os.path.join(base, "config", "config.json"))
+    cands.append(os.path.join(base, "config", "app_config.json"))
 
-    # 3) Carpeta "config" relativa a este módulo
-    dirs.append(os.path.join(_THIS_DIR, "config"))
+    # dev (repo)
+    cands.append(os.path.join(base, "config", "config.json"))
+    cands.append(os.path.join(base, "config", "app_config.json"))
 
-    # Eliminar duplicados conservando orden
-    out: List[str] = []
-    seen: set[str] = set()
-    for d in dirs:
-        if d not in seen:
-            seen.add(d)
-            out.append(d)
+    # cwd
+    cands.append(os.path.join(os.getcwd(), "config", "config.json"))
+    cands.append(os.path.join(os.getcwd(), "config", "app_config.json"))
+
+    out = []
+    seen = set()
+    for p in cands:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
     return out
 
 
-def _pick_config_path() -> Tuple[str, str]:
-    for d in _candidate_config_dirs():
-        for fname in ("config.json", "app_config.json"):
-            p = os.path.join(d, fname)
-            if os.path.exists(p):
-                return d, p
-    # Si no existe, crear en el primer candidato
-    base = _candidate_config_dirs()[0]
-    _ensure_dir(base)
-    return base, os.path.join(base, "config.json")
+def _load_seed_overrides_from_json() -> dict[str, str]:
+    """
+    Lee config.json/app_config.json SOLO para sembrar LA PRIMERA VEZ.
+    Devuelve overrides en formato string compatible con settings.
 
+    OJO: si no hay json, devuelve {} (y ahí se usa DEFAULT_CONFIG_STR).
+    """
+    path = None
+    for p in _candidate_config_paths():
+        if os.path.exists(p):
+            path = p
+            break
+    if not path:
+        return {}
 
-CONFIG_DIR, CONFIG_PATH = _pick_config_path()
-
-# --------------------------
-# Defaults + constantes exportadas
-# --------------------------
-DEFAULT_CONFIG: Dict[str, Any] = {
-    "country": "PARAGUAY",     # "PARAGUAY" | "PERU" | "VENEZUELA"
-    "listing_type": "AMBOS",   # "PRODUCTOS" | "PRESENTACIONES" | "AMBOS"
-    "allow_no_stock": False,
-
-    # ==== Auto-updater ====
-    "update_mode": "ASK",              # "ASK" | "SILENT" | "OFF"
-    "update_check_on_startup": True,
-    "update_manifest_url": "",         # ej: "https://tu-dominio/updates/cotizador.json"
-    "update_flags": "/CLOSEAPPLICATIONS",
-
-    # logging opcional:
-    # "log_dir": "C:/Users/<usuario>/Documents/Cotizaciones/logs"
-    # "log_level": "INFO"  # ERROR, WARNING, INFO, DEBUG
-}
-
-# Categorías a granel usadas por pricing/app_window/etc.
-CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
-
-
-def _load_json(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
     except Exception:
         return {}
 
-
-def load_app_config() -> Dict[str, Any]:
-    cfg = DEFAULT_CONFIG.copy()
-    raw = _load_json(CONFIG_PATH)
-    if raw:
-        # country
-        val = str(raw.get("country", cfg["country"])).strip().upper()
-        if val in ("PARAGUAY", "PERU", "VENEZUELA"):
-            cfg["country"] = val
-
-        # listing_type
-        lt = str(raw.get("listing_type", cfg["listing_type"])).strip().upper()
-        if lt in ("PRODUCTOS", "PRESENTACIONES", "AMBOS"):
-            cfg["listing_type"] = lt
-
-        # allow_no_stock
+    def b01(x) -> str:
         try:
-            cfg["allow_no_stock"] = bool(raw.get("allow_no_stock", cfg["allow_no_stock"]))
+            return "1" if bool(x) else "0"
         except Exception:
-            pass
+            return "0"
 
-        # ==== claves de update ====
-        umode = str(raw.get("update_mode", cfg["update_mode"])).strip().upper()
-        if umode in ("ASK", "SILENT", "OFF"):
-            cfg["update_mode"] = umode
+    out: dict[str, str] = {}
 
-        try:
-            cfg["update_check_on_startup"] = bool(raw.get("update_check_on_startup", cfg["update_check_on_startup"]))
-        except Exception:
-            pass
+    if "country" in raw:
+        out["country"] = str(raw["country"]).strip().upper()
+    if "listing_type" in raw:
+        out["listing_type"] = str(raw["listing_type"]).strip().upper()
+    if "allow_no_stock" in raw:
+        out["allow_no_stock"] = b01(raw["allow_no_stock"])
 
-        if "update_manifest_url" in raw and str(raw["update_manifest_url"]).strip():
-            cfg["update_manifest_url"] = str(raw["update_manifest_url"]).strip()
+    if "update_mode" in raw:
+        out["update_mode"] = str(raw["update_mode"]).strip().upper()
+    if "update_check_on_startup" in raw:
+        out["update_check_on_startup"] = b01(raw["update_check_on_startup"])
+    if "update_manifest_url" in raw:
+        out["update_manifest_url"] = str(raw["update_manifest_url"]).strip()
+    if "update_flags" in raw:
+        out["update_flags"] = str(raw["update_flags"]).strip()
 
-        if "update_flags" in raw and isinstance(raw["update_flags"], str):
-            cfg["update_flags"] = raw["update_flags"].strip()
+    if "log_dir" in raw:
+        out["log_dir"] = str(raw["log_dir"]).strip()
+    if "log_level" in raw:
+        out["log_level"] = str(raw["log_level"]).strip().upper()
 
-        # logging (opcionales)
-        if "log_dir" in raw and str(raw["log_dir"]).strip():
-            cfg["log_dir"] = str(raw["log_dir"]).strip()
-        if "log_level" in raw and str(raw["log_level"]).strip():
-            cfg["log_level"] = str(raw["log_level"]).strip().upper()
+    return out
+
+
+def _get_meta(con, key: str) -> str | None:
+    r = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return str(r["value"]) if r and r["value"] is not None else None
+
+
+def _set_meta(con, key: str, value: str) -> None:
+    con.execute(
+        """
+        INSERT INTO meta(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (str(key), str(value)),
+    )
+
+
+def _seed_settings_once(con) -> None:
+    """
+    Regla:
+      - Primera vez (meta.settings_seeded no existe y settings vacío):
+          * Si hay config.json => ese JSON es la BASE inicial
+          * Si NO hay config.json => DEFAULT_CONFIG_STR es la base
+          * Luego se completan keys faltantes con DEFAULT_CONFIG_STR (sin sobreescribir)
+      - Luego se ignora para siempre el JSON, aunque cambie.
+      - Siempre se aseguran keys nuevas con DEFAULT_CONFIG_STR (INSERT OR IGNORE).
+    """
+    seeded_flag = _get_meta(con, "settings_seeded")
+
+    if seeded_flag is None:
+        # Primera vez (o DB vieja sin meta)
+        if settings_is_empty(con):
+            seed_from_json = _load_seed_overrides_from_json()
+
+            if seed_from_json:
+                # 1) insertar primero lo del json (base inicial)
+                ensure_defaults(con, seed_from_json)
+                # 2) completar lo que falte con defaults
+                ensure_defaults(con, DEFAULT_CONFIG_STR)
+            else:
+                # no hay json => defaults como base
+                ensure_defaults(con, DEFAULT_CONFIG_STR)
+
+        else:
+            # ya había settings (DB existente) pero sin meta flag
+            ensure_defaults(con, DEFAULT_CONFIG_STR)
+
+        # marcar para NO volver a usar JSON nunca más
+        _set_meta(con, "settings_seeded", "1")
+
+    else:
+        # Ya sembrado: nunca más aplicar JSON
+        ensure_defaults(con, DEFAULT_CONFIG_STR)
+
+        # Si por alguna razón alguien vació settings, reponer defaults (sin JSON)
+        if settings_is_empty(con):
+            ensure_defaults(con, DEFAULT_CONFIG_STR)
+
+
+def _load_db_config() -> Dict[str, Any]:
+    db_path = _resolve_db_path_for_config()
+    con = connect(db_path)
+    ensure_schema(con)
+
+    # ✅ transacción para que SE GUARDE (commit)
+    with tx(con):
+        _seed_settings_once(con)
+
+    # leer settings
+    country = get_setting(con, "country", DEFAULT_CONFIG_STR["country"]).strip().upper()
+    listing_type = get_setting(con, "listing_type", DEFAULT_CONFIG_STR["listing_type"]).strip().upper()
+    allow_no_stock = get_setting(con, "allow_no_stock", DEFAULT_CONFIG_STR["allow_no_stock"]).strip()
+
+    update_mode = get_setting(con, "update_mode", DEFAULT_CONFIG_STR["update_mode"]).strip().upper()
+    update_check = get_setting(con, "update_check_on_startup", DEFAULT_CONFIG_STR["update_check_on_startup"]).strip()
+    update_manifest_url = get_setting(con, "update_manifest_url", DEFAULT_CONFIG_STR["update_manifest_url"]).strip()
+    update_flags = get_setting(con, "update_flags", DEFAULT_CONFIG_STR["update_flags"]).strip()
+
+    log_dir = get_setting(con, "log_dir", DEFAULT_CONFIG_STR["log_dir"]).strip()
+    log_level = get_setting(con, "log_level", DEFAULT_CONFIG_STR["log_level"]).strip().upper()
+
+    con.close()
+
+    cfg: Dict[str, Any] = {
+        "country": country if country in ("PARAGUAY", "PERU", "VENEZUELA") else "PARAGUAY",
+        "listing_type": listing_type if listing_type in ("PRODUCTOS", "PRESENTACIONES", "AMBOS") else "AMBOS",
+        "allow_no_stock": (allow_no_stock == "1"),
+
+        "update_mode": update_mode if update_mode in ("ASK", "SILENT", "OFF") else "ASK",
+        "update_check_on_startup": (update_check != "0"),
+        "update_manifest_url": update_manifest_url,
+        "update_flags": update_flags,
+
+        "log_dir": log_dir,
+        "log_level": log_level if log_level in ("ERROR", "WARNING", "INFO", "DEBUG") else "INFO",
+    }
     return cfg
 
 
-APP_CONFIG = load_app_config()
+APP_CONFIG = _load_db_config()
 
-# --------------------------
-# Parámetros principales
-# --------------------------
-APP_COUNTRY: str      = APP_CONFIG["country"]
+APP_COUNTRY: str = APP_CONFIG["country"]
 APP_LISTING_TYPE: str = APP_CONFIG["listing_type"]
-ALLOW_NO_STOCK: bool  = APP_CONFIG["allow_no_stock"]
+ALLOW_NO_STOCK: bool = bool(APP_CONFIG["allow_no_stock"])
 
-# --------------------------
-# País / moneda / labels
-# --------------------------
+
 def currency_for_country(country: str) -> str:
     c = (country or "").upper()
-    # Moneda base por país:
     if c == "PERU":
-        return "PEN"   # Sol
+        return "PEN"
     if c == "VENEZUELA":
-        return "USD"   # Dólar
-    # Default: Paraguay
-    return "PYG"       # Guaraní
+        return "USD"
+    return "PYG"
 
 
 def secondary_currencies_for_country(country: str) -> List[str]:
-    """
-    Lista de monedas secundarias por país.
-
-    La idea es permitir MÁS de una moneda secundaria por país.
-    Ejemplo:
-      - PARAGUAY   → ["ARS", "BRL"]   (peso argentino, real brasileño)
-      - VENEZUELA  → ["VES"]
-      - PERU       → ["BOB"]
-    """
     c = (country or "").upper()
     if c == "PARAGUAY":
-        # Ya existía ARS; añadimos BRL como segunda moneda secundaria.
         return ["ARS", "BRL"]
     if c == "VENEZUELA":
         return ["VES"]
     if c == "PERU":
         return ["BOB"]
-    # Fallback: sin secundarias
     return []
 
 
 def secondary_currency_for_country(country: str) -> str:
-    """
-    Versión legacy: devuelve SOLO la moneda secundaria principal
-    (la primera de la lista de secondary_currencies_for_country).
-
-    Se mantiene para compatibilidad con código existente.
-    """
     lst = secondary_currencies_for_country(country)
-    if lst:
-        return lst[0]
-    # Fallback genérico
-    return "USD"
+    return lst[0] if lst else "USD"
 
 
-APP_CURRENCY: str               = currency_for_country(APP_COUNTRY)
+APP_CURRENCY: str = currency_for_country(APP_COUNTRY)
 SECONDARY_CURRENCIES: List[str] = secondary_currencies_for_country(APP_COUNTRY)
-# Moneda secundaria "principal" (para compatibilidad)
-SECONDARY_CURRENCY: str         = secondary_currency_for_country(APP_COUNTRY)
+SECONDARY_CURRENCY: str = secondary_currency_for_country(APP_COUNTRY)
 
 
 def _country_suffix(country: str) -> str:
@@ -228,9 +329,6 @@ def id_label_for_country(country: str) -> str:
     return "CEDULA / RUC"
 
 
-# --------------------------
-# Reglas de listado
-# --------------------------
 def listing_allows_products() -> bool:
     return APP_LISTING_TYPE in ("PRODUCTOS", "AMBOS")
 
@@ -239,53 +337,19 @@ def listing_allows_presentations() -> bool:
     return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
 
 
-# --------------------------
-# Contexto dinámico de moneda
-# --------------------------
-# Moneda en la que se muestran los precios en la UI (por defecto, la base).
 CURRENT_CURRENCY: str = APP_CURRENCY
-# Factor por el cual se multiplica un monto en moneda base para mostrarlo
-# en la moneda actual. Si CURRENT_CURRENCY == APP_CURRENCY, es 1.0.
 _CURRENCY_RATE: float = 1.0
 
 
 def get_currency_context() -> Tuple[str, str, float]:
-    """
-    Devuelve (moneda_actual, moneda_secundaria_principal, factor_base_a_actual).
-
-    - moneda_actual: código de la moneda que se está mostrando en la UI.
-    - moneda_secundaria_principal: la primera de las monedas secundarias
-      para el país actual (SECONDARY_CURRENCY).
-    - factor_base_a_actual:
-        * 1.0 cuando moneda_actual == APP_CURRENCY
-        * >1 o <1 cuando se trabaja en una moneda alternativa (secundaria)
-    """
     return CURRENT_CURRENCY, SECONDARY_CURRENCY, _CURRENCY_RATE
 
 
 def get_secondary_currencies() -> List[str]:
-    """
-    Devuelve la lista de monedas secundarias disponibles para el país actual.
-
-    Incluye SECONDARY_CURRENCY como primer elemento (si existe).
-    Esto está pensado para poblar combos / botones en la UI.
-    """
     return SECONDARY_CURRENCIES[:]
 
 
 def set_currency_context(new_currency: str, rate: float) -> None:
-    """
-    Configura la moneda actual de la UI y la tasa:
-
-    new_currency:
-        - APP_CURRENCY              → se trabaja en moneda base (factor = 1.0)
-        - Cualquier otra (por ej. alguna de get_secondary_currencies())
-          → se trabaja en esa moneda, usando 'rate'.
-
-    rate:
-        - cuántas unidades de 'new_currency' equivale 1 unidad de APP_CURRENCY.
-          Ej: si APP_CURRENCY='USD' y new_currency='VES', y 1 USD = 40 VES → rate=40.
-    """
     global CURRENT_CURRENCY, _CURRENCY_RATE
     new = (new_currency or APP_CURRENCY).upper()
     if new == APP_CURRENCY:
@@ -301,16 +365,8 @@ def set_currency_context(new_currency: str, rate: float) -> None:
 
 
 def convert_from_base(amount: float) -> float:
-    """
-    Inv: amount SIEMPRE viene expresado en la moneda base (APP_CURRENCY).
-
-    Convierte ese monto a la moneda actualmente seleccionada en la UI
-    usando la tasa configurada.
-    Si no hay tasa válida, devuelve el mismo monto.
-    """
     try:
-        _, _, rate = get_currency_context()
-        return float(amount) * float(rate)
+        return float(amount) * float(_CURRENCY_RATE)
     except Exception:
         try:
             return float(amount)
@@ -318,24 +374,19 @@ def convert_from_base(amount: float) -> float:
             return 0.0
 
 
-# --------------------------
-# Logging (rutas y nivel)
-# --------------------------
-def _default_log_dir() -> str:
-    base = _windows_documents_dir()
-    return _ensure_dir(os.path.join(base, "Cotizaciones", "logs"))
-
-
-_raw_log_dir = APP_CONFIG.get("log_dir", "").strip() if isinstance(APP_CONFIG.get("log_dir"), str) else ""
+_raw_log_dir = _normalize_path(APP_CONFIG.get("log_dir", "") or "")
 if _raw_log_dir:
-    LOG_DIR: str = _ensure_dir(os.path.abspath(os.path.expanduser(os.path.expandvars(_raw_log_dir))))
+    LOG_DIR: str = _ensure_dir(_raw_log_dir)
 else:
-    LOG_DIR: str = _default_log_dir()
+    LOG_DIR: str = user_docs_dir("logs")
 
 LOG_LEVEL: str = str(APP_CONFIG.get("log_level", "INFO")).strip().upper()
 if LOG_LEVEL not in ("ERROR", "WARNING", "INFO", "DEBUG"):
     LOG_LEVEL = "INFO"
 
+
+CONFIG_DIR = ""
+CONFIG_PATH = ""
 
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",

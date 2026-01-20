@@ -248,7 +248,7 @@ def _wrap_code_with_hyphen(c: canvas.Canvas, code: str, max_width: float, font_n
 # Generación de PDF (paginado + observaciones por página)
 # =====================================================
 
-def generar_pdf(datos: dict) -> str:
+def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | None = None) -> str:
     cc = _country()
     is_alt = cc in {"PE", "PY"}
     L = LAYOUT_ALT if is_alt else LAYOUT_VE
@@ -258,9 +258,18 @@ def generar_pdf(datos: dict) -> str:
 
     cliente_raw  = (datos.get("cliente","") or "").strip()
     cliente_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", cliente_raw).strip("_")
-    nro_cot      = _next_quote_number(cc)
-    nro_cot2     = nro_cot.rsplit("-", 1)[1]  # solo el correlativo numérico
-    out_path     = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
+    if fixed_quote_no:
+        nro_cot2 = str(fixed_quote_no).strip()
+        nro_cot = f"{cc}-{nro_cot2}"
+    else:
+        nro_cot = _next_quote_number(cc)
+        nro_cot2 = nro_cot.rsplit("-", 1)[1]
+
+    if out_path:
+        out_path = out_path
+    else:
+        out_path = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
+
 
     c = canvas.Canvas(out_path, pagesize=A4)
     c.setTitle(f"Cotización - {cliente_raw}")

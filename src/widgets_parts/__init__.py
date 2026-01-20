@@ -12,6 +12,8 @@ from .listado_productos_dialog import ListadoProductosDialog
 from .discount_editor import show_discount_editor
 from .price_picker import show_price_picker
 
+from .quote_history_dialog import QuoteHistoryWindow
+
 __all__ = [
     "_fmt_trim_decimal",
     "_first_nonzero",
@@ -24,4 +26,5 @@ __all__ = [
     "ListadoProductosDialog",
     "show_discount_editor",
     "show_price_picker",
+    "QuoteHistoryWindow",
 ]

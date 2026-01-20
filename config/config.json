@@ -1,7 +1,7 @@
 {
-  "country": "PARAGUAY",
+  "country": "PERU",
   "listing_type": "AMBOS",
-  "allow_no_stock": true,
+  "allow_no_stock": false,
   "update_mode": "ASK",
   "update_check_on_startup": true,
   "update_manifest_url": "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json",
