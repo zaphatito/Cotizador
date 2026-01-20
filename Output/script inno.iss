@@ -37,9 +37,10 @@ SolidCompression=yes
 
 ; Instalación NUEVA: mostrar todas las páginas
 DisableWelcomePage=no
-DisableDirPage=no
+DisableDirPage=yes
 DisableProgramGroupPage=no
 WizardStyle=modern
+UsePreviousAppDir=no
 
 ; Arquitecturas modernas
 ArchitecturesAllowed=x64compatible
