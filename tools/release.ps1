@@ -11,17 +11,19 @@ param(
   [switch]$Mandatory,
   [switch]$PruneOpenGLSW
 )
-Write-Host ("PSBoundParameters=" + ($PSBoundParameters | ConvertTo-Json -Compress))
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Parse-Semver([string]$v) {
-  $v = ($v ?? "").Trim()
+  if ($null -eq $v) { $v = "" }
+  $v = $v.Trim()
+
   if ($v -notmatch '^\s*(\d+)\.(\d+)\.(\d+)\s*$') {
     throw "Versión inválida '$v'. Debe ser SEMVER: M.m.p (ej: 1.1.13)"
   }
+
   [pscustomobject]@{
     Major = [int]$Matches[1]
     Minor = [int]$Matches[2]
@@ -31,7 +33,8 @@ function Parse-Semver([string]$v) {
 
 function Bump-Version([string]$v, [string]$kind) {
   $pv = Parse-Semver $v
-  $kind = ($kind ?? "").ToLowerInvariant()
+  if ($null -eq $kind) { $kind = "" }
+  $kind = $kind.ToLowerInvariant()
 
   switch ($kind) {
     "major" { return "{0}.{1}.{2}" -f ($pv.Major + 1), 0, 0 }
@@ -81,8 +84,7 @@ Write-Host "Versión actual: $cur  ->  Nueva versión: $next"
 $curV  = Parse-Semver $cur
 $nextV = Parse-Semver $next
 
-# Guard rails: si minor/patch toca major/minor -> aborta
-switch (($Bump ?? "").ToLowerInvariant()) {
+switch ($Bump.ToLowerInvariant()) {
   "minor" {
     if ($nextV.Major -ne $curV.Major) { throw "BUG: minor cambió major ($cur -> $next). Abortando." }
     if ($nextV.Minor -ne ($curV.Minor + 1)) { throw "BUG: minor no incrementó correctamente ($cur -> $next). Abortando." }
