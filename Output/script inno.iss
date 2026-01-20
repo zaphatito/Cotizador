@@ -62,7 +62,7 @@ Name: "{userdocs}\Cotizaciones\data";           Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\cotizaciones";   Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";           Flags: uninsneveruninstall
 ; Backups de configuración (para upgrades)
-Name: "{userdocs}\Cotizaciones\config_backups"; Flags: uninsneveruninstall
+Name: "{localappdata}\Cotizaciones\config_backups"; Flags: uninsneveruninstall
 
 ; DB vive en {app}\sqlModels
 Name: "{app}\sqlModels"
@@ -265,7 +265,7 @@ begin
   J := '';
   if not LoadStringFromFileSafe(PrevCfg, J) then Exit;
 
-  BackupDir := ExpandConstant('{userdocs}\Cotizaciones\config_backups');
+  BackupDir := ExpandConstant('{localappdata}\Cotizaciones\config_backups');
   ForceDir(BackupDir);
 
   Tag := '';
@@ -608,4 +608,5 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
