@@ -1,10 +1,14 @@
+import os
 import sys
+import time
 import ctypes
 from ctypes import wintypes
 
 import pandas as pd
-from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QApplication, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPlainTextEdit, QPushButton
+)
+from PySide6.QtCore import QTimer, Qt
 
 from .paths import set_win_app_id, load_app_icon, ensure_data_seed_if_empty, DATA_DIR
 from .logging_setup import get_logger
@@ -16,25 +20,93 @@ from .catalog_manager import CatalogManager
 from .quote_events import QuoteEvents
 
 from sqlModels.db import connect, ensure_schema, tx
-
 from .widgets_parts.quote_history_dialog import QuoteHistoryWindow
 
 log = get_logger(__name__)
 
 _MUTEX_HANDLE = None
-
-# IDs Windows (deben ser constantes y únicas por app)
 _MUTEX_NAME = "Local\\SistemaCotizaciones_SingleInstance"
 _SHOW_EVENT_NAME = "Local\\SistemaCotizaciones_ShowMainWindow"
-
 ERROR_ALREADY_EXISTS = 183
 
 
+class UpdateProgressDialog(QDialog):
+    def __init__(self, app_icon=None):
+        super().__init__(None)
+        self.setWindowTitle("Actualizando Sistema de Cotizaciones")
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setMinimumWidth(520)
+
+        if app_icon is not None and not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+
+        lay = QVBoxLayout(self)
+
+        self.lbl = QLabel("Iniciando…")
+        lay.addWidget(self.lbl)
+
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)  # indeterminado hasta saber total
+        lay.addWidget(self.bar)
+
+        self.out = QPlainTextEdit()
+        self.out.setReadOnly(True)
+        self.out.setMaximumBlockCount(500)
+        lay.addWidget(self.out)
+
+    def handle_event(self, kind: str, payload: dict):
+        # status text
+        if kind == "status":
+            t = str(payload.get("text", "") or "")
+            if t:
+                self.lbl.setText(t)
+                self.out.appendPlainText(t)
+
+        elif kind == "progress_total":
+            total = int(payload.get("total") or 0)
+            if total > 0:
+                self.bar.setRange(0, total)
+                self.bar.setValue(0)
+                self.lbl.setText("Preparando descarga…")
+                self.out.appendPlainText(f"Total archivos: {total}")
+            else:
+                self.bar.setRange(0, 0)
+
+        elif kind == "progress":
+            cur = int(payload.get("current") or 0)
+            total = int(payload.get("total") or 0)
+            text = str(payload.get("text") or "")
+            if total > 0:
+                self.bar.setRange(0, total)
+                self.bar.setValue(cur)
+            if text:
+                self.lbl.setText(text)
+                self.out.appendPlainText(text)
+
+        elif kind == "download_bytes":
+            # opcional: no cambiamos barra global por bytes (solo dejamos log)
+            rel = str(payload.get("rel") or "")
+            read = int(payload.get("read") or 0)
+            total = int(payload.get("total") or 0)
+            if total > 0 and rel:
+                pct = int((read / total) * 100)
+                self.lbl.setText(f"Descargando {rel}… {pct}%")
+
+        elif kind == "failed":
+            err = str(payload.get("error") or "")
+            retry_in = int(payload.get("retry_in") or 0)
+            msg = f"Falló la actualización. Se reintentará luego."
+            if retry_in > 0:
+                msg += f" (en ~{retry_in}s)"
+            if err:
+                msg += f"\n\nDetalle: {err}"
+            self.out.appendPlainText(msg)
+
+        QApplication.processEvents()
+
+
 def _request_show_existing_and_exit() -> None:
-    """
-    Segunda instancia: señaliza un evento global/local para que la primera se muestre.
-    Luego sale silenciosamente.
-    """
     try:
         OpenEventW = ctypes.windll.kernel32.OpenEventW
         OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
@@ -49,22 +121,16 @@ def _request_show_existing_and_exit() -> None:
         CloseHandle.restype = wintypes.BOOL
 
         EVENT_MODIFY_STATE = 0x0002
-
         h_evt = OpenEventW(EVENT_MODIFY_STATE, False, _SHOW_EVENT_NAME)
         if h_evt:
             SetEvent(h_evt)
             CloseHandle(h_evt)
     except Exception:
         pass
-
     sys.exit(0)
 
 
 def _single_instance_or_raise_existing() -> None:
-    """
-    Primera instancia: crea mutex.
-    Segunda instancia: pide a la primera que se muestre y sale SIN mensaje.
-    """
     global _MUTEX_HANDLE
     try:
         CreateMutexW = ctypes.windll.kernel32.CreateMutexW
@@ -85,86 +151,9 @@ def _single_instance_or_raise_existing() -> None:
         return
 
 
-def _install_show_event_listener(app: QApplication, get_window_callable):
-    """
-    Primera instancia: crea (o abre) un evento y lo consulta periódicamente.
-    Cuando se activa, hace focus/raise de la ventana.
-    """
-    try:
-        CreateEventW = ctypes.windll.kernel32.CreateEventW
-        CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
-        CreateEventW.restype = wintypes.HANDLE
-
-        WaitForSingleObject = ctypes.windll.kernel32.WaitForSingleObject
-        WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-        WaitForSingleObject.restype = wintypes.DWORD
-
-        ResetEvent = ctypes.windll.kernel32.ResetEvent
-        ResetEvent.argtypes = [wintypes.HANDLE]
-        ResetEvent.restype = wintypes.BOOL
-
-        CloseHandle = ctypes.windll.kernel32.CloseHandle
-        CloseHandle.argtypes = [wintypes.HANDLE]
-        CloseHandle.restype = wintypes.BOOL
-
-        WAIT_OBJECT_0 = 0
-        WAIT_TIMEOUT = 258
-
-        # manual_reset=True para que podamos ResetEvent luego de manejarlo
-        h_evt = CreateEventW(None, True, False, _SHOW_EVENT_NAME)
-        if not h_evt:
-            return
-
-        def poll():
-            try:
-                rc = WaitForSingleObject(h_evt, 0)
-                if rc == WAIT_OBJECT_0:
-                    ResetEvent(h_evt)
-
-                    win = get_window_callable()
-                    if win is None:
-                        return
-
-                    # Traer al frente (lo más confiable en Qt/Windows)
-                    try:
-                        if win.isMinimized():
-                            win.showNormal()
-                        win.show()
-                        win.raise_()
-                        win.activateWindow()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        timer = QTimer(app)
-        timer.setInterval(300)  # ms
-        timer.timeout.connect(poll)
-        timer.start()
-
-        # Cierra handle cuando cierra la app
-        def cleanup():
-            try:
-                CloseHandle(h_evt)
-            except Exception:
-                pass
-
-        app.aboutToQuit.connect(cleanup)
-
-    except Exception:
-        return
-
-
 def run_app():
     set_win_app_id()
     _single_instance_or_raise_existing()
-
-    # ===== Check de actualización en arranque (SILENT) =====
-    try:
-        from .updater import check_for_updates_and_maybe_install
-        check_for_updates_and_maybe_install(APP_CONFIG, parent=None, log=log)
-    except Exception:
-        log.exception("Fallo al ejecutar el chequeo de actualización")
 
     app = QApplication(sys.argv)
 
@@ -172,9 +161,50 @@ def run_app():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
+    # ===== CUADRO DE UPDATE =====
+    dlg = UpdateProgressDialog(app_icon=app_icon)
+    dlg.show()
+    dlg.handle_event("status", {"text": "Buscando actualizaciones…"})
+
+    try:
+        from .updater import check_for_updates_and_maybe_install
+        res = check_for_updates_and_maybe_install(APP_CONFIG, ui=dlg.handle_event, parent=None, log=log)
+    except Exception as e:
+        log.exception("Fallo al ejecutar el chequeo de actualización")
+        res = {"status": "FAILED_RETRY_LATER", "error": str(e), "retry_in": 0}
+
+    # Si inició update -> cerrar app para que apply_update pueda trabajar
+    if res.get("status") == "UPDATE_STARTED":
+        dlg.handle_event("status", {"text": "Actualización iniciada. Cerrando para aplicar…"})
+
+        # deja respirar la UI un instante
+        QApplication.processEvents()
+        time.sleep(0.35)
+        os._exit(0)
+
+    # Si falló -> botón "Reintentar luego" y continuar abriendo la app
+    if res.get("status") == "FAILED_RETRY_LATER":
+        dlg.close()
+        mb = QMessageBox()
+        mb.setIcon(QMessageBox.Warning)
+        mb.setWindowTitle("Actualización")
+        retry_in = int(res.get("retry_in") or 0)
+        err = str(res.get("error") or "")
+        txt = "No se pudo completar la actualización.\nSe reintentará luego."
+        if retry_in > 0:
+            txt += f"\n\nReintento en ~{retry_in} segundos."
+        if err:
+            txt += f"\n\nDetalle:\n{err}"
+        mb.setText(txt)
+        btn = mb.addButton("Reintentar luego", QMessageBox.AcceptRole)
+        mb.setDefaultButton(btn)
+        mb.exec()
+    else:
+        dlg.close()
+
+    # ===== normal arranque =====
     ensure_data_seed_if_empty()
 
-    # Por defecto, permitir abrir sin catálogo
     df_productos = pd.DataFrame()
     df_presentaciones = pd.DataFrame()
 
@@ -210,8 +240,6 @@ def run_app():
                 "El historial y configuraciones sí estarán disponibles, pero no se podrán abrir cotizaciones.",
             )
 
-        log.info("Catálogo desde DB: productos=%d presentaciones=%d", len(df_productos), len(df_presentaciones))
-
     except Exception as e:
         log.exception("Error inicializando DB/Schema")
         QMessageBox.critical(None, "Error", f"❌ Error inicializando la base de datos:\n{e}")
@@ -219,11 +247,6 @@ def run_app():
 
     catalog = CatalogManager(df_productos, df_presentaciones)
     events = QuoteEvents()
-
     win = QuoteHistoryWindow(catalog_manager=catalog, quote_events=events, app_icon=app_icon)
-
-    # Listener: si alguien abre otra instancia, esta se trae al frente
-    _install_show_event_listener(app, get_window_callable=lambda: win)
-
     win.show()
     sys.exit(app.exec())

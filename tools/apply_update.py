@@ -9,8 +9,79 @@ import time
 
 IS_WIN = os.name == "nt"
 
+
+# -------- UI opcional (Tkinter) --------
+class _TkUI:
+    def __init__(self, total_steps: int):
+        self.ok = False
+        self.total = max(1, int(total_steps or 1))
+        self.step = 0
+
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+
+            self.tk = tk
+            self.ttk = ttk
+
+            root = tk.Tk()
+            root.title("Actualizando Sistema de Cotizaciones")
+            root.resizable(False, False)
+            root.attributes("-topmost", True)
+
+            self.var = tk.StringVar(value="Iniciando…")
+            lbl = ttk.Label(root, textvariable=self.var, padding=(14, 12))
+            lbl.pack(fill="x")
+
+            self.pb = ttk.Progressbar(root, orient="horizontal", length=520, mode="determinate", maximum=self.total)
+            self.pb.pack(padx=14, pady=(0, 12), fill="x")
+
+            self.root = root
+            self._pump()
+            self.ok = True
+        except Exception:
+            self.ok = False
+
+    def _pump(self):
+        if not self.ok:
+            return
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            self.ok = False
+
+    def set_text(self, text: str):
+        if not self.ok:
+            return
+        try:
+            self.var.set(text)
+            self._pump()
+        except Exception:
+            pass
+
+    def advance(self, text: str = ""):
+        if not self.ok:
+            return
+        try:
+            self.step = min(self.total, self.step + 1)
+            if text:
+                self.var.set(text)
+            self.pb["value"] = self.step
+            self._pump()
+        except Exception:
+            pass
+
+    def close(self):
+        if not self.ok:
+            return
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+
 def _wait_pid_windows(pid: int, timeout_s: int = 180) -> None:
-    # Espera a que el proceso pid termine (sin dependencias externas)
     try:
         import ctypes
         from ctypes import wintypes
@@ -39,13 +110,14 @@ def _wait_pid_windows(pid: int, timeout_s: int = 180) -> None:
             step_ms = 250
             while waited < timeout_s * 1000:
                 rc = WaitForSingleObject(h, step_ms)
-                if rc == 0:  # signaled
+                if rc == 0:
                     return
                 waited += step_ms
         finally:
             CloseHandle(h)
     except Exception:
         time.sleep(2)
+
 
 def _atomic_replace(src: str, dst: str) -> None:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -62,6 +134,7 @@ def _safe_remove(path: str) -> None:
     except Exception:
         pass
 
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
@@ -75,39 +148,54 @@ def main() -> int:
     except Exception:
         return 10
 
+    deletes = [p for p in (plan.get("delete", []) or []) if isinstance(p, str) and p]
+    files = [it for it in (plan.get("files", []) or []) if isinstance(it, dict)]
+
+    total_steps = 1 + len(deletes) + len(files) + 1  # wait + actions + restart
+    ui = _TkUI(total_steps)
+
+    ui.set_text("Cerrando la aplicación…")
     if args.pid and IS_WIN:
         _wait_pid_windows(args.pid, timeout_s=180)
+    ui.advance("Aplicando cambios…")
 
     # Deletes
-    for p in plan.get("delete", []) or []:
-        if isinstance(p, str) and p:
-            _safe_remove(p)
+    for p in deletes:
+        ui.advance(f"Eliminando: {os.path.basename(p)}")
+        _safe_remove(p)
 
     # Replace files
-    for item in plan.get("files", []) or []:
+    for item in files:
+        src = item.get("src")
+        dst = item.get("dst")
+        if not src or not dst:
+            continue
+        ui.advance(f"Copiando: {os.path.basename(dst)}")
         try:
-            src = item.get("src")
-            dst = item.get("dst")
-            if not src or not dst:
-                continue
             _atomic_replace(src, dst)
         except Exception:
+            ui.close()
             return 20
 
     # Cleanup
+    ui.advance("Limpiando…")
     staging_root = plan.get("staging_root") or ""
     if isinstance(staging_root, str) and staging_root:
         _safe_remove(staging_root)
     _safe_remove(args.plan)
 
     # Restart app
+    ui.advance("Reiniciando…")
     if args.restart:
         try:
             subprocess.Popen([args.restart], close_fds=True)
         except Exception:
             pass
 
+    time.sleep(0.25)
+    ui.close()
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
