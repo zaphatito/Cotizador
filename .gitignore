@@ -7,4 +7,12 @@ build/
 *.msi
 *.zip
 *.log
+*.spec
 
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+sqlModels/app.sqlite3
