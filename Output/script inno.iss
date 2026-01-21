@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.6"
+#define MyAppVersion "1.2.7"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -465,7 +465,7 @@ begin
       '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
       '  "update_apply_exe": "updater\\apply_update.exe",' + #13#10 +
       '  "update_ignore_paths": ["sqlModels/app.sqlite3"],' + #13#10 +
-      '  "update_flags": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS"' + #13#10 +
+      '  "update_flags": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"' + #13#10 +
       '}';
 
     if not SaveStringToFile(FJson, ConfJson, False) then
@@ -608,6 +608,7 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
 
 

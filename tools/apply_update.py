@@ -225,13 +225,22 @@ def main() -> int:
             inst_args = list(installer.get("args") or [])
             wait = bool(installer.get("wait", True))
             delete_after = bool(installer.get("delete_after", True))
-
+            # Fuerza cierre por si quedó algún proceso vivo
+            try:
+                subprocess.run(["taskkill", "/IM", "SistemaCotizaciones.exe", "/F"], capture_output=True)
+            except Exception:
+                pass
+            time.sleep(0.4)
             ui.advance("Ejecutando instalador…")
             log(f"Run installer: {inst_path} args={inst_args}")
-            proc = subprocess.Popen([inst_path] + inst_args, close_fds=True)
-            if wait:
-                ui.advance("Instalando…")
+            if IS_WIN and wait:
+                # start /wait mejora compatibilidad con installers
+                cmd = os.environ.get("ComSpec", "cmd.exe")
+                proc = subprocess.Popen([cmd, "/c", "start", "", "/wait", inst_path] + inst_args, close_fds=True)
                 rc = proc.wait()
+            else:
+                proc = subprocess.Popen([inst_path] + inst_args, close_fds=True)
+                rc = proc.wait() if wait else 0
                 log(f"Installer exit code: {rc}")
                 if rc != 0:
                     raise RuntimeError(f"Installer failed rc={rc}")
