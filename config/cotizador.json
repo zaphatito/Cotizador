@@ -1,15 +1,15 @@
 {
-    "version":  "1.2.7",
+    "version":  "1.2.8",
     "type":  "files",
-    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/1.2.7/",
+    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/1.2.8/",
     "files":  [
                   {
                       "path":  "SistemaCotizaciones.exe",
-                      "sha256":  "7ebe7a276ee71435c14d93b1f009270abb267b826f66911c35e6d13f741e2dae"
+                      "sha256":  "0a994b5e0f580afc3cdd45e3a2afcd06c236110eff19dc77531556e4671d4b46"
                   },
                   {
                       "path":  "updater/apply_update.exe",
-                      "sha256":  "be405194992724c53602a61a9ede35a07f75a99d3873cb75d8bcc5ee6ba97333"
+                      "sha256":  "5f253cad342610a5508b232045102c90d316470fe9f0833687eab41f8a297e29"
                   },
                   {
                       "path":  "_internal/api-ms-win-core-console-l1-1-0.dll",
@@ -173,7 +173,7 @@
                   },
                   {
                       "path":  "_internal/base_library.zip",
-                      "sha256":  "0c91e10128bd9b7927aa3fd6ecc879b784928e60b074eaded49a67bdd9dc7ccf"
+                      "sha256":  "61a290b8fd4a9af2c21d9fc5b032d94f8b28a326d8544ea94ed1fe6b0db954f0"
                   },
                   {
                       "path":  "_internal/libcrypto-3.dll",
@@ -293,7 +293,7 @@
                   },
                   {
                       "path":  "_internal/config/cotizador.json",
-                      "sha256":  "634eb5d318593f0b3117a8ce97c039a358b9c5f60c7df63230d0f6d6125acc23"
+                      "sha256":  "0d65a127c931b0815ae49b156f1e791ed88da69952477c1b39ffb67daa5398de"
                   },
                   {
                       "path":  "_internal/dateutil/zoneinfo/dateutil-zoneinfo.tar.gz",
@@ -3792,7 +3792,7 @@
 
                ],
     "mandatory":  false,
-    "notes":  "Release 1.2.7",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.7.exe",
-    "sha256":  "C0869A2439660A4CE77292ACA87DA9D5C6418FC2287EF5DDA33DE888BC6DDD73"
+    "notes":  "Release 1.2.8",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.8.exe",
+    "sha256":  "0654DD8DD5499FB41087218004DCECD76A6E339C8841A4B2E921A15679C56098"
 }
