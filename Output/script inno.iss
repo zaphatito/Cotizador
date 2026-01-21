@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.14"
+#define MyAppVersion "1.2.12"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -24,7 +24,8 @@ VersionInfoCompany=SistemaCotizacionesPerfumes
 VersionInfoVersion={#MyAppVersion}
 
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=none
+UsePreviousPrivileges=no
 
 ; Instalar por usuario (para poder actualizar sin admin)
 DefaultDirName={localappdata}\{#MyAppName}
@@ -251,6 +252,127 @@ begin
   end;
 end;
 
+
+
+var
+  MaintAction: Integer;  // 0=cancel, 1=repair, 2=uninstall
+
+function IsSilentMode(): Boolean;
+begin
+  Result := WizardSilent or WizardVerySilent;
+end;
+
+function GetUninstallCmd(var Exe, Params: string): Boolean;
+var S: string; p: Integer;
+begin
+  Result := RegReadStrAnyView(HKCU, UNINST_KEY, 'UninstallString', S);
+  if not Result then
+    Result := RegReadStrAnyView(HKLM, UNINST_KEY, 'UninstallString', S);
+
+  if not Result then Exit;
+
+  S := Trim(S);
+
+  if (Length(S) > 0) and (S[1] = '"') then
+  begin
+    p := PosEx2('"', S, 2);
+    if p = 0 then begin Result := False; Exit; end;
+    Exe := Copy(S, 2, p-2);
+    Params := Trim(Copy(S, p+1, 2048));
+  end
+  else
+  begin
+    p := Pos(' ', S);
+    if p > 0 then
+    begin
+      Exe := Copy(S, 1, p-1);
+      Params := Trim(Copy(S, p+1, 2048));
+    end
+    else
+    begin
+      Exe := S;
+      Params := '';
+    end;
+  end;
+
+  Result := FileExists(Exe);
+end;
+
+procedure RunUninstallNow();
+var Exe, Params: string; RC: Integer;
+begin
+  if not GetUninstallCmd(Exe, Params) then
+  begin
+    MsgBox('No se encontró el desinstalador previo.', mbError, MB_OK);
+    Exit;
+  end;
+
+  { Lanzar desinstalación NORMAL (no silent) para que el usuario vea progreso.
+    (Tu uninstaller ya no mostrará opciones porque lo vamos a simplificar.) }
+  Exec(Exe, Params, '', SW_SHOW, ewWaitUntilTerminated, RC);
+end;
+
+function ShowMaintenanceDialog(): Integer;
+var
+  F: TSetupForm;
+  lbl: TNewStaticText;
+  btnRepair, btnUninstall, btnCancel: TNewButton;
+begin
+  Result := 0;
+
+  F := CreateCustomForm();
+  F.Caption := '{#MyAppName}';
+  F.ClientWidth := ScaleX(520);
+  F.ClientHeight := ScaleY(170);
+  F.Position := poScreenCenter;
+
+  lbl := TNewStaticText.Create(F);
+  lbl.Parent := F;
+  lbl.Left := ScaleX(12);
+  lbl.Top := ScaleY(12);
+  lbl.Width := F.ClientWidth - ScaleX(24);
+  lbl.Height := ScaleY(80);
+  lbl.AutoSize := False;
+  lbl.WordWrap := True;
+  lbl.Caption :=
+    'Ya existe una instalación de "' + '{#MyAppName}' + '".' + #13#10 +
+    '¿Qué deseas hacer?' + #13#10#13#10 +
+    '• Reparar/Actualizar: reinstala archivos sin tocar "' + '{userdocs}\Cotizaciones' + '".' + #13#10 +
+    '• Desinstalar: elimina la app y la configuración (mantiene "' + '{userdocs}\Cotizaciones' + '").';
+
+  btnRepair := TNewButton.Create(F);
+  btnRepair.Parent := F;
+  btnRepair.Caption := 'Reparar / Actualizar';
+  btnRepair.Left := ScaleX(12);
+  btnRepair.Top := F.ClientHeight - ScaleY(12) - ScaleY(28);
+  btnRepair.Width := ScaleX(160);
+  btnRepair.ModalResult := mrOk;
+
+  btnUninstall := TNewButton.Create(F);
+  btnUninstall.Parent := F;
+  btnUninstall.Caption := 'Desinstalar';
+  btnUninstall.Left := btnRepair.Left + btnRepair.Width + ScaleX(10);
+  btnUninstall.Top := btnRepair.Top;
+  btnUninstall.Width := ScaleX(130);
+  btnUninstall.ModalResult := mrYes;
+
+  btnCancel := TNewButton.Create(F);
+  btnCancel.Parent := F;
+  btnCancel.Caption := 'Cancelar';
+  btnCancel.Left := F.ClientWidth - ScaleX(12) - ScaleX(120);
+  btnCancel.Top := btnRepair.Top;
+  btnCancel.Width := ScaleX(120);
+  btnCancel.ModalResult := mrCancel;
+
+  case F.ShowModal() of
+    mrOk:   Result := 1;  { Repair }
+    mrYes:  Result := 2;  { Uninstall }
+  else
+    Result := 0;          { Cancel }
+  end;
+end;
+
+
 procedure BackupPreviousConfig();
 var
   PrevCfg, J: string;
@@ -325,6 +447,28 @@ begin
       HaveOldConfig := (Length(OldCountry) > 0) and (Length(OldListing) > 0);
     end;
   end;
+
+
+  if IsReinstall and (not IsSilentMode()) then
+  begin
+    MaintAction := ShowMaintenanceDialog();
+
+    if MaintAction = 2 then
+    begin
+      RunUninstallNow();
+      Result := False;
+      Exit;
+    end;
+
+    if MaintAction = 0 then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+
+
+
 
   Result := True;
 end;
@@ -404,24 +548,54 @@ var
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
   PrevMiniPath: string;
 begin
-  try
-    { --- TU CÓDIGO TAL CUAL --- }
-    if CurStep = ssInstall then
+  if CurStep = ssInstall then
+  begin
+    if IsReinstall and (PrevDir <> '') then
     begin
-      if IsReinstall and (PrevDir <> '') then
+      BackupPreviousConfig();
+      OldConfigPath := PrevDir + '\config';
+      if DirExists(OldConfigPath) then
+        DeleteTreeForce(OldConfigPath);
+    end;
+  end;
+
+  if CurStep = ssPostInstall then
+  begin
+    if HaveOldConfig then
+    begin
+      PaisSel := UpperCase(OldCountry);
+      ListadoSelUpper := UpperCase(OldListing);
+      AllowStr := BoolToJson(OldAllow);
+    end
+    else
+    begin
+      if not IsReinstall then
       begin
-        BackupPreviousConfig();
-        OldConfigPath := PrevDir + '\config';
-        if DirExists(OldConfigPath) then
-          DeleteTreeForce(OldConfigPath);
+        case cbPais.ItemIndex of
+          1: PaisSel := 'PERU';
+          2: PaisSel := 'VENEZUELA';
+        else
+          PaisSel := 'PARAGUAY';
+        end;
+
+        case cbListado.ItemIndex of
+          0: ListadoSelUpper := 'PRODUCTOS';
+          1: ListadoSelUpper := 'PRESENTACIONES';
+        else
+          ListadoSelUpper := 'AMBOS';
+        end;
+
+        AllowStr := BoolToJson(chkNoStock.Checked);
+      end
+      else
+      begin
+        PaisSel := 'PARAGUAY';
+        ListadoSelUpper := 'AMBOS';
+        AllowStr := 'false';
       end;
     end;
 
-    if CurStep = ssPostInstall then
-    begin
-      { ... tu lógica ... }
-
-      ConfigFolder := ExpandConstant('{app}\config');
+    ConfigFolder := ExpandConstant('{app}\config');
       ForceDir(ConfigFolder);
 
       FJson := ConfigFolder + '\config.json';
@@ -453,122 +627,37 @@ begin
 end;
 
 
-{ =========================
-  === Desinstalador UI ===
-  ========================= }
-
-var
-  UninstForm: TSetupForm;
-  chkDelConfig, chkDelDocs: TNewCheckBox;
-  btnOK, btnCancel: TNewButton;
-  lblMsg: TNewStaticText;
-  GDelConfig, GDelDocs: Boolean;
-
-function ShowUninstallOptionsDialog(): Boolean;
-begin
-  if UninstallSilent then
-  begin
-    GDelConfig := False;
-    GDelDocs := False;
-    Result := True;
-  end
-  else
-  begin
-    Result := False;
-    UninstForm := CreateCustomForm();
-    UninstForm.Caption := 'Eliminar datos del usuario';
-    UninstForm.ClientWidth := ScaleX(520);
-    UninstForm.ClientHeight := ScaleY(180);
-    UninstForm.Position := poScreenCenter;
-
-    lblMsg := TNewStaticText.Create(UninstForm);
-    lblMsg.Parent := UninstForm;
-    lblMsg.Left := ScaleX(12);
-    lblMsg.Top := ScaleY(12);
-    lblMsg.Width := UninstForm.ClientWidth - ScaleX(24);
-    lblMsg.AutoSize := False;
-    lblMsg.WordWrap := True;
-    lblMsg.Caption :=
-      'Seleccione qué desea borrar además de los archivos instalados:' + #13#10 +
-      '• Carpeta "config" de la aplicación (archivos de configuración).' + #13#10 +
-      '• Carpeta "Documentos\Cotizaciones" (data, cotizaciones y logs).';
-
-    chkDelConfig := TNewCheckBox.Create(UninstForm);
-    chkDelConfig.Parent := UninstForm;
-    chkDelConfig.Caption := 'Borrar carpeta de configuración (config) en {app}';
-    chkDelConfig.Left := ScaleX(12);
-    chkDelConfig.Top := lblMsg.Top + ScaleY(60);
-    chkDelConfig.Width := UninstForm.ClientWidth - ScaleX(24);
-    chkDelConfig.Checked := True;
-
-    chkDelDocs := TNewCheckBox.Create(UninstForm);
-    chkDelDocs.Parent := UninstForm;
-    chkDelDocs.Caption := 'Borrar "{userdocs}\Cotizaciones" (incluye data, cotizaciones y logs)';
-    chkDelDocs.Left := ScaleX(12);
-    chkDelDocs.Top := chkDelConfig.Top + ScaleY(24);
-    chkDelDocs.Width := UninstForm.ClientWidth - ScaleX(24);
-    chkDelDocs.Checked := False;
-
-    btnOK := TNewButton.Create(UninstForm);
-    btnOK.Parent := UninstForm;
-    btnOK.Caption := SetupMessage(msgButtonOK);
-    btnOK.ModalResult := mrOk;
-    btnOK.Left := UninstForm.ClientWidth - ScaleX(12) - ScaleX(200);
-    btnOK.Top := UninstForm.ClientHeight - ScaleY(12) - ScaleY(23);
-    btnOK.Width := ScaleX(100);
-
-    btnCancel := TNewButton.Create(UninstForm);
-    btnCancel.Parent := UninstForm;
-    btnCancel.Caption := SetupMessage(msgButtonCancel);
-    btnCancel.ModalResult := mrCancel;
-    btnCancel.Left := UninstForm.ClientWidth - ScaleX(12) - ScaleX(100);
-    btnCancel.Top := btnOK.Top;
-    btnCancel.Width := ScaleX(100);
-
-    if UninstForm.ShowModal() = mrOk then
-    begin
-      GDelConfig := chkDelConfig.Checked;
-      GDelDocs := chkDelDocs.Checked;
-      Result := True;
-    end
-    else
-      Result := False;
-  end;
-end;
-
 function InitializeUninstall(): Boolean;
-var AppPath: string;
 begin
-  AppPath := ExpandConstant('{app}');
-  AttribClearRecursive(AppPath);
-  if not ShowUninstallOptionsDialog() then
-  begin
-    Result := False;
-    Exit;
-  end;
+  { Sin opciones. Solo prepara atributos para borrar. }
+  AttribClearRecursive(ExpandConstant('{app}'));
   Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var CfgPath, DocsPath: string;
+var
+  CfgPath: string;
+  BackupDir: string;
+  UpdaterDir: string;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    if GDelConfig then
-    begin
-      CfgPath := ExpandConstant('{app}\config');
-      DeleteTreeForce(CfgPath);
-    end;
-    if GDelDocs then
-    begin
-      DocsPath := ExpandConstant('{userdocs}\Cotizaciones');
-      DeleteTreeForce(DocsPath);
-    end;
-    RemoveDir(ExpandConstant('{app}'));
+    { 1) SIEMPRE borrar config de la app }
+    CfgPath := ExpandConstant('{app}\config');
+    DeleteTreeForce(CfgPath);
+
+    { 2) SIEMPRE borrar backups (localappdata) }
+    BackupDir := ExpandConstant('{localappdata}\Cotizaciones\config_backups');
+    DeleteTreeForce(BackupDir);
+
+    { 3) SIEMPRE borrar logs/estado del updater (incluye apply_update.log) }
+    UpdaterDir := ExpandConstant('{app}\updater');
+    DeleteTreeForce(UpdaterDir);
+
+    { 4) NUNCA borrar {userdocs}\Cotizaciones (data/cotizaciones/logs) }
+    { No hacemos nada aquí. }
   end;
 end;
-
-
 
 
 
