@@ -1,10 +1,5 @@
-import os
-import sys
-import time
-import ctypes
+import os, sys, time, ctypes, pandas as pd
 from ctypes import wintypes
-
-import pandas as pd
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPlainTextEdit, QPushButton
 )

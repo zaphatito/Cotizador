@@ -268,8 +268,11 @@ def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui: UiCb = No
     restart_exe = sys.executable
     _emit(ui, "status", text="Actualización iniciada. Cerrando para aplicar…")
 
-    subprocess.Popen([apply_exe, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe], close_fds=True)
-
+    log_path = os.path.join(_app_root(), "updater", "apply_update.log")
+    subprocess.Popen(
+        [apply_exe, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe, "--log", log_path],
+        close_fds=True
+    )
 
 # ----------------- FILES -----------------
 

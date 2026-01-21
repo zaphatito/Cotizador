@@ -10,6 +10,16 @@ import time
 IS_WIN = os.name == "nt"
 
 
+def _msgbox(title: str, text: str) -> None:
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)  # MB_ICONERROR
+    except Exception:
+        pass
+
+
 class _TkUI:
     def __init__(self, total_steps: int):
         self.ok = False
@@ -29,10 +39,9 @@ class _TkUI:
             root.attributes("-topmost", True)
 
             self.var = tk.StringVar(value="Iniciando…")
-            lbl = ttk.Label(root, textvariable=self.var, padding=(14, 12))
-            lbl.pack(fill="x")
+            ttk.Label(root, textvariable=self.var, padding=(14, 12)).pack(fill="x")
 
-            self.pb = ttk.Progressbar(root, orient="horizontal", length=520, mode="determinate", maximum=self.total)
+            self.pb = ttk.Progressbar(root, orient="horizontal", length=560, mode="determinate", maximum=self.total)
             self.pb.pack(padx=14, pady=(0, 12), fill="x")
 
             self.root = root
@@ -124,6 +133,7 @@ def _atomic_replace(src: str, dst: str) -> None:
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
 
+
 def _safe_remove(path: str) -> None:
     try:
         if os.path.isfile(path) or os.path.islink(path):
@@ -139,86 +149,126 @@ def main() -> int:
     ap.add_argument("--plan", required=True)
     ap.add_argument("--pid", type=int, default=0)
     ap.add_argument("--restart", default="")
+    ap.add_argument("--log", default="")
     args = ap.parse_args()
 
+    # ---- logging ----
+    log_path = args.log.strip()
+    if not log_path:
+        # intenta log en carpeta del exe a reiniciar (dir del restart)
+        if args.restart:
+            app_root = os.path.dirname(os.path.abspath(args.restart))
+            log_path = os.path.join(app_root, "updater", "apply_update.log")
+        else:
+            log_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", "apply_update.log")  # type: ignore
+
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    def log(msg: str):
+        try:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except Exception:
+            pass
+
+    log("=== apply_update start ===")
+    log(f"plan={args.plan}")
+    log(f"pid={args.pid}")
+    log(f"restart={args.restart}")
+    log(f"log={log_path}")
+
+    # ---- load plan ----
     try:
         with open(args.plan, "r", encoding="utf-8") as f:
             plan = json.load(f)
-    except Exception:
+        if not isinstance(plan, dict):
+            raise RuntimeError("plan no es dict")
+    except Exception as e:
+        log(f"ERROR leyendo plan: {e}")
+        _msgbox("Actualización fallida", f"No se pudo leer el plan de actualización.\n\nLog:\n{log_path}")
         return 10
 
     deletes = [p for p in (plan.get("delete", []) or []) if isinstance(p, str) and p]
     files = [it for it in (plan.get("files", []) or []) if isinstance(it, dict)]
     installer = plan.get("installer") if isinstance(plan.get("installer"), dict) else None
 
-    total_steps = 2 + len(deletes) + len(files) + (3 if installer else 0)  # wait + cleanup + actions + installer + restart
+    total_steps = 2 + len(deletes) + len(files) + (3 if installer else 0)
     ui = _TkUI(total_steps)
 
-    ui.set_text("Cerrando la aplicación…")
-    if args.pid and IS_WIN:
-        _wait_pid_windows(args.pid, timeout_s=180)
-    ui.advance("Aplicando cambios…")
+    try:
+        ui.set_text("Cerrando la aplicación…")
+        log("Waiting for pid to exit...")
+        if args.pid and IS_WIN:
+            _wait_pid_windows(args.pid, timeout_s=180)
+        ui.advance("Aplicando cambios…")
 
-    # Deletes
-    for p in deletes:
-        ui.advance(f"Eliminando: {os.path.basename(p)}")
-        _safe_remove(p)
+        # Deletes
+        for p in deletes:
+            ui.advance(f"Eliminando: {os.path.basename(p)}")
+            log(f"Delete: {p}")
+            _safe_remove(p)
 
-    # Replace files
-    for item in files:
-        src = item.get("src")
-        dst = item.get("dst")
-        if not src or not dst:
-            continue
-        ui.advance(f"Copiando: {os.path.basename(dst)}")
-        try:
+        # Replace files
+        for item in files:
+            src = item.get("src")
+            dst = item.get("dst")
+            if not src or not dst:
+                continue
+            ui.advance(f"Copiando: {os.path.basename(dst)}")
+            log(f"Copy: {src} -> {dst}")
             _atomic_replace(src, dst)
-        except Exception:
-            ui.close()
-            return 20
 
-    # Run installer if present (wait it)
-    if installer:
-        inst_path = str(installer.get("path") or "")
-        inst_args = installer.get("args") or []
-        wait = bool(installer.get("wait", True))
-        delete_after = bool(installer.get("delete_after", True))
+        # Installer
+        if installer:
+            inst_path = str(installer.get("path") or "")
+            inst_args = list(installer.get("args") or [])
+            wait = bool(installer.get("wait", True))
+            delete_after = bool(installer.get("delete_after", True))
 
-        ui.advance("Ejecutando instalador…")
-        try:
-            proc = subprocess.Popen([inst_path] + list(inst_args), close_fds=True)
-        except Exception:
-            ui.close()
-            return 30
+            ui.advance("Ejecutando instalador…")
+            log(f"Run installer: {inst_path} args={inst_args}")
+            proc = subprocess.Popen([inst_path] + inst_args, close_fds=True)
+            if wait:
+                ui.advance("Instalando…")
+                rc = proc.wait()
+                log(f"Installer exit code: {rc}")
+                if rc != 0:
+                    raise RuntimeError(f"Installer failed rc={rc}")
 
-        if wait:
-            ui.advance("Instalando…")
-            rc = proc.wait()
-            if rc != 0:
-                ui.close()
-                return 31
+            if delete_after and inst_path:
+                log(f"Delete installer: {inst_path}")
+                _safe_remove(inst_path)
 
-        if delete_after and inst_path:
-            _safe_remove(inst_path)
+        # Cleanup
+        ui.advance("Limpiando…")
+        staging_root = plan.get("staging_root") or ""
+        if isinstance(staging_root, str) and staging_root:
+            log(f"Cleanup staging_root: {staging_root}")
+            _safe_remove(staging_root)
 
-    # Cleanup staging
-    ui.advance("Limpiando…")
-    staging_root = plan.get("staging_root") or ""
-    if isinstance(staging_root, str) and staging_root:
-        _safe_remove(staging_root)
-    _safe_remove(args.plan)
+        log(f"Delete plan: {args.plan}")
+        _safe_remove(args.plan)
 
-    # Restart app
-    ui.advance("Reiniciando…")
-    if args.restart:
-        try:
+        # Restart
+        ui.advance("Reiniciando…")
+        if args.restart:
+            log(f"Restart: {args.restart}")
             subprocess.Popen([args.restart], close_fds=True)
+
+        log("SUCCESS")
+        time.sleep(0.25)
+        ui.close()
+        return 0
+
+    except Exception as e:
+        log(f"FATAL: {e}")
+        try:
+            ui.close()
         except Exception:
             pass
-
-    time.sleep(0.25)
-    ui.close()
-    return 0
+        _msgbox("Actualización fallida", f"No se pudo aplicar la actualización.\n\nLog:\n{log_path}")
+        return 99
 
 
 if __name__ == "__main__":
