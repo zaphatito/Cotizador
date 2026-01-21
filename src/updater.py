@@ -12,15 +12,7 @@ Mejoras:
 - Ignora sqlModels/app.sqlite3 y updater/apply_update.exe
 """
 
-import os
-import sys
-import json
-import re
-import hashlib
-import tempfile
-import subprocess
-import time
-import urllib.request
+import os, sys, json, re, hashlib, tempfile, subprocess, time, urllib.request, shutil, tempfile
 from typing import Dict, Any, Tuple, Optional, Callable
 
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -254,23 +246,28 @@ def _apply_exe(app_config: Dict[str, Any]) -> str:
     rel_apply = str(app_config.get("update_apply_exe", "") or "").strip() or r"updater\apply_update.exe"
     return os.path.join(_app_root(), rel_apply.replace("/", os.sep).replace("\\", os.sep))
 
-def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui: UiCb = None, log=None) -> None:
-    apply_exe = _apply_exe(app_config)
-    if not os.path.exists(apply_exe):
-        raise RuntimeError(f"No existe apply_update.exe: {apply_exe}")
+def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui=None, log=None) -> None:
+    apply_src = _apply_exe(app_config)  # tu ruta actual en {app}\updater\apply_update.exe
+    if not os.path.exists(apply_src):
+        raise RuntimeError(f"No existe apply_update.exe: {apply_src}")
 
-    plan_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", f"plan_{plan.get('version','0.0.0')}.json")
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    # ✅ copiar a TEMP para que el instalador pueda reemplazar {app}\updater\apply_update.exe sin locks
+    run_dir = os.path.join(tempfile.gettempdir(), "CotizadorUpdate")
+    os.makedirs(run_dir, exist_ok=True)
+    apply_run = os.path.join(run_dir, "apply_update_run.exe")
+    shutil.copy2(apply_src, apply_run)
+
+    plan_path = os.path.join(run_dir, f"plan_{plan.get('version','0.0.0')}.json")
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
 
+    log_path = os.path.join(_app_root(), "updater", "apply_update.log")
+
     pid = os.getpid()
     restart_exe = sys.executable
-    _emit(ui, "status", text="Actualización iniciada. Cerrando para aplicar…")
 
-    log_path = os.path.join(_app_root(), "updater", "apply_update.log")
     subprocess.Popen(
-        [apply_exe, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe, "--log", log_path],
+        [apply_run, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe, "--log", log_path],
         close_fds=True
     )
 
@@ -434,9 +431,29 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
             retry_in = max(1, nxt - int(time.time()))
             _emit(ui, "status", text=f"Actualización en espera. Reintento en ~{retry_in}s.")
             return {"status": "BACKOFF", "retry_in": retry_in}
+        
+        
+        def _get_local_version(log=None) -> str:
+            try:
+                p = os.path.join(_app_root(), "version.txt")
+                if os.path.exists(p):
+                    v = (open(p, "r", encoding="utf-8").read() or "").strip()
+                    if v:
+                        return v
+            except Exception:
+                if log:
+                    log.debug("No se pudo leer version.txt", exc_info=True)
 
+            try:
+                from .version import __version__ as v2
+                return str(v2)
+            except Exception:
+                return "0.0.0"
+
+
+        
         try:
-            from .version import __version__ as local_version
+            local_version = _get_local_version(log=log)
         except Exception:
             local_version = "0.0.0"
 

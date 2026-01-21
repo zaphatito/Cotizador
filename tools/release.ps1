@@ -163,6 +163,11 @@ New-Item -ItemType Directory -Force -Path $seedDbDstDir | Out-Null
 Copy-Item -Force $seedDbSrc (Join-Path $seedDbDstDir "app.sqlite3")
 Write-Host "OK: Seed DB copiada a dist\SistemaCotizaciones\sqlModels\app.sqlite3"
 
+Set-ContentUtf8NoBOM -Path (Join-Path $distDir "version.txt") -Text $next
+
+
+
+
 # 4) build apply_update.exe
 $applyScript = Join-Path $ProjectRoot "tools\apply_update.py"
 if (!(Test-Path $applyScript)) { throw "No existe tools\apply_update.py" }
