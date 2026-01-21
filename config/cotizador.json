@@ -1,5 +1,5 @@
 {
-    "version":  "1.2.14",
+    "version":  "1.2.0",
     "type":  "files",
     "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/1.2.14/",
     "files":  [
@@ -3796,7 +3796,7 @@
 
                ],
     "mandatory":  false,
-    "notes":  "Release 1.2.14",
+    "notes":  "Release 1.2.0",
     "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.14.exe",
     "sha256":  "E0F7EAC2674E01156B67081E46850766781B09C7F11DF6333F6BE26A5F2E1E77"
 }
