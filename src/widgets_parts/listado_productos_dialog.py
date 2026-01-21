@@ -18,6 +18,7 @@ from ..config import (
     listing_allows_products,
     listing_allows_presentations,
     convert_from_base,
+    ALLOW_NO_STOCK,  # ✅
 )
 from ..pricing import precio_base_para_listado
 from ..utils import fmt_money_ui, nz
@@ -34,6 +35,7 @@ class ListadoProductosDialog(QDialog):
       - Los productos cuyo id empieza con "PC" y categoría "OTROS"
         se consideran presentaciones → solo aparecen en la pestaña
         "Presentaciones", NO en "Productos".
+      - Si NOT ALLOW_NO_STOCK: no se listan items con stock <= 0
     """
 
     def __init__(
@@ -85,13 +87,18 @@ class ListadoProductosDialog(QDialog):
 
             self.tabs.addTab(self.tab_prod, "Productos")
 
-            for p in productos:
+            for p in productos or []:
                 pid = str(p.get("id", "")).upper()
                 cat = (p.get("categoria", "") or "").upper()
                 if pid.startswith("PC") and cat == "OTROS":
                     continue
 
-                stock = nz(p.get("cantidad_disponible"), 0.0)
+                stock = float(nz(p.get("cantidad_disponible"), 0.0))
+
+                # ✅ NO mostrar sin stock si está deshabilitado
+                if (not ALLOW_NO_STOCK) and stock <= 0.0:
+                    continue
+
                 precio = precio_base_para_listado(p)
                 self._rows_prod.append(
                     {
@@ -107,7 +114,9 @@ class ListadoProductosDialog(QDialog):
 
             self._pintar_tabla_prod(self._rows_prod)
             self.entry_buscar_prod.textChanged.connect(self._filtrar_prod)
-            self.tabla_prod.cellDoubleClicked.connect(lambda row, _col: self._doble_click("prod", row))
+            self.tabla_prod.cellDoubleClicked.connect(
+                lambda row, _col: self._doble_click("prod", row)
+            )
 
         # --------- Tab PRESENTACIONES ---------
         self.tab_pres = None
@@ -148,14 +157,26 @@ class ListadoProductosDialog(QDialog):
                 if not codigo and not nombre:
                     continue
 
-                stock = nz(
-                    pr.get("cantidad_disponible") or pr.get("stock_disponible") or pr.get("STOCK") or 0.0,
-                    0.0,
+                stock = float(
+                    nz(
+                        pr.get("cantidad_disponible")
+                        or pr.get("stock_disponible")
+                        or pr.get("STOCK")
+                        or 0.0,
+                        0.0,
+                    )
                 )
+
+                # ✅ NO mostrar sin stock si está deshabilitado
+                if (not ALLOW_NO_STOCK) and stock <= 0.0:
+                    continue
 
                 precio = precio_base_para_listado(pr)
                 if not precio:
-                    precio = nz(pr.get("PRECIO_PRESENT") or pr.get("precio_present") or pr.get("p_venta"), 0.0)
+                    precio = nz(
+                        pr.get("PRECIO_PRESENT") or pr.get("precio_present") or pr.get("p_venta"),
+                        0.0,
+                    )
 
                 self._rows_pres.append(
                     {
@@ -169,14 +190,20 @@ class ListadoProductosDialog(QDialog):
                     }
                 )
 
+            # PCs (presentaciones desde productos con id PC* y cat OTROS)
             pcs = [
                 p
-                for p in productos
+                for p in (productos or [])
                 if str(p.get("id", "")).upper().startswith("PC")
                 and (p.get("categoria", "").upper() == "OTROS")
             ]
             for pc in pcs:
-                stock_to_show = nz(pc.get("cantidad_disponible"), 0.0)
+                stock_to_show = float(nz(pc.get("cantidad_disponible"), 0.0))
+
+                # ✅ NO mostrar sin stock si está deshabilitado
+                if (not ALLOW_NO_STOCK) and stock_to_show <= 0.0:
+                    continue
+
                 self._rows_pres.append(
                     {
                         "codigo": pc.get("id", ""),
@@ -191,7 +218,9 @@ class ListadoProductosDialog(QDialog):
 
             self._pintar_tabla_pres(self._rows_pres)
             self.entry_buscar_pres.textChanged.connect(self._filtrar_pres)
-            self.tabla_pres.cellDoubleClicked.connect(lambda row, _col: self._doble_click("pres", row))
+            self.tabla_pres.cellDoubleClicked.connect(
+                lambda row, _col: self._doble_click("pres", row)
+            )
 
     def _pintar_tabla_prod(self, rows):
         if not self.tabla_prod:

@@ -12,7 +12,7 @@ from ..config import (
     CATS,
 )
 from ..utils import nz
-from ..pricing import precio_unitario_por_categoria
+from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
 from ..presentations import map_pc_to_bottle_code
 from ..logging_setup import get_logger
 from ..widgets import CustomProductDialog
@@ -27,7 +27,10 @@ class AddItemsMixin:
             return
         data = dlg.resultado
         unit_price = float(nz(data["precio"], 0.0))  # siempre en moneda base
-        qty = int(nz(data["cantidad"], 1))
+        qty = float(nz(data["cantidad"], 1))
+
+        factor = factor_total_por_categoria("SERVICIO")
+        subtotal_base = round(unit_price * qty * factor, 2)
 
         item = {
             "_prod": {"precio_unitario": unit_price},
@@ -37,15 +40,18 @@ class AddItemsMixin:
             "cantidad": qty,
             "ml": "",
             "precio": unit_price,
-            "total": round(unit_price * qty, 2),
+            "subtotal_base": subtotal_base,
+            "total": subtotal_base,
             "observacion": data.get("observacion", ""),
             "stock_disponible": -1.0,
             "precio_override": None,
             "precio_tier": None,
+            # ✅ guardamos el factor para recalcular bien si tu ItemsModel lo usa
+            "factor_total": factor,
         }
         self.model.add_item(item)
         log.info(
-            "Producto personalizado agregado: %s x%d %0.2f",
+            "Producto personalizado agregado: %s x%0.3f %0.2f",
             item["codigo"],
             qty,
             unit_price,
@@ -139,8 +145,15 @@ class AddItemsMixin:
             return
 
         cat = (prod.get("categoria") or "").upper()
+
         qty_default = 0.001 if (APP_COUNTRY == "PERU" and cat in CATS) else 1.0
         unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
+
+        # ✅ aquí está la corrección:
+        # - precio unitario NO cambia
+        # - total/subtotal sí aplica factor x50 en CATS cuando no es PERU
+        factor = factor_total_por_categoria(cat)
+        subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
 
         item = {
             "_prod": prod,
@@ -150,10 +163,13 @@ class AddItemsMixin:
             "cantidad": qty_default,
             "ml": prod.get("ml", ""),
             "precio": float(unit_price),
-            "total": round(float(unit_price) * qty_default, 2),
+            "subtotal_base": subtotal_base,
+            "total": subtotal_base,
             "observacion": "",
             "stock_disponible": float(nz(prod.get("cantidad_disponible"), 0.0)),
             "precio_override": None,
             "precio_tier": "UNITARIO" if cat == "BOTELLAS" else None,
+            # ✅ guardamos factor (útil para recalcular al editar cantidad)
+            "factor_total": factor,
         }
         self.model.add_item(item)

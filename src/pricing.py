@@ -3,6 +3,9 @@ from .config import APP_COUNTRY, CATS
 from .utils import nz, format_grams
 
 
+# =====================================================
+# Cantidad mostrada en el PDF / tabla
+# =====================================================
 def cantidad_para_mostrar(it: dict) -> str:
     cat = (it.get("categoria") or "").upper()
     qty = it.get("cantidad", 0)
@@ -15,6 +18,7 @@ def cantidad_para_mostrar(it: dict) -> str:
                 gramos = 0.0
             return format_grams(gramos)
         else:
+            # En PY (y otros no-PERU) qty = "unidades" (1 unidad = 50g)
             try:
                 q_int = int(round(float(qty)))
             except Exception:
@@ -31,6 +35,23 @@ def cantidad_para_mostrar(it: dict) -> str:
         return str(int(round(float(qty))))
     except Exception:
         return str(qty)
+
+
+# =====================================================
+# Factor para total por categoría / país
+# =====================================================
+def factor_total_por_categoria(cat: str) -> float:
+    """
+    Factor que SOLO afecta el cálculo de subtotal/total (no el precio unitario mostrado).
+
+    - CATS (esencias/granel):
+        * PERU: qty ya viene en otra unidad (tu lógica actual), NO aplica x50 aquí.
+        * NO-PERU (ej. Paraguay): qty representa "unidades" de 50g => total = unit * qty * 50
+    """
+    cat_u = (cat or "").upper()
+    if cat_u in CATS and APP_COUNTRY != "PERU":
+        return 50.0
+    return 1.0
 
 
 def _first_price(prod: dict, *keys: str) -> float:
@@ -50,22 +71,20 @@ def precio_base_para_listado(prod: dict) -> float:
     Precio que se muestra en el listado (no depende de cantidades).
 
     - BOTELLAS: precio por unidad
-    - CATS (granel): base 50 g / 50 g * 50 (según país)
+    - CATS (granel): precio unitario BASE (NO x50 aquí)
     - PRESENTACION: usa PRECIO_PRESENT (precio de la presentación base, sin botella)
     - Resto: PVP / lista / unitario, incluyendo PRECIO_PRESENT como posible clave
     """
     cat = (prod.get("categoria") or "").upper()
 
     if cat == "BOTELLAS":
-        # Mostrar precio por unidad (no oferta/mín)
         return _first_price(prod, "precio_unidad", "precio_venta")
 
     if cat in CATS:
-        base_val = _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
-        return base_val if APP_COUNTRY == "PERU" else base_val * 50.0
+        # ✅ No multiplicar por 50 aquí (unitario debe mantenerse)
+        return _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
 
     if cat == "PRESENTACION":
-        # Presentación pura: ya viene el precio final de la presentación
         return _first_price(
             prod,
             "PRECIO_PRESENT",
@@ -74,8 +93,6 @@ def precio_base_para_listado(prod: dict) -> float:
             "precio_venta",
         )
 
-    # Resto categorías: PVP/lista si existe, si no unitario/venta.
-    # Incluimos PRECIO_PRESENT por si llega sin categoría "PRESENTACION".
     return _first_price(
         prod,
         "PRECIO_PRESENT",
@@ -94,24 +111,20 @@ def precio_unitario_por_categoria(cat: str, prod: dict, qty_units: float) -> flo
     Calcula el precio unitario aplicando reglas por categoría.
     ▶️ Sin tramos por cantidad.
 
-    Para presentaciones puras (cat == PRESENTACION) se usa PRECIO_PRESENT,
-    que es el precio de la base (0100, 0003, etc.) tal como viene de la hoja
-    de presentaciones, sin sumar botella.
+    IMPORTANTE:
+    - Para CATS (esencias/granel) el unitario NO se escala por país.
+      El x50 se aplica en el TOTAL (ver factor_total_por_categoria).
     """
     cat_u = (cat or "").upper()
 
-    # === Granel ===
     if cat_u in CATS:
-        base_val = _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
-        return base_val if APP_COUNTRY == "PERU" else base_val * 50.0
+        # ✅ Unitario base (sin x50)
+        return _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
 
-    # === Botellas (por defecto 'unitario') ===
     if cat_u == "BOTELLAS":
         return _first_price(prod, "precio_unidad", "precio_unitario", "precio_venta")
 
-    # === Presentaciones base (0100, 0003, ...) ===
     if cat_u == "PRESENTACION":
-        # Precio final de la presentación sola (sin botella adicional)
         return _first_price(
             prod,
             "PRECIO_PRESENT",
@@ -120,8 +133,6 @@ def precio_unitario_por_categoria(cat: str, prod: dict, qty_units: float) -> flo
             "precio_venta",
         )
 
-    # === Resto de categorías ===
-    # Incluimos PRECIO_PRESENT por si alguna llega sin categoría limpia.
     return _first_price(
         prod,
         "PRECIO_PRESENT",

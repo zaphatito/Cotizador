@@ -4,21 +4,33 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, QStringListModel
 from PySide6.QtWidgets import QCompleter
 
-from ..config import listing_allows_products, listing_allows_presentations
+from ..config import listing_allows_products, listing_allows_presentations, ALLOW_NO_STOCK
+from ..utils import nz
 
 
 def build_completer_strings(productos, botellas_pc):
     sugs = []
+
     if listing_allows_products():
-        for p in productos:
+        for p in productos or []:
+            # ✅ NO sugerir sin stock si está deshabilitado
+            if (not ALLOW_NO_STOCK) and float(nz(p.get("cantidad_disponible"), 0.0)) <= 0.0:
+                continue
+
             cat = p.get("categoria", "")
             gen = p.get("genero", "")
             sugs.append(
                 f"{p['id']} - {p['nombre']} - {cat}" + (f" - {gen}" if gen else "")
             )
+
     if listing_allows_presentations():
-        for pc in botellas_pc:
+        for pc in botellas_pc or []:
+            # ✅ NO sugerir sin stock si está deshabilitado
+            if (not ALLOW_NO_STOCK) and float(nz(pc.get("cantidad_disponible"), 0.0)) <= 0.0:
+                continue
+
             sugs.append(f"{pc.get('id')} - Presentación (PC) - {pc.get('nombre', '')}")
+
     return sugs
 
 

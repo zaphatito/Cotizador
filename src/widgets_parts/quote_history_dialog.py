@@ -477,7 +477,7 @@ class QuoteHistoryWindow(QMainWindow):
         act_pdf = QAction("Abrir PDF", self)
         act_ticket = QAction("Reimprimir ticket", self)
         act_regen = QAction("Regenerar PDF", self)
-        act_hide = QAction("Ocultar", self)
+        act_hide = QAction("Eliminar", self)
 
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
@@ -659,7 +659,7 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.information(self, "Atención", "Selecciona una cotización.")
             return
 
-        if QMessageBox.question(self, "Ocultar", "¿Ocultar esta cotización del historial?") != QMessageBox.Yes:
+        if QMessageBox.question(self, "Eliminar", "Eliminar esta cotización del historial?") != QMessageBox.Yes:
             return
 
         try:
@@ -670,8 +670,8 @@ class QuoteHistoryWindow(QMainWindow):
             con.close()
             self._reload_first_page()
         except Exception as e:
-            log.exception("Error ocultando cotización")
-            QMessageBox.critical(self, "Error", f"No se pudo ocultar:\n{e}")
+            log.exception("Error eliminando cotización")
+            QMessageBox.critical(self, "Error", f"No se pudo eliminar:\n{e}")
 
     def _reprint_ticket(self):
         qid = self._selected_quote_id()

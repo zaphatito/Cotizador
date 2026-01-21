@@ -3,7 +3,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush
 
 from .config import APP_COUNTRY, CATS, convert_from_base
-from .pricing import precio_unitario_por_categoria
+from .pricing import precio_unitario_por_categoria, factor_total_por_categoria
 from .utils import fmt_money_ui, nz
 from .logging_setup import get_logger
 
@@ -11,6 +11,10 @@ log = get_logger(__name__)
 
 # Permitir edición de precio unitario en Paraguay y Perú
 CAN_EDIT_UNIT_PRICE = (APP_COUNTRY in ("PARAGUAY", "PERU"))
+
+# ===== PY: descuento base por Efectivo =====
+PY_CASH_BASE_PCT = 4.7619
+_PCT_EPS = 1e-6
 
 # ===== Alias de llaves de precios (para datasets heterogéneos) =====
 UNIT_ALIASES = ["precio_unidad", "precio_unitario", "precio_venta", "unitario"]
@@ -26,7 +30,6 @@ MIN_ALIASES = [
 MAX_ALIASES = [
     "precio_maximo", "precio_tope", "precio_lista", "pvp", "pvpr", "PRECIO",
     "precio_publico", "precio_retail", "precio_mostrador",
-    # 'precio_venta' al final como último fallback:
     "precio_venta"
 ]
 BASE_ALIASES = ["precio_unitario", "precio_unidad", "precio_base_50g", "precio_venta"]
@@ -73,34 +76,172 @@ class ItemsModel(QAbstractTableModel):
     # Nueva columna de descuento entre Producto y Cantidad
     HEADERS = ["Código", "Producto", "Descuento", "Cantidad", "Precio Unitario", "Subtotal"]
 
-    # ► Señal: emite el índice de la fila recién agregada
     item_added = Signal(int)
+    toast_requested = Signal(str)
 
     def __init__(self, items: list[dict]):
         super().__init__()
         self._items = items
+        self._py_cash_mode = False  # solo aplica en Paraguay
 
-    # === helpers internos para descuento / totales ===
+    # =========================
+    # Modo PY: Tarjeta/Efectivo
+    # =========================
+    def is_py_cash_mode(self) -> bool:
+        return bool(self._py_cash_mode) if APP_COUNTRY == "PARAGUAY" else False
+
+    def set_py_cash_mode(self, enabled: bool):
+        """Activa/desactiva modo Efectivo (solo Paraguay)."""
+        if APP_COUNTRY != "PARAGUAY":
+            return
+        enabled = bool(enabled)
+        if self._py_cash_mode == enabled:
+            return
+
+        if enabled:
+            # Estamos en tarjeta -> efectivo: guardar descuento usuario (actual) y sumar base
+            self._py_cash_mode = True
+            changed = self._apply_cash_base_to_all()
+        else:
+            # Estamos en efectivo -> tarjeta: restar base a todos
+            self._py_cash_mode = False
+            changed = self._remove_cash_base_from_all()
+
+        if changed and self.rowCount() > 0:
+            top = self.index(0, 0)
+            bottom = self.index(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+
+    # =========================
+    # Factor subtotal (CATS PY)
+    # =========================
+    def _get_factor_total(self, it: dict) -> float:
+        try:
+            f = float(nz(it.get("factor_total"), 0.0))
+        except Exception:
+            f = 0.0
+        if f > 0:
+            return f
+        cat = (it.get("categoria") or "").upper()
+        return float(factor_total_por_categoria(cat))
+
+    def _compute_subtotal_base(self, it: dict, unit_price: float | None = None) -> float:
+        if unit_price is None:
+            unit_price = float(nz(it.get("precio"), 0.0))
+        qty = float(nz(it.get("cantidad"), 0.0))
+        factor = self._get_factor_total(it)
+        return round(float(unit_price) * qty * factor, 2)
+
+    # =========================
+    # Utils descuento (% real)
+    # =========================
+    def _effective_discount_pct(self, subtotal: float, d_pct: float, d_monto: float) -> float:
+        if subtotal <= 0:
+            return 0.0
+        if d_monto > 0:
+            return (float(d_monto) / float(subtotal)) * 100.0
+        return float(d_pct)
+
+    def _clamp_pct(self, pct: float) -> float:
+        try:
+            pct = float(pct)
+        except Exception:
+            pct = 0.0
+        if pct < 0:
+            pct = 0.0
+        if pct > 100:
+            pct = 100.0
+        return pct
+
+    # =========================
+    # Aplicar / quitar base efectivo a TODOS
+    # =========================
+    def _apply_cash_base_to_all(self) -> bool:
+        """
+        Tarjeta -> Efectivo:
+        - user_pct = descuento_total_actual
+        - descuento_total = user_pct + BASE
+        """
+        changed = False
+        for it in self._items:
+            unit = float(nz(it.get("precio"), 0.0))
+            subtotal = self._compute_subtotal_base(it, unit_price=unit)
+
+            d_pct = float(nz(it.get("descuento_pct"), 0.0))
+            d_monto = float(nz(it.get("descuento_monto"), 0.0))
+            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+
+            user_pct = self._clamp_pct(cur_total_pct)
+            it["_py_user_disc_pct"] = user_pct  # guardamos descuento usuario SIN base
+
+            total_pct = self._clamp_pct(user_pct + PY_CASH_BASE_PCT)
+            it["descuento_mode"] = "percent"
+            it["descuento_pct"] = total_pct
+            it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+
+            # recalcular total neto
+            it["subtotal_base"] = subtotal
+            it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+
+            changed = True
+        return changed
+
+    def _remove_cash_base_from_all(self) -> bool:
+        """
+        Efectivo -> Tarjeta:
+        - user_pct = max(0, descuento_total_actual - BASE)
+        - descuento_total = user_pct
+        """
+        changed = False
+        for it in self._items:
+            unit = float(nz(it.get("precio"), 0.0))
+            subtotal = self._compute_subtotal_base(it, unit_price=unit)
+
+            d_pct = float(nz(it.get("descuento_pct"), 0.0))
+            d_monto = float(nz(it.get("descuento_monto"), 0.0))
+            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+
+            # restar base (y nunca negativo)
+            user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
+            user_pct = self._clamp_pct(user_pct)
+
+            # limpiar huella
+            it["_py_user_disc_pct"] = user_pct
+
+            if user_pct <= _PCT_EPS:
+                it["descuento_mode"] = None
+                it["descuento_pct"] = 0.0
+                it["descuento_monto"] = 0.0
+            else:
+                it["descuento_mode"] = "percent"
+                it["descuento_pct"] = user_pct
+                it["descuento_monto"] = round(subtotal * user_pct / 100.0, 2)
+
+            it["subtotal_base"] = subtotal
+            it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+
+            changed = True
+        return changed
+
+    # =========================
+    # Normalización descuento/totales
+    # =========================
     def _normalize_discount_and_totals(self, it: dict, unit_price: float):
         """
-        Normaliza:
-          - precio (unitario, en moneda base)
-          - subtotal_base = precio * cantidad
-          - descuento_pct / descuento_monto (según modo)
-          - total = subtotal_base - descuento_monto
+        Recalcula subtotal/total y mantiene consistencia del descuento.
 
-        Todos los cálculos se hacen en MONEDA BASE.
-
-        Modo de descuento:
-          - it['descuento_mode'] == 'percent' → el % es la verdad, el monto se recalcula.
-          - it['descuento_mode'] == 'amount'  → el monto es la verdad, el % se deriva.
-          - sin modo (None) → se infiere: si d_pct>0 → percent, si d_monto>0 → amount.
+        Si PY efectivo:
+          - guarda / usa _py_user_disc_pct como descuento sin base
+          - aplica descuento_total = _py_user_disc_pct + BASE
+          - nunca permite descuento_total < BASE (porque BASE siempre suma)
         """
         unit_price = float(nz(unit_price, 0.0))
-        qty = float(nz(it.get("cantidad"), 0.0))
-
-        subtotal = round(unit_price * qty, 2)
         it["precio"] = unit_price
+
+        factor = self._get_factor_total(it)
+        it["factor_total"] = factor
+
+        subtotal = self._compute_subtotal_base(it, unit_price=unit_price)
         it["subtotal_base"] = subtotal
 
         mode = (it.get("descuento_mode") or "").lower()
@@ -108,40 +249,66 @@ class ItemsModel(QAbstractTableModel):
         d_monto = float(nz(it.get("descuento_monto"), 0.0))
 
         if subtotal <= 0:
-            # Si no hay subtotal, no puede haber descuento
             it["descuento_mode"] = None
+            it["descuento_pct"] = 0.0
+            it["descuento_monto"] = 0.0
+            it["total"] = 0.0
+            return
+
+        # ---- Paraguay efectivo: siempre % y siempre BASE sumado ----
+        if self.is_py_cash_mode():
+            # user_pct: si existe lo respetamos, si no inferimos desde el descuento actual restando BASE
+            try:
+                user_pct = float(nz(it.get("_py_user_disc_pct"), None))
+            except Exception:
+                user_pct = None
+
+            if user_pct is None:
+                cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+                user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
+
+            user_pct = self._clamp_pct(user_pct)
+            it["_py_user_disc_pct"] = user_pct
+
+            total_pct = self._clamp_pct(user_pct + PY_CASH_BASE_PCT)
+
+            it["descuento_mode"] = "percent"
+            it["descuento_pct"] = total_pct
+            it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+            it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+            return
+
+        # ---- Tarjeta / otros países: lógica estándar ----
+        # si salimos de efectivo, no necesitamos la llave interna
+        if "_py_user_disc_pct" in it:
+            # la dejamos, pero no afecta (puedes borrarla si prefieres)
+            pass
+
+        if not mode:
+            if d_pct > 0:
+                mode = "percent"
+            elif d_monto > 0:
+                mode = "amount"
+
+        if mode == "percent":
+            d_pct = self._clamp_pct(d_pct)
+            d_monto = round(subtotal * d_pct / 100.0, 2)
+        elif mode == "amount":
+            d_monto = max(0.0, min(d_monto, subtotal))
+            d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
+        else:
             d_pct = 0.0
             d_monto = 0.0
-        else:
-            # Si no hay modo aún, lo inferimos para mantener compatibilidad
-            if not mode:
-                if d_pct > 0:
-                    mode = "percent"
-                elif d_monto > 0:
-                    mode = "amount"
-
-            if mode == "percent":
-                # Modo porcentaje → mantener precisión del % y recalcular monto
-                if d_pct < 0:
-                    d_pct = 0.0
-                if d_pct > 100:
-                    d_pct = 100.0
-                d_monto = round(subtotal * d_pct / 100.0, 2)
-            elif mode == "amount":
-                # Modo monto → respetar monto, derivar % sin redondear extra
-                d_monto = max(0.0, min(d_monto, subtotal))
-                d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
-            else:
-                # Sin modo ni valores válidos → sin descuento
-                d_pct = 0.0
-                d_monto = 0.0
+            mode = ""
 
         it["descuento_mode"] = mode or None
         it["descuento_pct"] = d_pct
         it["descuento_monto"] = d_monto
         it["total"] = round(subtotal - d_monto, 2)
 
-    # === QAbstractTableModel base ===
+    # =========================
+    # QAbstractTableModel
+    # =========================
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._items)
 
@@ -160,12 +327,9 @@ class ItemsModel(QAbstractTableModel):
             return Qt.ItemIsEnabled
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
-        # Columna 3 = Cantidad (editable)
         if index.column() == 3:
             return base | Qt.ItemIsEditable
 
-        # Columna 2 = Descuento NO es editable desde la celda,
-        # se manejará por diálogo externo y setData(programático).
         return base
 
     def data(self, index, role=Qt.DisplayRole):
@@ -179,8 +343,8 @@ class ItemsModel(QAbstractTableModel):
             try:
                 cat_u = (it.get("categoria") or "").upper()
                 disp = float(nz(it.get("stock_disponible"), 0.0))
-                cant = float(nz(it.get("cantidad"), 0))
-                mult = 50.0 if (APP_COUNTRY in ("VENEZUELA", "PARAGUAY") and cat_u in CATS) else 1.0
+                cant = float(nz(it.get("cantidad"), 0.0))
+                mult = self._get_factor_total(it) if (cat_u in CATS) else 1.0
                 if cant * mult > disp and disp >= 0:
                     return QBrush(Qt.red)
             except Exception:
@@ -194,18 +358,13 @@ class ItemsModel(QAbstractTableModel):
         # Tooltips
         if role == Qt.ToolTipRole:
             if col == 4:
-                # Precio unitario
                 if it.get("precio_override") is not None:
                     return "Precio personalizado (override). Click derecho → 'Quitar precio personalizado'."
                 tier = it.get("precio_tier")
                 if tier:
                     return f"Usando precio de catálogo: {tier.capitalize()}"
             elif col == 2:
-                # Descuento
-                subtotal = float(
-                    nz(it.get("subtotal_base"),
-                       it.get("precio", 0.0) * nz(it.get("cantidad"), 0.0))
-                )
+                subtotal = float(nz(it.get("subtotal_base"), 0.0))
                 d_pct = float(nz(it.get("descuento_pct"), 0.0))
                 d_monto = float(nz(it.get("descuento_monto"), 0.0))
                 total = float(nz(it.get("total"), subtotal - d_monto))
@@ -228,17 +387,15 @@ class ItemsModel(QAbstractTableModel):
                     prod += f" | {it['observacion']}"
                 return prod
             elif col == 2:
-                # Columna "Descuento"
                 d_pct = float(nz(it.get("descuento_pct"), 0.0))
                 d_monto = float(nz(it.get("descuento_monto"), 0.0))
                 if d_pct > 0:
-                    # ➜ Visualizamos SOLO 2 decimales, pero internamente hay más
                     return f"-{d_pct:.2f}%"
                 if d_monto > 0:
                     return f"-{fmt_money_ui(convert_from_base(d_monto))}"
                 return "—"
             elif col == 3:
-                # Cantidad
+
                 cat = (it.get("categoria") or "").upper()
                 if APP_COUNTRY == "PERU" and cat in CATS:
                     try:
@@ -251,18 +408,15 @@ class ItemsModel(QAbstractTableModel):
                     except Exception:
                         return "1"
             elif col == 4:
-                # Precio unitario (almacenado en base → se convierte al vuelo)
-                base_price = float(nz(it.get("precio")))
+                base_price = float(nz(it.get("precio"), 0.0))
                 shown_price = convert_from_base(base_price)
                 base_text = fmt_money_ui(shown_price)
                 return f"{base_text} ✏️" if it.get("precio_override") is not None else base_text
             elif col == 5:
-                # Subtotal neto (ya con descuento aplicado)
-                subtotal_base = float(nz(it.get("total")))
-                return fmt_money_ui(convert_from_base(subtotal_base))
+                total_base = float(nz(it.get("total"), 0.0))
+                return fmt_money_ui(convert_from_base(total_base))
 
         if role == Qt.EditRole:
-            # Cantidad
             if col == 3:
                 cat = (it.get("categoria") or "").upper()
                 if APP_COUNTRY == "PERU" and (cat in CATS):
@@ -274,7 +428,7 @@ class ItemsModel(QAbstractTableModel):
                     return str(int(round(float(nz(it.get("cantidad"), 0)))))
                 except Exception:
                     return "1"
-            # Precio unitario editable en ciertos países/categorías
+
             if col == 4 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
                 try:
                     return f"{float(nz(it.get('precio'), 0.0)):.4f}"
@@ -283,24 +437,21 @@ class ItemsModel(QAbstractTableModel):
 
         return None
 
-    # === lógica de precios / cantidades / descuento ===
+    # =========================
+    # lógica precios / cantidades / descuento
+    # =========================
     def _apply_price_and_total(self, it: dict, unit_price: float):
-        # unit_price siempre en moneda base
         self._normalize_discount_and_totals(it, unit_price)
 
     def _recalc_price_for_qty(self, it: dict):
-
-
         cat = (it.get("categoria") or "").upper()
         qty = float(nz(it.get("cantidad"), 0.0))
         prod = it.get("_prod", {}) or {}
 
-        # 1) Override manda (override guardado en base)
         if it.get("precio_override") is not None:
             self._apply_price_and_total(it, float(nz(it.get("precio_override"), 0.0)))
             return
 
-        # 2) Si hay tier explícito, úsalo (en cualquier categoría)
         t = (it.get("precio_tier") or "").strip().lower()
         if t:
             p = _price_from_tier(prod, t)
@@ -308,7 +459,6 @@ class ItemsModel(QAbstractTableModel):
                 self._apply_price_and_total(it, p)
                 return
 
-        # 3) Precio por categoría (sin tramos automáticos)
         p = precio_unitario_por_categoria(cat, prod, qty)
         self._apply_price_and_total(it, p)
 
@@ -324,36 +474,73 @@ class ItemsModel(QAbstractTableModel):
 
         # ----- Columna de DESCUENTO (2) -----
         if col == 2:
-            # Espera un payload dict desde el widget de descuento:
-            # { "mode": "percent"|"amount"|"clear", "percent": float, "amount": float }
             if not isinstance(value, dict):
                 return False
 
-            mode = (value.get("mode") or "").lower()
+            # subtotal actual (base)
+            unit = float(nz(it.get("precio"), 0.0))
             subtotal = float(nz(it.get("subtotal_base"), 0.0))
             if subtotal <= 0:
-                # recomputar subtotal con precio actual si fuera necesario
-                precio_base = float(nz(it.get("precio"), 0.0))
-                qty = float(nz(it.get("cantidad"), 0.0))
-                subtotal = round(precio_base * qty, 2)
+                subtotal = self._compute_subtotal_base(it, unit_price=unit)
                 it["subtotal_base"] = subtotal
 
+            mode = (value.get("mode") or "").lower()
+
+            # Si estamos en efectivo PY, interpretamos lo que el usuario ponga como DESCUENTO TOTAL (incluye base)
+            if self.is_py_cash_mode():
+                # total_pct deseado
+                if mode == "clear":
+                    total_pct = 0.0
+                elif mode == "percent":
+                    try:
+                        total_pct = float(nz(value.get("percent"), 0.0))
+                    except Exception:
+                        total_pct = 0.0
+                elif mode == "amount":
+                    try:
+                        amt = float(nz(value.get("amount"), 0.0))
+                    except Exception:
+                        amt = 0.0
+                    amt = max(0.0, min(amt, subtotal))
+                    total_pct = (amt / subtotal) * 100.0 if subtotal > 0 else 0.0
+                else:
+                    return False
+
+                # En efectivo, el descuento total NO puede ser menor que BASE
+                if subtotal > 0:
+                    if total_pct + _PCT_EPS < PY_CASH_BASE_PCT:
+                        total_pct = PY_CASH_BASE_PCT
+
+                total_pct = self._clamp_pct(total_pct)
+
+                # Guardamos descuento usuario = total - base (nunca negativo)
+                user_pct = max(0.0, total_pct - PY_CASH_BASE_PCT)
+                user_pct = self._clamp_pct(user_pct)
+                it["_py_user_disc_pct"] = user_pct
+
+                it["descuento_mode"] = "percent"
+                it["descuento_pct"] = total_pct
+                it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+                it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+
+                top = self.index(row, 0)
+                bottom = self.index(row, self.columnCount() - 1)
+                self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+                return True
+
+            # --- Tarjeta / otros países: tu lógica original ---
             d_pct = 0.0
             d_monto = 0.0
             d_mode = None
 
             if mode == "clear":
-                # sin descuento
                 d_mode = None
             elif mode == "percent":
                 try:
                     d_pct = float(nz(value.get("percent"), 0.0))
                 except Exception:
                     d_pct = 0.0
-                if d_pct < 0:
-                    d_pct = 0.0
-                if d_pct > 100:
-                    d_pct = 100.0
+                d_pct = max(0.0, min(d_pct, 100.0))
                 d_monto = round(subtotal * d_pct / 100.0, 2)
                 d_mode = "percent"
             elif mode == "amount":
@@ -365,7 +552,6 @@ class ItemsModel(QAbstractTableModel):
                     d_monto = 0.0
                 if d_monto > subtotal:
                     d_monto = subtotal
-                # Derivamos el % SIN redondear (máxima precisión)
                 d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
                 d_mode = "amount"
             else:
@@ -383,6 +569,7 @@ class ItemsModel(QAbstractTableModel):
 
         # ----- Columna de CANTIDAD (3) -----
         if col == 3:
+            old_qty = float(nz(it.get("cantidad"), 0.0))
             cat = (it.get("categoria") or "").upper()
             txt = str(value).strip().lower().replace(",", ".")
             txt = re.sub(r"[^\d\.\-]", "", txt)
@@ -402,6 +589,12 @@ class ItemsModel(QAbstractTableModel):
 
             it["cantidad"] = new_qty
             self._recalc_price_for_qty(it)
+            # ✅ Notificación: si BOTELLAS pasa de 12 unidades
+            try:
+                if cat == "BOTELLAS" and old_qty <= 12 and float(new_qty) >= 12:
+                    self.toast_requested.emit("Recuerda revisar si el producto tiene descuento por cantidad")
+            except Exception:
+                pass
 
             top = self.index(row, 0)
             bottom = self.index(row, self.columnCount() - 1)
@@ -417,7 +610,6 @@ class ItemsModel(QAbstractTableModel):
                     new_price = float(nz(value.get("price"), 0.0))
                     if new_price < 0:
                         new_price = 0.0
-                    # override en MONEDA BASE
                     it["precio_override"] = new_price
                     it["precio_tier"] = None
                     self._apply_price_and_total(it, new_price)
@@ -429,7 +621,7 @@ class ItemsModel(QAbstractTableModel):
                         it["precio_tier"] = None
                     else:
                         it["precio_override"] = None
-                        it["precio_tier"] = tier  # unitario|oferta|minimo|maximo|...
+                        it["precio_tier"] = tier
                     self._recalc_price_for_qty(it)
                 else:
                     return False
@@ -439,7 +631,6 @@ class ItemsModel(QAbstractTableModel):
                 self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
                 return True
 
-            # 2) Entrada numérica directa (fallback) → se toma como MONEDA BASE
             txt = str(value).strip().replace(",", "").replace(" ", "")
             txt = re.sub(r"[^\d\.\-]", "", txt)
             try:
@@ -460,7 +651,9 @@ class ItemsModel(QAbstractTableModel):
 
         return False
 
-    # === Gestión de filas ===
+    # =========================
+    # Gestión de filas
+    # =========================
     def add_item(self, item: dict):
         # Inicializar llaves de precio/discount si no existen
         if "precio_override" not in item:
@@ -474,11 +667,19 @@ class ItemsModel(QAbstractTableModel):
         if "descuento_monto" not in item:
             item["descuento_monto"] = 0.0
 
+        if "factor_total" not in item:
+            try:
+                item["factor_total"] = float(factor_total_por_categoria((item.get("categoria") or "").upper()))
+            except Exception:
+                item["factor_total"] = 1.0
+
         # Normalizar totales (subtotal / total) según precio y cantidad actuales
         try:
             unit_price = float(nz(item.get("precio"), 0.0))
         except Exception:
             unit_price = 0.0
+
+        # ✅ si PY efectivo está activo, este normalize aplica BASE automático al item nuevo
         self._normalize_discount_and_totals(item, unit_price)
 
         self.beginInsertRows(QModelIndex(), len(self._items), len(self._items))

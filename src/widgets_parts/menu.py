@@ -1,8 +1,9 @@
-# src/widgets_parts/main_menu.py
+# src/widgets_parts/menu.py
 from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QPushButton, QMessageBox,
     QFileDialog, QDialog, QFormLayout, QLineEdit, QHBoxLayout
@@ -113,6 +114,7 @@ class MainMenuWindow(QMainWindow):
         self.quote_events = quote_events
         self._app_icon = app_icon
 
+        # solo por si quieres mantener referencias
         self._open_windows: list[SistemaCotizaciones] = []
 
         w = QWidget()
@@ -122,7 +124,6 @@ class MainMenuWindow(QMainWindow):
         btn_rates = QPushButton("💱 Configurar tasas de cambio")
         btn_rates_hist = QPushButton("📈 Ver histórico de tasas")
         btn_update = QPushButton("📦 Actualizar productos")
-        btn_open_data = QPushButton("📁 Abrir carpeta data")
         btn_open_quotes = QPushButton("📁 Abrir carpeta cotizaciones")
         btn_close = QPushButton("Cerrar menú")
 
@@ -130,7 +131,6 @@ class MainMenuWindow(QMainWindow):
         btn_rates.clicked.connect(self._open_rates)
         btn_rates_hist.clicked.connect(self._open_rates_history)
         btn_update.clicked.connect(self._update_products_choose_excel)
-        btn_open_data.clicked.connect(self._open_data_folder)
         btn_open_quotes.clicked.connect(self._open_quotes_folder)
         btn_close.clicked.connect(self.close)
 
@@ -139,7 +139,6 @@ class MainMenuWindow(QMainWindow):
         lay.addWidget(btn_rates_hist)
         lay.addWidget(btn_update)
         lay.addSpacing(10)
-        lay.addWidget(btn_open_data)
         lay.addWidget(btn_open_quotes)
         lay.addStretch(1)
         lay.addWidget(btn_close)
@@ -153,6 +152,10 @@ class MainMenuWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
+    def _close_soon(self):
+        QTimer.singleShot(0, self.close)
+
+    # ✅ La cotización NO depende del menú: al abrirla, cerramos el menú totalmente
     def _open_new_quote(self):
         win = SistemaCotizaciones(
             df_productos=self.catalog_manager.df_productos,
@@ -164,17 +167,21 @@ class MainMenuWindow(QMainWindow):
         win.show()
         self._open_windows.append(win)
 
+        self._close_soon()
+
     def _open_rates(self):
         dlg = RatesDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            try:
-                self.quote_events.rates_updated.emit()
-            except Exception:
-                pass
+        dlg.exec()
+        try:
+            self.quote_events.rates_updated.emit()
+        except Exception:
+            pass
+        self._close_soon()
 
     def _open_rates_history(self):
         dlg = RatesHistoryDialog(self, base_currency=APP_CURRENCY, quote_events=self.quote_events)
         dlg.exec()
+        self._close_soon()
 
     def _update_products_choose_excel(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -184,6 +191,7 @@ class MainMenuWindow(QMainWindow):
             "Excel (*.xlsx *.xlsm *.xls)",
         )
         if not path:
+            self._close_soon()
             return
 
         try:
@@ -214,14 +222,12 @@ class MainMenuWindow(QMainWindow):
             log.exception("Error actualizando catálogo desde Excel seleccionado")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el catálogo:\n{e}")
 
-    def _open_data_folder(self):
-        try:
-            os.startfile(DATA_DIR)  # Windows
-        except Exception:
-            pass
+        self._close_soon()
+
 
     def _open_quotes_folder(self):
         try:
             os.startfile(COTIZACIONES_DIR)  # Windows
         except Exception:
             pass
+        self._close_soon()
