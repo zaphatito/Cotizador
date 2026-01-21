@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import tempfile
 
 IS_WIN = os.name == "nt"
 
@@ -29,9 +30,6 @@ class _TkUI:
         try:
             import tkinter as tk
             from tkinter import ttk
-
-            self.tk = tk
-            self.ttk = ttk
 
             root = tk.Tk()
             root.title("Actualizando Sistema de Cotizaciones")
@@ -144,6 +142,22 @@ def _safe_remove(path: str) -> None:
         pass
 
 
+def _dedupe_args(args: list[str]) -> list[str]:
+    # quita duplicados (case-insensitive) preservando orden
+    out: list[str] = []
+    seen: set[str] = set()
+    for a in args:
+        k = str(a).strip()
+        if not k:
+            continue
+        kk = k.lower()
+        if kk in seen:
+            continue
+        seen.add(kk)
+        out.append(k)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
@@ -155,12 +169,11 @@ def main() -> int:
     # ---- logging ----
     log_path = args.log.strip()
     if not log_path:
-        # intenta log en carpeta del exe a reiniciar (dir del restart)
         if args.restart:
             app_root = os.path.dirname(os.path.abspath(args.restart))
             log_path = os.path.join(app_root, "updater", "apply_update.log")
         else:
-            log_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", "apply_update.log")  # type: ignore
+            log_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", "apply_update.log")
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -193,7 +206,7 @@ def main() -> int:
     files = [it for it in (plan.get("files", []) or []) if isinstance(it, dict)]
     installer = plan.get("installer") if isinstance(plan.get("installer"), dict) else None
 
-    total_steps = 2 + len(deletes) + len(files) + (3 if installer else 0)
+    total_steps = 2 + len(deletes) + len(files) + (4 if installer else 0)
     ui = _TkUI(total_steps)
 
     try:
@@ -222,28 +235,42 @@ def main() -> int:
         # Installer
         if installer:
             inst_path = str(installer.get("path") or "")
-            inst_args = list(installer.get("args") or [])
+            inst_args = _dedupe_args(list(installer.get("args") or []))
             wait = bool(installer.get("wait", True))
             delete_after = bool(installer.get("delete_after", True))
+
+            # log file para Inno (si no viene ya)
+            app_root = os.path.dirname(os.path.abspath(args.restart)) if args.restart else os.path.dirname(log_path)
+            inno_log = os.path.join(app_root, "updater", "inno_update.log")
+            os.makedirs(os.path.dirname(inno_log), exist_ok=True)
+
+            # Inno acepta /LOG="ruta"
+            if not any(a.lower().startswith("/log") for a in inst_args):
+                inst_args.append(f'/LOG="{inno_log}"')
+
             # Fuerza cierre por si quedó algún proceso vivo
-            try:
-                subprocess.run(["taskkill", "/IM", "SistemaCotizaciones.exe", "/F"], capture_output=True)
-            except Exception:
-                pass
-            time.sleep(0.4)
+            if IS_WIN:
+                try:
+                    subprocess.run(["taskkill", "/IM", "SistemaCotizaciones.exe", "/F"], capture_output=True)
+                except Exception:
+                    pass
+                time.sleep(0.4)
+
             ui.advance("Ejecutando instalador…")
             log(f"Run installer: {inst_path} args={inst_args}")
+
+            rc = 0
             if IS_WIN and wait:
-                # start /wait mejora compatibilidad con installers
                 cmd = os.environ.get("ComSpec", "cmd.exe")
                 proc = subprocess.Popen([cmd, "/c", "start", "", "/wait", inst_path] + inst_args, close_fds=True)
                 rc = proc.wait()
             else:
                 proc = subprocess.Popen([inst_path] + inst_args, close_fds=True)
                 rc = proc.wait() if wait else 0
-                log(f"Installer exit code: {rc}")
-                if rc != 0:
-                    raise RuntimeError(f"Installer failed rc={rc}")
+
+            log(f"Installer exit code: {rc}")
+            if rc != 0:
+                raise RuntimeError(f"Installer failed rc={rc}. Ver inno log: {inno_log}")
 
             if delete_after and inst_path:
                 log(f"Delete installer: {inst_path}")
