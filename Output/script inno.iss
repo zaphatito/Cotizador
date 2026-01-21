@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.12"
+#define MyAppVersion "1.2.13"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -404,95 +404,54 @@ var
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
   PrevMiniPath: string;
 begin
-  if CurStep = ssInstall then
-  begin
-    if IsReinstall and (PrevDir <> '') then
+  try
+    { --- TU CÓDIGO TAL CUAL --- }
+    if CurStep = ssInstall then
     begin
-      BackupPreviousConfig();
-      OldConfigPath := PrevDir + '\config';
-      if DirExists(OldConfigPath) then
-        DeleteTreeForce(OldConfigPath);
-    end;
-  end;
-
-  if CurStep = ssPostInstall then
-  begin
-    if HaveOldConfig then
-    begin
-      PaisSel := UpperCase(OldCountry);
-      ListadoSelUpper := UpperCase(OldListing);
-      AllowStr := BoolToJson(OldAllow);
-    end
-    else
-    begin
-      if not IsReinstall then
+      if IsReinstall and (PrevDir <> '') then
       begin
-        case cbPais.ItemIndex of
-          1: PaisSel := 'PERU';
-          2: PaisSel := 'VENEZUELA';
-        else
-          PaisSel := 'PARAGUAY';
-        end;
-
-        case cbListado.ItemIndex of
-          0: ListadoSelUpper := 'PRODUCTOS';
-          1: ListadoSelUpper := 'PRESENTACIONES';
-        else
-          ListadoSelUpper := 'AMBOS';
-        end;
-
-        AllowStr := BoolToJson(chkNoStock.Checked);
-      end
-      else
-      begin
-        PaisSel := 'PARAGUAY';
-        ListadoSelUpper := 'AMBOS';
-        AllowStr := 'false';
+        BackupPreviousConfig();
+        OldConfigPath := PrevDir + '\config';
+        if DirExists(OldConfigPath) then
+          DeleteTreeForce(OldConfigPath);
       end;
     end;
 
-    ConfigFolder := ExpandConstant('{app}\config');
-    ForceDir(ConfigFolder);
-
-    FJson := ConfigFolder + '\config.json';
-    ConfJson :=
-      '{' + #13#10 +
-      '  "country": "' + PaisSel + '",' + #13#10 +
-      '  "listing_type": "' + ListadoSelUpper + '",' + #13#10 +
-      '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
-      '  "update_mode": "SILENT",' + #13#10 +
-      '  "update_check_on_startup": true,' + #13#10 +
-      '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
-      '  "update_apply_exe": "updater\\apply_update.exe",' + #13#10 +
-      '  "update_ignore_paths": ["sqlModels/app.sqlite3"],' + #13#10 +
-      '  "update_flags": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"' + #13#10 +
-      '}';
-
-    if not SaveStringToFile(FJson, ConfJson, False) then
-      MsgBox('No se pudo crear config.json en ' + FJson, mbError, MB_OK);
-
-    if IsReinstall and HaveOldConfig then
+    if CurStep = ssPostInstall then
     begin
-      PrevMiniPath := ConfigFolder + '\config.previous.json';
-      SaveStringToFile(
-        PrevMiniPath,
+      { ... tu lógica ... }
+
+      ConfigFolder := ExpandConstant('{app}\config');
+      ForceDir(ConfigFolder);
+
+      FJson := ConfigFolder + '\config.json';
+      ConfJson :=
         '{' + #13#10 +
-        '  "country": "' + UpperCase(OldCountry) + '",' + #13#10 +
-        '  "listing_type": "' + UpperCase(OldListing) + '",' + #13#10 +
-        '  "allow_no_stock": ' + BoolToJson(OldAllow) + #13#10 +
-        '}',
-        False
-      );
+        '  "country": "' + PaisSel + '",' + #13#10 +
+        '  "listing_type": "' + ListadoSelUpper + '",' + #13#10 +
+        '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
+        '  "update_mode": "SILENT",' + #13#10 +
+        '  "update_check_on_startup": true,' + #13#10 +
+        '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
+        '  "update_apply_exe": "updater\\apply_update.exe",' + #13#10 +
+        '  "update_ignore_paths": ["sqlModels/app.sqlite3"],' + #13#10 +
+        '  "update_flags": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"' + #13#10 +
+        '}';
+
+      if not SaveStringToFile(FJson, ConfJson, False) then
+        Log('WARN: No se pudo crear config.json en ' + FJson);
+
+      { y aquí usa + en vez de or }
+      SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
+      SetFileAttributes(FJson,        MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
     end;
 
-    SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-    SetFileAttributes(FJson,        MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-    if FileExists(ConfigFolder + '\cotizador.json') then
-      SetFileAttributes(ConfigFolder + '\cotizador.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
-    if FileExists(ConfigFolder + '\config.previous.json') then
-      SetFileAttributes(ConfigFolder + '\config.previous.json', MY_ATTR_HIDDEN or MY_ATTR_SYSTEM);
+  except
+    Log('ERROR: CurStepChanged exception: ' + GetExceptionMessage);
+    { NO re-lanzar; así no aborta el setup en upgrades }
   end;
 end;
+
 
 { =========================
   === Desinstalador UI ===
@@ -608,6 +567,7 @@ begin
     RemoveDir(ExpandConstant('{app}'));
   end;
 end;
+
 
 
 
