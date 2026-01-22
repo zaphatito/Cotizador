@@ -182,14 +182,53 @@ class SistemaCotizaciones(
         prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
         pres_map = {str(p.get("CODIGO_NORM", "")).strip().upper(): p for p in (self.presentaciones or [])}
 
+        def _extract_stock(prod: dict) -> float | None:
+            # ✅ soporta diferentes nombres de columna según tu Excel/DB
+            keys = (
+                "cantidad_disponible", "CANTIDAD_DISPONIBLE",
+                "stock_disponible", "STOCK_DISPONIBLE",
+                "stock", "STOCK",
+                "existencia", "EXISTENCIA",
+            )
+            for k in keys:
+                if isinstance(prod, dict) and k in prod:
+                    v = prod.get(k)
+                    if v is None or v == "":
+                        continue
+                    try:
+                        return float(v)
+                    except Exception:
+                        try:
+                            return float(str(v).replace(",", ".").strip())
+                        except Exception:
+                            return None
+            return None
+
         for it in (payload.get("items_base") or []):
             codigo = str(it.get("codigo") or "").strip()
+
             prod = prod_map.get(codigo)
             if prod is None:
                 prod = pres_map.get(codigo.upper())
 
             item = dict(it)
             item["_prod"] = prod or {}
+
+            # ✅ refrescar categoría actual (si existe)
+            if prod is not None and prod.get("categoria"):
+                item["categoria"] = prod.get("categoria")
+
+            # ✅ refrescar stock actual (si existe)
+            if prod is not None:
+                stock = _extract_stock(prod)
+                if stock is not None:
+                    item["stock_disponible"] = stock
+                else:
+                    # si no se puede leer stock desde el catálogo, no forzar rojo
+                    item.setdefault("stock_disponible", -1)
+            else:
+                # producto ya no existe en catálogo -> no control de stock
+                item.setdefault("stock_disponible", -1)
 
             item.setdefault("precio_override", None)
             item.setdefault("precio_tier", None)

@@ -159,9 +159,20 @@ def _build_ignore_set(app_config: Dict[str, Any]) -> set[str]:
         for x in user_list:
             if isinstance(x, str) and x.strip():
                 ignore.add(_normalize_rel(x))
+
+    # Config local (no tocar)
     ignore.add("config/config.json")
+
+    # DB + WAL/SHM (no tocar jamás)
     ignore.add("sqlmodels/app.sqlite3")
-    ignore.add("updater/apply_update.exe")  # ✅ no auto-reemplazar el aplicador
+    ignore.add("sqlmodels/app.sqlite3-wal")
+    ignore.add("sqlmodels/app.sqlite3-shm")
+
+    # Archivos runtime del updater (no tocar)
+    ignore.add("updater/apply_update.exe")
+    ignore.add("updater/apply_update.log")
+    ignore.add("updater/update_state.json")
+
     return ignore
 
 
@@ -304,10 +315,18 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
                 continue
             if not _is_safe_relpath(rel):
                 continue
+
             rel_n = _normalize_rel(rel)
+
+            # ✅ PROTECCIÓN: jamás borrar sqlModels (ni folder ni contenido)
+            if rel_n == "sqlmodels" or rel_n.startswith("sqlmodels/"):
+                continue
+
             if rel_n in ignore:
                 continue
+
             plan["delete"].append(_dst_for_rel(rel))
+
 
     need_items: list[dict[str, str]] = []
     for f in files:

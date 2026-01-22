@@ -386,13 +386,30 @@ class ItemsModel(QAbstractTableModel):
         if role == Qt.ForegroundRole and col == 3:
             try:
                 cat_u = (it.get("categoria") or "").upper()
-                disp = float(nz(it.get("stock_disponible"), 0.0))
+
+                # ✅ Si el item no tiene stock_disponible (reabierto desde histórico),
+                # NO lo pintes rojo (stock desconocido).
+                disp_raw = it.get("stock_disponible", None)
+                if disp_raw is None:
+                    return None
+
+                try:
+                    disp = float(disp_raw)
+                except Exception:
+                    return None
+
+                # stock < 0 => no se controla inventario
+                if disp < 0:
+                    return None
+
                 cant = float(nz(it.get("cantidad"), 0.0))
                 mult = self._get_factor_total(it) if (cat_u in CATS) else 1.0
-                if cant * mult > disp and disp >= 0:
+
+                if (cant * mult) > disp:
                     return QBrush(Qt.red)
             except Exception:
                 pass
+
 
         if role == Qt.ForegroundRole and col == 4:
             if it.get("precio_override") is not None:

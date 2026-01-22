@@ -157,6 +157,39 @@ def _dedupe_args(args: list[str]) -> list[str]:
     return out
 
 
+# ----------------- PROTECCIÓN DB -----------------
+
+_PROTECTED_SUFFIXES = (
+    os.sep + "sqlModels" + os.sep + "app.sqlite3",
+    os.sep + "sqlModels" + os.sep + "app.sqlite3-wal",
+    os.sep + "sqlModels" + os.sep + "app.sqlite3-shm",
+)
+
+def _is_protected(p: str, app_root: str) -> bool:
+    if not p:
+        return False
+    try:
+        ap = os.path.abspath(p)
+    except Exception:
+        ap = p
+
+    # 1) bloquear cualquier cosa dentro de {app}\sqlModels\
+    try:
+        sql_dir = os.path.abspath(os.path.join(app_root, "sqlModels"))
+        if os.path.commonpath([ap, sql_dir]) == sql_dir:
+            return True
+    except Exception:
+        pass
+
+    # 2) fallback por sufijo
+    up = ap
+    for suf in _PROTECTED_SUFFIXES:
+        if up.endswith(suf):
+            return True
+
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
@@ -165,11 +198,17 @@ def main() -> int:
     ap.add_argument("--log", default="")
     args = ap.parse_args()
 
-    # ---- log path (sin espacios no importa, esto está en {app}) ----
+    app_root = ""
+    if args.restart:
+        try:
+            app_root = os.path.dirname(os.path.abspath(args.restart))
+        except Exception:
+            app_root = ""
+
+    # ---- log path ----
     log_path = args.log.strip()
     if not log_path:
-        if args.restart:
-            app_root = os.path.dirname(os.path.abspath(args.restart))
+        if args.restart and app_root:
             log_path = os.path.join(app_root, "updater", "apply_update.log")
         else:
             log_path = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", "apply_update.log")
@@ -189,6 +228,7 @@ def main() -> int:
     log(f"pid={args.pid}")
     log(f"restart={args.restart}")
     log(f"log={log_path}")
+    log(f"app_root={app_root}")
 
     # ---- load plan ----
     try:
@@ -214,7 +254,6 @@ def main() -> int:
         if args.pid and IS_WIN:
             _wait_pid_windows(args.pid, timeout_s=180)
 
-        # mata cualquier proceso colgado
         if IS_WIN:
             try:
                 subprocess.run(["taskkill", "/IM", "SistemaCotizaciones.exe", "/F"], capture_output=True)
@@ -225,6 +264,9 @@ def main() -> int:
         ui.advance("Aplicando cambios…")
 
         for p in deletes:
+            if app_root and _is_protected(p, app_root):
+                log(f"SKIP delete (protected): {p}")
+                continue
             ui.advance(f"Eliminando: {os.path.basename(p)}")
             log(f"Delete: {p}")
             _safe_remove(p)
@@ -234,6 +276,11 @@ def main() -> int:
             dst = item.get("dst")
             if not src or not dst:
                 continue
+
+            if app_root and _is_protected(dst, app_root):
+                log(f"SKIP copy (protected): {src} -> {dst}")
+                continue
+
             ui.advance(f"Copiando: {os.path.basename(dst)}")
             log(f"Copy: {src} -> {dst}")
             _atomic_replace(src, dst)
@@ -244,11 +291,9 @@ def main() -> int:
             wait = bool(installer.get("wait", True))
             delete_after = bool(installer.get("delete_after", True))
 
-            # ✅ Inno log en TEMP (sin espacios, sin comillas)
             inno_log = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", "inno_update.log")
             os.makedirs(os.path.dirname(inno_log), exist_ok=True)
 
-            # Inno acepta /LOG=path
             if not any(a.lower().startswith("/log") for a in inst_args):
                 inst_args.append(f"/LOG={inno_log}")
 

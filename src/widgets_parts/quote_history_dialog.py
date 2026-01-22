@@ -5,7 +5,7 @@ import os
 import datetime
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QAction
+from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
@@ -47,6 +47,8 @@ def center_on_screen(w):
         w.move(fg.topLeft())
     except Exception:
         pass
+
+
 def _doc_header_for_country(country: str) -> str:
     c = (country or "").strip().upper()
     if c == "PERU":
@@ -55,6 +57,7 @@ def _doc_header_for_country(country: str) -> str:
         return "Cédula/RIF"
     # Paraguay (y default)
     return "Cédula/RUC"
+
 
 def _parse_dt(value) -> datetime.datetime | None:
     if value is None:
@@ -298,6 +301,7 @@ class QuoteHistoryWindow(QMainWindow):
         self.total = 0
 
         self._open_windows: list[SistemaCotizaciones] = []
+        self._closing_with_children = False  # evita loops en closeEvent
 
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -410,6 +414,73 @@ class QuoteHistoryWindow(QMainWindow):
 
         self._apply_catalog_gate()
         self._reload_first_page()
+
+    # -----------------------------
+    #  ✅ CONTROL DE VENTANAS HIJAS
+    # -----------------------------
+    def _is_qt_alive(self, obj) -> bool:
+        """Detecta objetos Qt ya destruidos (PySide lanza RuntimeError)."""
+        if obj is None:
+            return False
+        try:
+            _ = obj.windowTitle()
+            return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return True
+
+    def _prune_open_windows(self):
+        try:
+            self._open_windows = [w for w in (self._open_windows or []) if self._is_qt_alive(w)]
+        except Exception:
+            pass
+
+    def _register_open_quote_window(self, win: SistemaCotizaciones):
+        """Registra una ventana de cotización abierta y asegura delete-on-close."""
+        try:
+            if win is None:
+                return
+            try:
+                win.setAttribute(Qt.WA_DeleteOnClose, True)
+            except Exception:
+                pass
+
+            try:
+                win.destroyed.connect(lambda *_: self._prune_open_windows())
+            except Exception:
+                pass
+
+            self._open_windows.append(win)
+            self._prune_open_windows()
+        except Exception:
+            pass
+
+    def _alive_quote_windows(self) -> list[SistemaCotizaciones]:
+        self._prune_open_windows()
+        return list(self._open_windows or [])
+
+    def _close_all_quotes(self) -> bool:
+        """Intenta cerrar todas las cotizaciones abiertas. Devuelve True si ya no queda ninguna."""
+        self._prune_open_windows()
+        wins = list(self._open_windows or [])
+        for w in wins:
+            try:
+                if self._is_qt_alive(w):
+                    w.close()
+            except Exception:
+                pass
+
+        # deja respirar eventos de cierre
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+        self._prune_open_windows()
+        return len(self._open_windows or []) == 0
+
+    # -----------------------------
 
     def _on_quote_saved(self):
         self._rt_timer.start()
@@ -578,7 +649,7 @@ class QuoteHistoryWindow(QMainWindow):
         )
         win.show()
         center_on_screen(win)
-        self._open_windows.append(win)
+        self._register_open_quote_window(win)
 
     def _open_main_menu(self):
         MainMenuWindow.show_singleton(
@@ -680,7 +751,7 @@ class QuoteHistoryWindow(QMainWindow):
 
             win.show()
             center_on_screen(win)
-            self._open_windows.append(win)
+            self._register_open_quote_window(win)
 
             win.load_from_history_payload(payload)
 
@@ -803,3 +874,57 @@ class QuoteHistoryWindow(QMainWindow):
         except Exception as e:
             log.exception("Error regenerando PDF")
             QMessageBox.critical(self, "Error", f"No se pudo regenerar el PDF:\n{e}")
+
+    # ---------------------------------------
+    # ✅ BLOQUEO DE CIERRE CON COTIZACIONES
+    # ---------------------------------------
+    def closeEvent(self, event: QCloseEvent):
+        # Si ya estamos cerrando de forma “controlada”, no volver a preguntar
+        if self._closing_with_children:
+            event.accept()
+            return
+
+        self._prune_open_windows()
+        open_wins = self._alive_quote_windows()
+
+        if not open_wins:
+            event.accept()
+            return
+
+        n = len(open_wins)
+        plural = (n != 1)
+
+        mb = QMessageBox(self)
+        mb.setIcon(QMessageBox.Warning)
+        mb.setWindowTitle("Cerrar histórico")
+        mb.setText(
+            f"Hay {n} cotización{'es' if plural else ''} abierta{'s' if plural else ''}.\n\n"
+            f"Si cierras el histórico, se cerrarán {'todas' if plural else 'la'} "
+            f"{'las' if plural else 'la'} cotización{'es' if plural else ''} abierta{'s' if plural else ''}."
+        )
+        btn_close_all = mb.addButton("Cerrar todas", QMessageBox.AcceptRole)
+        btn_cancel = mb.addButton("Cancelar", QMessageBox.RejectRole)
+        mb.setDefaultButton(btn_cancel)
+
+        mb.exec()
+
+
+        if mb.clickedButton() != btn_close_all:
+            event.ignore()
+            return
+
+        # Intentar cerrar todo y luego cerrar el histórico
+        self._closing_with_children = True
+        ok = self._close_all_quotes()
+        self._closing_with_children = False
+
+        if not ok:
+            QMessageBox.warning(
+                self,
+                "Atención",
+                "No se pudo cerrar el histórico porque aún hay cotizaciones abiertas."
+            )
+            event.ignore()
+            return
+
+        event.accept()
