@@ -8,7 +8,12 @@ from typing import Dict, Any, Tuple, List
 
 from .paths import DATA_DIR, user_docs_dir
 from sqlModels.db import connect, ensure_schema, tx
-from sqlModels.settings_repo import get_setting, ensure_defaults, settings_is_empty, set_setting
+from sqlModels.settings_repo import (
+    get_setting,
+    ensure_defaults,
+    settings_is_empty,
+    set_setting,
+)
 
 # Defaults (DB) como strings (solo se usan si NO hay config.json o para completar keys faltantes)
 DEFAULT_CONFIG_STR: dict[str, str] = {
@@ -128,7 +133,7 @@ def _load_seed_overrides_from_json() -> dict[str, str]:
     Lee config.json/app_config.json SOLO para sembrar LA PRIMERA VEZ.
     Devuelve overrides en formato string compatible con settings.
 
-    OJO: si no hay json, devuelve {} (y ahí se usa DEFAULT_CONFIG_STR).
+    OJO: si no hay json, devuelve {} (y ahí se usan DEFAULT_CONFIG_STR).
     """
     path = None
     for p in _candidate_config_paths():
@@ -195,42 +200,34 @@ def _set_meta(con, key: str, value: str) -> None:
 
 def _seed_settings_once(con) -> None:
     """
-    Regla:
-      - Primera vez (meta.settings_seeded no existe y settings vacío):
-          * Si hay config.json => ese JSON es la BASE inicial
-          * Si NO hay config.json => DEFAULT_CONFIG_STR es la base
-          * Luego se completan keys faltantes con DEFAULT_CONFIG_STR (sin sobreescribir)
-      - Luego se ignora para siempre el JSON, aunque cambie.
-      - Siempre se aseguran keys nuevas con DEFAULT_CONFIG_STR (INSERT OR IGNORE).
+    Regla (robusta):
+      - Siempre asegura DEFAULT_CONFIG_STR (INSERT OR IGNORE)
+      - Si meta.settings_seeded NO existe (primera ejecución “real”):
+          * Lee config.json/app_config.json si existe
+          * APLICA overrides con UPSERT (set_setting) aunque settings ya tenga filas
+            (esto evita que una DB "seed" traída desde dist bloquee el seed)
+          * Marca meta.settings_seeded = 1
+      - En ejecuciones siguientes:
+          * No vuelve a aplicar JSON
+          * Solo agrega nuevas keys por defaults (INSERT OR IGNORE)
     """
     seeded_flag = _get_meta(con, "settings_seeded")
 
+    ensure_defaults(con, DEFAULT_CONFIG_STR)
+
     if seeded_flag is None:
-        # Primera vez (o DB vieja sin meta)
-        if settings_is_empty(con):
-            seed_from_json = _load_seed_overrides_from_json()
+        seed_from_json = _load_seed_overrides_from_json()
 
-            if seed_from_json:
-                # 1) insertar primero lo del json (base inicial)
-                ensure_defaults(con, seed_from_json)
-                # 2) completar lo que falte con defaults
-                ensure_defaults(con, DEFAULT_CONFIG_STR)
-            else:
-                # no hay json => defaults como base
-                ensure_defaults(con, DEFAULT_CONFIG_STR)
+        # aplica overrides (sobrescribe SOLO estas keys) en la DB
+        for k, v in (seed_from_json or {}).items():
+            set_setting(con, k, v)
 
-        else:
-            # ya había settings (DB existente) pero sin meta flag
-            ensure_defaults(con, DEFAULT_CONFIG_STR)
-
-        # marcar para NO volver a usar JSON nunca más
         _set_meta(con, "settings_seeded", "1")
 
-    else:
-        # Ya sembrado: nunca más aplicar JSON
-        ensure_defaults(con, DEFAULT_CONFIG_STR)
+        if seed_from_json:
+            _set_meta(con, "settings_seeded_from_json", "1")
 
-        # Si por alguna razón alguien vació settings, reponer defaults (sin JSON)
+    else:
         if settings_is_empty(con):
             ensure_defaults(con, DEFAULT_CONFIG_STR)
 

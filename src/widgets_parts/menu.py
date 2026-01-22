@@ -117,24 +117,31 @@ class MainMenuWindow(QMainWindow):
         # solo por si quieres mantener referencias
         self._open_windows: list[SistemaCotizaciones] = []
 
+        # Si el catálogo se actualiza desde otra ventana, refrescar estado del botón
+        if self.catalog_manager is not None:
+            try:
+                self.catalog_manager.catalog_updated.connect(self._on_catalog_updated)
+            except Exception:
+                pass
+
         w = QWidget()
         lay = QVBoxLayout(w)
 
-        btn_new = QPushButton("➕ Crear nueva cotización")
+        self.btn_new = QPushButton("➕ Crear nueva cotización")
         btn_rates = QPushButton("💱 Configurar tasas de cambio")
         btn_rates_hist = QPushButton("📈 Ver histórico de tasas")
         btn_update = QPushButton("📦 Actualizar productos")
         btn_open_quotes = QPushButton("📁 Abrir carpeta cotizaciones")
         btn_close = QPushButton("Cerrar menú")
 
-        btn_new.clicked.connect(self._open_new_quote)
+        self.btn_new.clicked.connect(self._open_new_quote)
         btn_rates.clicked.connect(self._open_rates)
         btn_rates_hist.clicked.connect(self._open_rates_history)
         btn_update.clicked.connect(self._update_products_choose_excel)
         btn_open_quotes.clicked.connect(self._open_quotes_folder)
         btn_close.clicked.connect(self.close)
 
-        lay.addWidget(btn_new)
+        lay.addWidget(self.btn_new)
         lay.addWidget(btn_rates)
         lay.addWidget(btn_rates_hist)
         lay.addWidget(btn_update)
@@ -144,6 +151,9 @@ class MainMenuWindow(QMainWindow):
         lay.addWidget(btn_close)
 
         self.setCentralWidget(w)
+
+        # ✅ Igual que histórico: no permitir "Nueva cotización" si no hay productos
+        self._apply_catalog_gate()
 
     def closeEvent(self, event):
         try:
@@ -155,8 +165,34 @@ class MainMenuWindow(QMainWindow):
     def _close_soon(self):
         QTimer.singleShot(0, self.close)
 
+    def _on_catalog_updated(self, *_):
+        self._apply_catalog_gate()
+
+    def _has_products(self) -> bool:
+        try:
+            df = getattr(self.catalog_manager, "df_productos", None)
+            return (df is not None) and (not df.empty)
+        except Exception:
+            return False
+
+    def _apply_catalog_gate(self):
+        ok = self._has_products()
+        self.btn_new.setEnabled(ok)
+        tip = "Primero importa/actualiza productos para poder crear cotizaciones."
+        self.btn_new.setToolTip("" if ok else tip)
+
     # ✅ La cotización NO depende del menú: al abrirla, cerramos el menú totalmente
     def _open_new_quote(self):
+        if not self._has_products():
+            QMessageBox.warning(
+                self,
+                "Sin productos",
+                "No puedes crear cotizaciones sin productos.\n\n"
+                "Usa 📦 Actualizar productos.",
+            )
+            self._apply_catalog_gate()
+            return
+
         win = SistemaCotizaciones(
             df_productos=self.catalog_manager.df_productos,
             df_presentaciones=self.catalog_manager.df_presentaciones,
@@ -210,6 +246,9 @@ class MainMenuWindow(QMainWindow):
 
             self.catalog_manager.set_catalog(df_productos, df_presentaciones)
 
+            # ✅ refresca botón crear cotización
+            self._apply_catalog_gate()
+
             QMessageBox.information(
                 self,
                 "Catálogo actualizado",
@@ -223,7 +262,6 @@ class MainMenuWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el catálogo:\n{e}")
 
         self._close_soon()
-
 
     def _open_quotes_folder(self):
         try:

@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -623,10 +623,6 @@ begin
 
       if not SaveStringToFile(FJson, ConfJson, False) then
         Log('WARN: No se pudo crear config.json en ' + FJson);
-
-      { atributos (usa +, NO uses OR)}
-      SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
-      SetFileAttributes(FJson,        MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
     end;
 
   except
@@ -666,4 +662,5 @@ begin
 
   end;
 end;
+
 

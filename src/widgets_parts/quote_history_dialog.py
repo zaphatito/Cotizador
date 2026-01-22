@@ -47,7 +47,14 @@ def center_on_screen(w):
         w.move(fg.topLeft())
     except Exception:
         pass
-
+def _doc_header_for_country(country: str) -> str:
+    c = (country or "").strip().upper()
+    if c == "PERU":
+        return "DNI / RUC"
+    if c == "VENEZUELA":
+        return "Cédula/RIF"
+    # Paraguay (y default)
+    return "Cédula/RUC"
 
 def _parse_dt(value) -> datetime.datetime | None:
     if value is None:
@@ -90,15 +97,15 @@ class QuotesTableModel(QAbstractTableModel):
         super().__init__()
         self.rows: list[dict] = []
         self.show_payment = bool(show_payment)
-
+        doc_hdr = _doc_header_for_country(APP_COUNTRY)
         if self.show_payment:
             self.HEADERS = [
-                "Fecha/Hora", "N°", "Cliente", "Cédula/RUC", "Teléfono",
+                "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
                 "Pago", "Total", "Moneda", "Items", "PDF"
             ]
         else:
             self.HEADERS = [
-                "Fecha/Hora", "N°", "Cliente", "Cédula/RUC", "Teléfono",
+                "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
                 "Total", "Moneda", "Items", "PDF"
             ]
 
