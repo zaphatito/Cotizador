@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.2.3"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -72,9 +72,6 @@ Name: "{app}\sqlModels"
 [Files]
 ; Bundle de PyInstaller (EXCLUYE la DB para no sobreescribir en upgrades)
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "sqlModels\app.sqlite3"
-
-; Seed de DB SOLO si no existe (instalación nueva)
-Source: "{#BuildDir}\sqlModels\app.sqlite3"; DestDir: "{app}\sqlModels"; Flags: ignoreversion onlyifdoesntexist
 
 ; Referencia (opcional)
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
@@ -662,5 +659,6 @@ begin
 
   end;
 end;
+
 
 

@@ -44,11 +44,18 @@ function Bump-Version([string]$v, [string]$kind) {
   }
 }
 
-function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) { $enc = New-Object System.Text.UTF8Encoding($false); [System.IO.File]::WriteAllText($Path, $Text, $enc) }
+function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) {
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
 function Remove-Dir-Robust([string]$path) {
   if (!(Test-Path $path)) { return }
   try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
-  for ($i=0; $i -lt 6; $i++) { try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 600 } }
+  for ($i=0; $i -lt 6; $i++) {
+    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return }
+    catch { Start-Sleep -Milliseconds 600 }
+  }
   try {
     $tmp = "$path._old_" + (Get-Random)
     Rename-Item -LiteralPath $path -NewName (Split-Path $tmp -Leaf) -ErrorAction SilentlyContinue
@@ -153,20 +160,19 @@ if ($PruneOpenGLSW) {
   if (Test-Path $opengl) { Remove-Item $opengl -Force; Write-Host "Removed: $opengl" }
 }
 
-# 3.2 Inyectar seed DB a dist (para instalador)
-$seedDbSrc = Join-Path $ProjectRoot "sqlModels\app.sqlite3"
-if (!(Test-Path $seedDbSrc)) {
-  throw "No existe seed DB en $seedDbSrc (debe existir para instalación nueva)."
+# 3.2 (IMPORTANTE) NO inyectar seed DB: la app la crea en primera ejecución
+# Limpieza defensiva por si alguien ejecutó el EXE dentro de dist y se creó la DB
+$maybeDb = Join-Path $distDir "sqlModels\app.sqlite3"
+if (Test-Path $maybeDb) {
+  Remove-Item -Force $maybeDb
+  Write-Host "OK: removido app.sqlite3 accidental de dist (la app la creará en runtime)"
 }
-$seedDbDstDir = Join-Path $distDir "sqlModels"
-New-Item -ItemType Directory -Force -Path $seedDbDstDir | Out-Null
-Copy-Item -Force $seedDbSrc (Join-Path $seedDbDstDir "app.sqlite3")
-Write-Host "OK: Seed DB copiada a dist\SistemaCotizaciones\sqlModels\app.sqlite3"
+$maybeWal = Join-Path $distDir "sqlModels\app.sqlite3-wal"
+if (Test-Path $maybeWal) { Remove-Item -Force $maybeWal }
+$maybeShm = Join-Path $distDir "sqlModels\app.sqlite3-shm"
+if (Test-Path $maybeShm) { Remove-Item -Force $maybeShm }
 
 Set-ContentUtf8NoBOM -Path (Join-Path $distDir "version.txt") -Text $next
-
-
-
 
 # 4) build apply_update.exe
 $applyScript = Join-Path $ProjectRoot "tools\apply_update.py"
@@ -214,9 +220,13 @@ New-Item -ItemType Directory -Force -Path $updateVerDir | Out-Null
 
 Copy-Item -Path (Join-Path $distDir "*") -Destination $updateVerDir -Recurse -Force
 
-# IMPORTANT: NO versionar DB dentro de updates/<ver>
+# IMPORTANT: NO versionar DB dentro de updates/<ver> (por si apareciera)
 $updateDb = Join-Path $updateVerDir "sqlModels\app.sqlite3"
 if (Test-Path $updateDb) { Remove-Item -Force $updateDb; Write-Host "OK: removido app.sqlite3 de updates/<ver>" }
+$updateWal = Join-Path $updateVerDir "sqlModels\app.sqlite3-wal"
+if (Test-Path $updateWal) { Remove-Item -Force $updateWal }
+$updateShm = Join-Path $updateVerDir "sqlModels\app.sqlite3-shm"
+if (Test-Path $updateShm) { Remove-Item -Force $updateShm }
 
 Write-Host "OK: update package -> $updateVerDir"
 
@@ -227,6 +237,8 @@ Get-ChildItem -Path $updateVerDir -Recurse -File | ForEach-Object {
   $rel  = $full.Substring($updateVerDir.Length + 1).Replace("\","/")
   $relLower = $rel.ToLower()
   if ($relLower -eq "sqlmodels/app.sqlite3") { return }
+  if ($relLower -eq "sqlmodels/app.sqlite3-wal") { return }
+  if ($relLower -eq "sqlmodels/app.sqlite3-shm") { return }
   $sha  = (Get-FileHash $full -Algorithm SHA256).Hash.ToLower()
   $filesList += [ordered]@{ path = $rel; sha256 = $sha }
 }
@@ -250,6 +262,8 @@ if (Test-Path $prevUpdateDir) {
   foreach($p in $prevSet){
     if (-not $newSet.Contains($p)) {
       if ($p -eq "sqlmodels/app.sqlite3") { continue }
+      if ($p -eq "sqlmodels/app.sqlite3-wal") { continue }
+      if ($p -eq "sqlmodels/app.sqlite3-shm") { continue }
       $deleteList += $p
     }
   }
@@ -305,6 +319,6 @@ $filesToAdd = @(
 )
 
 git -C $ProjectRoot add -- $filesToAdd
-git -C $ProjectRoot commit -m ("Release {0}: silent files-updater + seeddb" -f $next)
+git -C $ProjectRoot commit -m ("Release {0}: silent files-updater" -f $next)
 
 Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
