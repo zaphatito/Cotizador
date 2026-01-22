@@ -9,12 +9,12 @@ from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
-    QApplication, QDialog,
+    QApplication, QDialog, QInputDialog,
 )
 
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.quotes_repo import (
-    list_quotes, get_quote_header, get_quote_items, soft_delete_quote
+    list_quotes, get_quote_header, get_quote_items, soft_delete_quote, update_quote_payment
 )
 from sqlModels.rates_repo import load_rates
 
@@ -162,7 +162,6 @@ class QuotesTableModel(QAbstractTableModel):
                 return r.get("telefono", "")
 
             if self.show_payment and c == self._idx_pago():
-                # ✅ Si está vacío, se queda vacío (no placeholder)
                 return (r.get("metodo_pago") or "").strip()
 
             if c == self._idx_total():
@@ -292,7 +291,6 @@ class QuoteHistoryWindow(QMainWindow):
         self.catalog_manager = catalog_manager
         self.quote_events = quote_events
 
-        # ✅ Paraguay y Perú muestran "Pago"
         show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
         self.model = QuotesTableModel(show_payment=show_payment)
 
@@ -301,7 +299,7 @@ class QuoteHistoryWindow(QMainWindow):
         self.total = 0
 
         self._open_windows: list[SistemaCotizaciones] = []
-        self._closing_with_children = False  # evita loops en closeEvent
+        self._closing_with_children = False
 
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -419,7 +417,6 @@ class QuoteHistoryWindow(QMainWindow):
     #  ✅ CONTROL DE VENTANAS HIJAS
     # -----------------------------
     def _is_qt_alive(self, obj) -> bool:
-        """Detecta objetos Qt ya destruidos (PySide lanza RuntimeError)."""
         if obj is None:
             return False
         try:
@@ -437,7 +434,6 @@ class QuoteHistoryWindow(QMainWindow):
             pass
 
     def _register_open_quote_window(self, win: SistemaCotizaciones):
-        """Registra una ventana de cotización abierta y asegura delete-on-close."""
         try:
             if win is None:
                 return
@@ -461,7 +457,6 @@ class QuoteHistoryWindow(QMainWindow):
         return list(self._open_windows or [])
 
     def _close_all_quotes(self) -> bool:
-        """Intenta cerrar todas las cotizaciones abiertas. Devuelve True si ya no queda ninguna."""
         self._prune_open_windows()
         wins = list(self._open_windows or [])
         for w in wins:
@@ -471,7 +466,6 @@ class QuoteHistoryWindow(QMainWindow):
             except Exception:
                 pass
 
-        # deja respirar eventos de cierre
         try:
             QApplication.processEvents()
         except Exception:
@@ -497,10 +491,8 @@ class QuoteHistoryWindow(QMainWindow):
 
     def _apply_catalog_gate(self):
         ok = self._has_products()
-
         self.btn_new.setEnabled(ok)
         self.btn_dup.setEnabled(ok)
-
         tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
         self.btn_new.setToolTip("" if ok else tip)
         self.btn_dup.setToolTip("" if ok else tip)
@@ -519,6 +511,17 @@ class QuoteHistoryWindow(QMainWindow):
         if not idx.isValid():
             return None
         return self.model.get_id_at(idx.row())
+
+    def _select_row_by_quote_id(self, quote_id: int):
+        try:
+            for i, r in enumerate(self.model.rows or []):
+                if int(r.get("id") or 0) == int(quote_id):
+                    self.table.selectRow(i)
+                    self.table.setCurrentIndex(self.model.index(i, 0))
+                    self.table.scrollTo(self.model.index(i, 0))
+                    break
+        except Exception:
+            pass
 
     def _reload_first_page(self):
         self.offset = 0
@@ -608,6 +611,13 @@ class QuoteHistoryWindow(QMainWindow):
         act_regen = QAction("Regenerar PDF", self)
         act_hide = QAction("Eliminar", self)
 
+        # ✅ SOLO PERÚ: editar método de pago desde histórico
+        act_edit_pay = None
+        if APP_COUNTRY == "PERU":
+            act_edit_pay = QAction("Editar pago…", self)
+            act_edit_pay.setEnabled(has_sel)
+            act_edit_pay.triggered.connect(self._edit_payment_peru)
+
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
         act_ticket.setEnabled(has_sel)
@@ -623,12 +633,63 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addAction(act_dup)
         menu.addSeparator()
         menu.addAction(act_pdf)
+
+        if act_edit_pay is not None:
+            menu.addAction(act_edit_pay)
+
         menu.addAction(act_ticket)
         menu.addAction(act_regen)
         menu.addSeparator()
         menu.addAction(act_hide)
         menu.addSeparator()
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _edit_payment_peru(self):
+        if APP_COUNTRY != "PERU":
+            return
+
+        qid = self._selected_quote_id()
+        if not qid:
+            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            return
+
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            header = get_quote_header(con, qid)
+            con.close()
+        except Exception as e:
+            log.exception("Error leyendo cotización")
+            QMessageBox.critical(self, "Error", f"No se pudo leer la cotización:\n{e}")
+            return
+
+        current_mp = (header.get("metodo_pago") or "").strip()
+
+        text, ok = QInputDialog.getText(
+            self,
+            "Editar pago",
+            "Método de pago (opcional):",
+            QLineEdit.Normal,
+            current_mp,
+        )
+        if not ok:
+            return
+
+        new_mp = (text or "").strip()
+
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            with tx(con):
+                update_quote_payment(con, qid, new_mp)
+            con.close()
+
+            self._reload_current_page()
+            self._select_row_by_quote_id(qid)
+
+        except Exception as e:
+            log.exception("Error actualizando pago")
+            QMessageBox.critical(self, "Error", f"No se pudo actualizar el pago:\n{e}")
 
     def _open_new_quote(self):
         if not self._has_products():
@@ -647,6 +708,10 @@ class QuoteHistoryWindow(QMainWindow):
             catalog_manager=self.catalog_manager,
             quote_events=self.quote_events,
         )
+
+        # ✅ para que al generar se cierre y vuelva foco al histórico
+        win._history_window = self
+
         win.show()
         center_on_screen(win)
         self._register_open_quote_window(win)
@@ -710,7 +775,9 @@ class QuoteHistoryWindow(QMainWindow):
                 quote_events=self.quote_events,
             )
 
-            # ✅ Paraguay: toggle + sync (sin re-aplicar)
+            # ✅ para que al generar se cierre y vuelva foco al histórico
+            win._history_window = self
+
             if APP_COUNTRY == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
                 is_cash = (mp == "efectivo")
@@ -740,7 +807,6 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # ✅ Perú: precargar texto (puede ser vacío)
             elif APP_COUNTRY == "PERU":
                 mp = (header.get("metodo_pago") or "")
                 try:
@@ -755,7 +821,6 @@ class QuoteHistoryWindow(QMainWindow):
 
             win.load_from_history_payload(payload)
 
-            # ✅ Paraguay: sync DESPUÉS de cargar items
             if APP_COUNTRY == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
                 is_cash = (mp == "efectivo")
@@ -845,7 +910,6 @@ class QuoteHistoryWindow(QMainWindow):
                 return
 
             metodo_pago = (header.get("metodo_pago") or "").strip()
-            # ✅ Perú: no default (puede quedar vacío)
             if APP_COUNTRY == "PERU":
                 pass
             elif APP_COUNTRY == "PARAGUAY":
@@ -875,11 +939,7 @@ class QuoteHistoryWindow(QMainWindow):
             log.exception("Error regenerando PDF")
             QMessageBox.critical(self, "Error", f"No se pudo regenerar el PDF:\n{e}")
 
-    # ---------------------------------------
-    # ✅ BLOQUEO DE CIERRE CON COTIZACIONES
-    # ---------------------------------------
     def closeEvent(self, event: QCloseEvent):
-        # Si ya estamos cerrando de forma “controlada”, no volver a preguntar
         if self._closing_with_children:
             event.accept()
             return
@@ -908,12 +968,10 @@ class QuoteHistoryWindow(QMainWindow):
 
         mb.exec()
 
-
         if mb.clickedButton() != btn_close_all:
             event.ignore()
             return
 
-        # Intentar cerrar todo y luego cerrar el histórico
         self._closing_with_children = True
         ok = self._close_all_quotes()
         self._closing_with_children = False

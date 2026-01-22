@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from PySide6.QtWidgets import QMessageBox, QDialog
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QTimer
 
 from ..paths import COTIZACIONES_DIR, resolve_country_asset
 from ..config import APP_COUNTRY, COUNTRY_CODE, convert_from_base, get_currency_context
@@ -104,6 +104,34 @@ class PdfActionsMixin:
                 return ""
 
         return "Transferencia"
+
+    def _focus_history_after_close(self):
+        """Cierra esta ventana y devuelve foco al histórico (si existe)."""
+        hist = getattr(self, "_history_window", None)
+        if hist is None:
+            return
+
+        def _bring_front(h=hist):
+            try:
+                h.showNormal()
+            except Exception:
+                pass
+            try:
+                h.raise_()
+                h.activateWindow()
+            except Exception:
+                pass
+            try:
+                tbl = getattr(h, "table", None)
+                if tbl is not None:
+                    tbl.setFocus()
+                else:
+                    h.setFocus()
+            except Exception:
+                pass
+
+        # Pequeña demora para que Explorer/diálogos no se queden con el foco
+        QTimer.singleShot(200, _bring_front)
 
     def generar_cotizacion(self):
         c = self.entry_cliente.text()
@@ -235,6 +263,10 @@ class PdfActionsMixin:
 
             QMessageBox.information(self, "Cotización Generada", msg)
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
+
+            # ✅ cerrar ventana y devolver foco al histórico
+            self._focus_history_after_close()
+            self.close()
 
         except Exception as e:
             log.exception("Error al generar PDF")

@@ -127,6 +127,16 @@ def insert_quote(
     return quote_id
 
 
+def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: str) -> None:
+    """Actualiza metodo_pago en la cabecera de una cotización (si la columna existe)."""
+    if not _has_column(con, "quotes", "metodo_pago"):
+        raise RuntimeError("La columna 'metodo_pago' no existe en la tabla 'quotes'.")
+    con.execute(
+        "UPDATE quotes SET metodo_pago = ? WHERE id = ?",
+        (str(metodo_pago or ""), int(quote_id)),
+    )
+
+
 def soft_delete_quote(con: sqlite3.Connection, quote_id: int, deleted_at_iso: str) -> None:
     con.execute(
         "UPDATE quotes SET deleted_at = ? WHERE id = ?",

@@ -11,7 +11,7 @@ from ..widgets import (
     show_discount_dialog_for_item,
     show_observation_dialog,
 )
-from ..models import CAN_EDIT_UNIT_PRICE
+from .models import CAN_EDIT_UNIT_PRICE
 
 
 class TableActionsMixin:
@@ -140,7 +140,7 @@ class TableActionsMixin:
         """
         (Mantenido tal cual) Recalcula precio/subtotal/descuento/total en base.
         """
-        from ..models import _price_from_tier
+        from .models import _price_from_tier
         from ..pricing import precio_unitario_por_categoria
 
         cat = (item.get("categoria") or "").upper()

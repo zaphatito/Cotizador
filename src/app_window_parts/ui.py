@@ -29,7 +29,7 @@ from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer
 
 from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR
 from ..config import APP_COUNTRY, id_label_for_country
-from ..models import ItemsModel
+from .models import ItemsModel
 from .delegates import QuantityDelegate
 from ..widgets import Toast
 
