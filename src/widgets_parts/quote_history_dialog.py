@@ -20,7 +20,8 @@ from sqlModels.rates_repo import load_rates
 
 from ..logging_setup import get_logger
 from ..utils import nz
-from ..paths import DATA_DIR, COTIZACIONES_DIR
+from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
+
 from ..db_path import resolve_db_path
 from ..catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
 from ..config import APP_CURRENCY, APP_COUNTRY, get_currency_context, set_currency_context
@@ -735,7 +736,7 @@ class QuoteHistoryWindow(QMainWindow):
             q = get_quote_header(con, qid)
             con.close()
 
-            pdf = q.get("pdf_path")
+            pdf = resolve_pdf_path_portable(q.get("pdf_path"))
             if not pdf or not os.path.exists(pdf):
                 QMessageBox.warning(self, "PDF no encontrado", f"No existe:\n{pdf}")
                 return
@@ -904,7 +905,7 @@ class QuoteHistoryWindow(QMainWindow):
             _items_base, items_shown = get_quote_items(con, qid)
             con.close()
 
-            out_path = header.get("pdf_path")
+            out_path = resolve_pdf_path_portable(header.get("pdf_path"))
             if not out_path:
                 QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
                 return

@@ -307,7 +307,8 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
     if not out_path:
         out_path = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
-
+    if out_path:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
     c = canvas.Canvas(out_path, pagesize=A4)
     c.setTitle(f"Cotización - {cliente_raw}")
     W, H = A4
@@ -451,7 +452,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             if it.get("observacion"):
                 full_name += f" | {it['observacion']}"
 
-            body_fs = 5 if is_alt else 9  # ✅ -2 vs 7
+            body_fs = 6 if is_alt else 9  # ✅ -2 vs 7
             c.setFont(FONT_REG, body_fs)
 
             prod_lines = _wrap_smart(c, full_name, max_prod_width, FONT_REG, body_fs)

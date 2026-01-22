@@ -200,7 +200,7 @@ class PdfActionsMixin:
 
             ruta = generar_pdf(datos, fixed_quote_no=quote_no)
             log.info("PDF generado en %s", ruta)
-
+            pdf_store = os.path.basename(ruta)
             try:
                 with tx(con):
                     insert_quote(
@@ -220,7 +220,7 @@ class PdfActionsMixin:
                         subtotal_bruto_shown=float(subtotal_bruto_shown),
                         descuento_total_shown=float(descuento_total_shown),
                         total_neto_shown=float(total_neto_shown),
-                        pdf_path=ruta,
+                        pdf_path=pdf_store,
                         items_base=self.items,
                         items_shown=items_pdf,
                     )

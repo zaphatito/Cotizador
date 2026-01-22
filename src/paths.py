@@ -198,6 +198,17 @@ def ensure_data_seed_if_empty():
     except Exception:
         pass
 
+def resolve_pdf_path_portable(stored: str) -> str:
+    p = (stored or "").strip()
+    if not p:
+        return ""
+    # Si ya existe tal cual (misma PC/ruta), úsalo
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    # Si no existe (otra PC/usuario), usa la carpeta local y solo el filename
+    return os.path.join(COTIZACIONES_DIR, os.path.basename(p))
+
+
 
 def resolve_font_asset(font_family: str, base_name: str, exts: tuple[str, ...] = ("otf", "ttf")) -> str | None:
     """
