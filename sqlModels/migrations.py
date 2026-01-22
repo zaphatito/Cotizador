@@ -29,7 +29,6 @@ def _add_column_if_missing(con: sqlite3.Connection, table: str, col: str, col_de
     con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def_sql}")
 
 
-
 def mig_1(con: sqlite3.Connection) -> None:
     return
 
@@ -82,9 +81,18 @@ def mig_3(con: sqlite3.Connection) -> None:
         )
 
 
+def mig_4(con: sqlite3.Connection) -> None:
+    """
+    v4: Guardar método de pago en quotes
+    - Agrega columna quotes.metodo_pago (si falta)
+    """
+    _add_column_if_missing(con, "quotes", "metodo_pago", "TEXT NOT NULL DEFAULT ''")
+
+
 # Mapa: versión destino -> función migración
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
     3: mig_3,
+    4: mig_4,
 }

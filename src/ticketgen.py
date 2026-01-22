@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import base64
+import textwrap
 from typing import Callable, Optional
 
 # 203 dpi ≈ 8 dots/mm
@@ -13,14 +14,21 @@ DEFAULT_TICKET_WIDTH = 48
 DEFAULT_PRINTER_NAME = "TICKERA"
 
 DEFAULT_TOP_MM = 0.0
-DEFAULT_BOTTOM_MM = 10.0  # <-- lo que pediste: cortar 10mm después del último item
+DEFAULT_BOTTOM_MM = 10.0  # cortar 10mm después del último item
 
 # Modos:
 # - "full" / "partial": cortan (sin extra feed)
 # - "full_feed" / "partial_feed": feed hasta posición de corte + extra y cortan (recomendado)
-# - "full_save"/"partial_save": alias de *_feed (tu impresora no soporta reverse-feed 103/104)
+# - "full_save"/"partial_save": alias de *_feed
 DEFAULT_CUT_MODE = "full_feed"
-OBS_MAX_LEN = 50
+
+# Ya NO cortamos observaciones por defecto (solo "límite de seguridad" muy alto)
+OBS_MAX_LEN = 1000
+
+# Codepage (para que NO se pierdan caracteres comunes en ES; dígitos siempre OK)
+# En muchas Epson/ESC-POS: 2 = CP850
+DEFAULT_CODEPAGE = 2
+DEFAULT_TEXT_ENCODING = "cp850"
 
 
 def _mm_to_units(mm: float) -> int:
@@ -44,7 +52,7 @@ def _cut_cmd(mode: str, extra_units: int) -> bytes:
     if m in ("none", "no", "off"):
         return b""
 
-    # aliases (tu "save" ahora es simplemente feed+cut)
+    # aliases
     if m == "full_save":
         m = "full_feed"
     elif m == "partial_save":
@@ -57,8 +65,33 @@ def _cut_cmd(mode: str, extra_units: int) -> bytes:
 
     if m == "partial":
         return b"\x1d\x56\x01"  # GS V 1
-    # default: full
     return b"\x1d\x56\x00"      # GS V 0
+
+
+def _wrap_keep_newlines(text: str, width: int) -> list[str]:
+    """
+    Wrap respetando saltos de línea existentes.
+    Nunca devuelve lista vacía: mínimo [''].
+    """
+    width = max(1, int(width))
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not t:
+        return [""]
+
+    out: list[str] = []
+    for para in t.split("\n"):
+        para = para.strip()
+        if not para:
+            out.append("")
+            continue
+        # wrap “duro” si no hay espacios (para números largos, códigos, etc.)
+        out.extend(textwrap.wrap(
+            para,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""])
+    return out or [""]
 
 
 def build_ticket_text(
@@ -74,6 +107,10 @@ def build_ticket_text(
         return ""
 
     width = max(1, int(width))
+
+    # Columnas:
+    # - izquierda: código + observación (wrap)
+    # - derecha: cantidad (wrap) alineada ABAJO
     qty_col = 10
     code_col = max(1, width - qty_col)
 
@@ -86,6 +123,30 @@ def build_ticket_text(
             if s:
                 return s
         return ""
+
+    def _pick_obs(it: dict) -> str:
+        # respeta lo que venga; puede traer saltos de línea
+        obs = (it.get("observacion") or "").strip()
+        if not obs:
+            return ""
+        try:
+            lim = int(obs_max_len)
+        except Exception:
+            lim = OBS_MAX_LEN
+        if lim > 0:
+            obs = obs[:lim]
+        return obs.strip()
+
+    def _pick_qty(it: dict) -> str:
+        qty_txt = ""
+        if qty_text_fn is not None:
+            try:
+                qty_txt = str(qty_text_fn(it) or "").strip()
+            except Exception:
+                qty_txt = ""
+        if not qty_txt:
+            qty_txt = str(it.get("cantidad", "")).strip()
+        return qty_txt
 
     lines: list[str] = []
 
@@ -104,36 +165,33 @@ def build_ticket_text(
         if not code:
             continue
 
-        qty_txt = ""
-        if qty_text_fn is not None:
-            try:
-                qty_txt = str(qty_text_fn(it) or "").strip()
-            except Exception:
-                qty_txt = ""
-        if not qty_txt:
-            qty_txt = str(it.get("cantidad", "")).strip()
+        qty_txt = _pick_qty(it)
         if not qty_txt:
             continue
 
-        obs = (it.get("observacion") or "").strip()
-        if obs:
-            obs = obs[: max(0, int(obs_max_len))].strip()
+        obs = _pick_obs(it)
 
-        disp_code = code.strip()
-        if obs:
-            sep = " - "
-            max_obs = code_col - len(disp_code) - len(sep)
-            if max_obs > 0:
-                disp_code = f"{disp_code}{sep}{obs[:max_obs]}"
-            else:
-                disp_code = disp_code[:code_col]
+        # ---- Left block: code + obs, con wrap ----
+        left_lines: list[str] = []
+        left_lines.extend(_wrap_keep_newlines(code, code_col))
 
-        # --- CAMBIO: rellenar la separación con guiones ---
-        code_print = disp_code[:code_col].ljust(code_col, "-")
-        qty_raw = qty_txt[:qty_col]
-        qty_print = qty_raw.rjust(qty_col, "-")
-        # -------------------------------------------------
-        lines.append(f"{code_print}{qty_print}")
+        if obs:
+            # si quieres separar visualmente, descomenta esta línea:
+            # left_lines.append("")
+            left_lines.extend(_wrap_keep_newlines(obs, code_col))
+
+        # ---- Right block: qty, con wrap ----
+        qty_lines = _wrap_keep_newlines(qty_txt, qty_col)
+
+        # Total de líneas para el item = máximo, y cantidad alineada abajo
+        total = max(len(left_lines), len(qty_lines))
+        left_pad = left_lines + [""] * (total - len(left_lines))                 # relleno abajo
+        qty_pad = [""] * (total - len(qty_lines)) + qty_lines                    # relleno arriba (para que quede abajo)
+
+        for i in range(total):
+            l = (left_pad[i] or "")[:code_col].ljust(code_col, " ")
+            r = (qty_pad[i] or "")[:qty_col].rjust(qty_col, " ")
+            lines.append(f"{l}{r}")
 
     if len(lines) <= 2:
         return ""
@@ -148,6 +206,8 @@ def build_escpos_payload(
     top_mm: float = DEFAULT_TOP_MM,
     bottom_mm: float = DEFAULT_BOTTOM_MM,
     cut_mode: str = DEFAULT_CUT_MODE,
+    codepage: int = DEFAULT_CODEPAGE,
+    encoding: str = DEFAULT_TEXT_ENCODING,
 ) -> bytes:
     lines = ticket_text.splitlines()
     if not lines:
@@ -159,11 +219,9 @@ def build_escpos_payload(
     body_start = 1
 
     if len(lines) >= 2 and (lines[1] or "").startswith("-"):
-        # caso: no hay nombre, la 2da línea es separador
         sep_line = lines[1]
         body_start = 2
     else:
-        # caso: hay nombre y luego separador
         if len(lines) >= 2:
             header2 = (lines[1] or "").strip()
         if len(lines) >= 3:
@@ -179,13 +237,17 @@ def build_escpos_payload(
     font_cmd = b"\x1b\x4d\x00" if int(width) <= 48 else b"\x1b\x4d\x01"
 
     def feed_units(n: int) -> bytes:
-        # ESC J n : feed n dots (0..255)
         n = max(0, min(255, int(n)))
         return b"\x1b\x4a" + bytes([n])
+
+    def enc(s: str) -> bytes:
+        # errors="replace": no se pierde longitud por "ignore"
+        return (s or "").encode(encoding, errors="replace")
 
     out = bytearray()
     out += b"\x1b\x40"          # init
     out += font_cmd
+    out += b"\x1b\x74" + bytes([max(0, min(255, int(codepage)))])  # ESC t n (codepage)
 
     if top_units:
         out += feed_units(top_units)
@@ -193,21 +255,19 @@ def build_escpos_payload(
     # header center + bold
     out += b"\x1b\x61\x01"
     out += b"\x1b\x45\x01"
-    out += header1.encode("ascii", errors="ignore") + b"\n"
+    out += enc(header1) + b"\n"
     if header2:
-        out += header2.encode("ascii", errors="ignore") + b"\n"
+        out += enc(header2) + b"\n"
     out += b"\x1b\x45\x00"
 
     # body left
     out += b"\x1b\x61\x00"
     if sep_line:
-        out += sep_line.encode("ascii", errors="ignore") + b"\n"
+        out += enc(sep_line) + b"\n"
     for ln in body_lines:
-        out += (ln or "").encode("ascii", errors="ignore") + b"\n"
+        out += enc(ln or "") + b"\n"
 
-    # GS V Function B (65/66) ya "feed hasta posición de corte + n" y corta.
     out += _cut_cmd(cut_mode, bottom_units)
-
     return bytes(out)
 
 

@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "1.2.12"
+#define MyAppVersion "1.2.1"
 
 ; === Manifiesto público para el updater (RAW GitHub) ===
 #define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
@@ -24,7 +24,7 @@ VersionInfoCompany=SistemaCotizacionesPerfumes
 VersionInfoVersion={#MyAppVersion}
 
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=none
+PrivilegesRequiredOverridesAllowed=commandline
 UsePreviousPrivileges=no
 
 ; Instalar por usuario (para poder actualizar sin admin)
@@ -255,12 +255,21 @@ end;
 
 
 var
-  MaintAction: Integer;  // 0=cancel, 1=repair, 2=uninstall
+  MaintAction: Integer;
 
 function IsSilentMode(): Boolean;
+var
+  Tail: string;
 begin
-  Result := WizardSilent or WizardVerySilent;
+  Tail := UpperCase(GetCmdTail);
+
+  Result :=
+    WizardSilent or
+    (Pos('/SILENT', Tail) > 0) or
+    (Pos('/VERYSILENT', Tail) > 0);
 end;
+
+
 
 function GetUninstallCmd(var Exe, Params: string): Boolean;
 var S: string; p: Integer;
@@ -546,56 +555,56 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   PaisSel, ListadoSelUpper, AllowStr: string;
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
-  PrevMiniPath: string;
 begin
-  if CurStep = ssInstall then
-  begin
-    if IsReinstall and (PrevDir <> '') then
+  try
+    if CurStep = ssInstall then
     begin
-      BackupPreviousConfig();
-      OldConfigPath := PrevDir + '\config';
-      if DirExists(OldConfigPath) then
-        DeleteTreeForce(OldConfigPath);
-    end;
-  end;
-
-  if CurStep = ssPostInstall then
-  begin
-    if HaveOldConfig then
-    begin
-      PaisSel := UpperCase(OldCountry);
-      ListadoSelUpper := UpperCase(OldListing);
-      AllowStr := BoolToJson(OldAllow);
-    end
-    else
-    begin
-      if not IsReinstall then
+      if IsReinstall and (PrevDir <> '') then
       begin
-        case cbPais.ItemIndex of
-          1: PaisSel := 'PERU';
-          2: PaisSel := 'VENEZUELA';
-        else
-          PaisSel := 'PARAGUAY';
-        end;
-
-        case cbListado.ItemIndex of
-          0: ListadoSelUpper := 'PRODUCTOS';
-          1: ListadoSelUpper := 'PRESENTACIONES';
-        else
-          ListadoSelUpper := 'AMBOS';
-        end;
-
-        AllowStr := BoolToJson(chkNoStock.Checked);
-      end
-      else
-      begin
-        PaisSel := 'PARAGUAY';
-        ListadoSelUpper := 'AMBOS';
-        AllowStr := 'false';
+        BackupPreviousConfig();
+        OldConfigPath := PrevDir + '\config';
+        if DirExists(OldConfigPath) then
+          DeleteTreeForce(OldConfigPath);
       end;
     end;
 
-    ConfigFolder := ExpandConstant('{app}\config');
+    if CurStep = ssPostInstall then
+    begin
+      if HaveOldConfig then
+      begin
+        PaisSel := UpperCase(OldCountry);
+        ListadoSelUpper := UpperCase(OldListing);
+        AllowStr := BoolToJson(OldAllow);
+      end
+      else
+      begin
+        if not IsReinstall then
+        begin
+          case cbPais.ItemIndex of
+            1: PaisSel := 'PERU';
+            2: PaisSel := 'VENEZUELA';
+          else
+            PaisSel := 'PARAGUAY';
+          end;
+
+          case cbListado.ItemIndex of
+            0: ListadoSelUpper := 'PRODUCTOS';
+            1: ListadoSelUpper := 'PRESENTACIONES';
+          else
+            ListadoSelUpper := 'AMBOS';
+          end;
+
+          AllowStr := BoolToJson(chkNoStock.Checked);
+        end
+        else
+        begin
+          PaisSel := 'PARAGUAY';
+          ListadoSelUpper := 'AMBOS';
+          AllowStr := 'false';
+        end;
+      end;
+
+      ConfigFolder := ExpandConstant('{app}\config');
       ForceDir(ConfigFolder);
 
       FJson := ConfigFolder + '\config.json';
@@ -615,16 +624,17 @@ begin
       if not SaveStringToFile(FJson, ConfJson, False) then
         Log('WARN: No se pudo crear config.json en ' + FJson);
 
-      { y aquí usa + en vez de or }
+      { atributos (usa +, NO uses OR)}
       SetFileAttributes(ConfigFolder, MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
       SetFileAttributes(FJson,        MY_ATTR_HIDDEN + MY_ATTR_SYSTEM);
     end;
 
   except
     Log('ERROR: CurStepChanged exception: ' + GetExceptionMessage);
-    { NO re-lanzar; así no aborta el setup en upgrades }
+    { No relanzar: no aborta el setup}
   end;
 end;
+
 
 
 function InitializeUninstall(): Boolean;
@@ -654,24 +664,6 @@ begin
     UpdaterDir := ExpandConstant('{app}\updater');
     DeleteTreeForce(UpdaterDir);
 
-    { 4) NUNCA borrar {userdocs}\Cotizaciones (data/cotizaciones/logs) }
-    { No hacemos nada aquí. }
   end;
 end;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

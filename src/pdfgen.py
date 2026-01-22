@@ -1,4 +1,3 @@
-# src/pdfgen.py
 import os, datetime, re
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -18,26 +17,24 @@ from .pricing import cantidad_para_mostrar
 # --- Venezuela ---
 LAYOUT_VE = {
     # Encabezado
-    "DATE_PX": 735, "DATE_PY": 205,             # "Fecha: ..." (blanco)
+    "DATE_PX": 735, "DATE_PY": 205,
     "QUOTE_SHOW": False,
-    "QUOTE_PX": 735, "QUOTE_PY": 185,           # sin uso si QUOTE_SHOW=False
+    "QUOTE_PX": 735, "QUOTE_PY": 185,
     "CLIENT_RIGHT_PX": 900,
     "CLIENT_Ys": (310, 332, 354),
 
     # Tabla
-    "HEADER_Y_PX": 430,                         # línea de títulos de la tabla
-    "HEADER_TO_FIRST_ROW_GAP": 24,              # distancia a la primera fila
+    "HEADER_Y_PX": 430,
+    "HEADER_TO_FIRST_ROW_GAP": 24,
     "COLS_PX": {"codigo": 80, "producto": 200, "cantidad": 505, "precio": 630, "subtotal": 745},
-    # Ajuste fino SOLO para los rótulos del header respecto a su ancla de columna
     "COLS_HEADER_ANCHOR_ADD": {"codigo": 0, "producto": 0, "cantidad": 30, "precio": 50, "subtotal": 40},
     "TABLE_SHIFT_X": 10, "TABLE_SHIFT_Y": 0,
     "ROW_LINE_H": 13,
     "BOTTOM_LIMIT_PY": 880,
 
-    # Evitar solape de CÓDIGO con PRODUCTO
-    "CODE_TO_PRODUCT_GAP_PX": 8,                # espacio mínimo entre el último char de código y la col. producto
+    "CODE_TO_PRODUCT_GAP_PX": 8,
 
-    # Totales (tres líneas, cada una con su X/Y y tamaño independiente)
+    # Totales
     "TOTALS_LABEL_TEXTS": ("TOTAL BRUTO:", "DESCUENTO:", "TOTAL FINAL:"),
     "TOTALS_LABEL_X_PXs": (700, 700, 700),
     "TOTALS_VALUE_X_PXs": (880, 880, 880),
@@ -46,55 +43,73 @@ LAYOUT_VE = {
     "TOTALS_COLOR_LABEL": colors.HexColor("#4f3b40"),
     "SHOW_LABELS": {"BRUTO": True, "DESC": True, "FINAL": True},
 
-    # Observaciones (bloque inferior izq.)
+    # Observaciones
     "OBS_X_PX": 160,
-    "OBS_START_Y_PX": None,     # None => usa TOTALS_Ys_PX[0]
+    "OBS_START_Y_PX": None,
     "OBS_LINE_H": 12,
     "OBS_MAX_Y_LIMIT_PX": 1170,
 
-    # Cuadro crema en páginas intermedias
+    # Cuadro crema intermedio
     "TOTALS_BG": {
         "color_rgb_255": (252, 251, 249),
         "x_px": 470, "bottom_py": 865, "top_py": 1000,
-        "width_px": None,       # None => hasta el borde derecho
+        "width_px": None,
     },
 }
 
 # --- Perú / Paraguay ---
-# CLIENT_RIGHT_PX es el ancla del caracter ":" (separador entre etiqueta y valor).
-# La etiqueta se alinea a la DERECHA en (CLIENT_RIGHT_PX - CLIENT_LABEL_GAP_PX).
-# El valor se alinea a la IZQUIERDA en (CLIENT_RIGHT_PX + CLIENT_VALUE_GAP_PX).
+# Tabla PE/PY:
+# CÓDIGO | PRODUCTO | CANTIDAD | PRECIO UNITARIO | SUBTOTAL SIN DESCUENTO | DESCUENTO | SUBTOTAL
+# --- Perú / Paraguay ---
+# --- Perú / Paraguay ---
 LAYOUT_ALT = {
     # Encabezado
     "QUOTE_SHOW": True,
     "QUOTE_PX": 685, "QUOTE_PY": 182,
-    "DATE_PX": 700, "DATE_PY": 243,             # negro (sólo fecha)
-    "CLIENT_RIGHT_PX": 295,                      # ancla del ":" (no mover si quieres la misma separación)
-    "CLIENT_LABEL_GAP_PX": 6,                    # espacio entre fin de la etiqueta y ":"
-    "CLIENT_VALUE_GAP_PX": 6,                    # espacio entre ":" y el inicio del valor
+    "DATE_PX": 700, "DATE_PY": 243,
+    "CLIENT_RIGHT_PX": 295,
+    "CLIENT_LABEL_GAP_PX": 6,
+    "CLIENT_VALUE_GAP_PX": 6,
     "CLIENT_Ys": (325, 347, 369),
 
     # Tabla
     "HEADER_Y_PX": 452,
-    "HEADER_TO_FIRST_ROW_GAP": 24,
-    "COLS_PX": {"codigo": 130, "producto": 230, "cantidad": 560, "precio": 700, "subtotal": 820},
-    "COLS_HEADER_ANCHOR_ADD": {"codigo": 0, "producto": 0, "cantidad": 30, "precio": 50, "subtotal": 40},
-    "TABLE_SHIFT_X": 28, "TABLE_SHIFT_Y": 12,
-    "ROW_LINE_H": 13,
+    "HEADER_TO_FIRST_ROW_GAP": 32,
+    "COLS_PX": {
+        "codigo":    124,   # ✅ un poco más a la derecha (no se sale del cuadro)
+        "producto":  185,
+
+        # ✅ producto “más chico” (arranca el bloque numérico antes)
+        "cantidad":  592,
+
+        # ✅ un poquito más de espacio entre columnas numéricas (paso 72 aprox.)
+        "precio":    664,
+        "subsin":    736,
+        "descuento": 808,
+        "subtotal":  880,
+    },
+    "COLS_HEADER_ANCHOR_ADD": {
+        "codigo": 0, "producto": 0,
+        "cantidad": 0, "precio": 0, "subsin": 0, "descuento": 0, "subtotal": 0
+    },
+
+    "TABLE_SHIFT_X": 26, "TABLE_SHIFT_Y": 12,  # ✅ un toque a la derecha
+    "ROW_LINE_H": 7,
     "BOTTOM_LIMIT_PY": 880,
 
-    # Evitar solape de CÓDIGO con PRODUCTO
-    "CODE_TO_PRODUCT_GAP_PX": 8,
+    "CODE_TO_PRODUCT_GAP_PX": 5,
 
-    # Totales (3 medidas)
+    "NUM_COL_GAP_PX": 0.75,  # (queda igual)
+    "QTY_COL_W_PX": 50,
+
+    # Totales
     "TOTALS_LABEL_TEXTS": ("TOTAL BRUTO:", "DESCUENTO:", "TOTAL:"),
     "TOTALS_LABEL_X_PXs": (700, 700, 700),
     "TOTALS_VALUE_X_PXs": (880, 880, 880),
     "TOTALS_Ys_PX": (908, 948, 980),
     "TOTALS_FONT_SIZES": (10, 10, 10),
-    # ► Cambiado a #551f31
     "TOTALS_COLOR_LABEL": colors.HexColor("#551f31"),
-    "SHOW_LABELS": {"BRUTO": False, "DESC": True, "FINAL": False},  # ocultar 1 y 3
+    "SHOW_LABELS": {"BRUTO": False, "DESC": True, "FINAL": False},
 
     # Observaciones
     "OBS_X_PX": 160,
@@ -109,6 +124,8 @@ LAYOUT_ALT = {
         "width_px": None,
     },
 }
+
+
 
 # =====================================================
 # Utilidades
@@ -132,13 +149,9 @@ def _template_path_for_country(cc: str) -> str | None:
     )
 
 def _register_lufga_if_available() -> tuple[str, str]:
-    """
-    Busca Lufga en: templates/fonts/Lufga/Lufga-*.otf (o .ttf).
-    """
     reg = resolve_font_asset("Lufga", "Lufga-Regular", exts=("otf","ttf"))
     bold = resolve_font_asset("Lufga", "Lufga-Bold", exts=("otf","ttf"))
 
-    # Fallback adicional (por si la carpeta 'assets/fonts' sigue existiendo en tu repo)
     if not reg:
         alt = os.path.join(os.path.dirname(__file__), "assets", "fonts", "Lufga-Regular.otf")
         if os.path.exists(alt): reg = alt
@@ -173,15 +186,7 @@ def _next_quote_number(prefix: str) -> str:
         pass
     return f"{prefix}-{n:07d}"
 
-def _split_base_and_extra_from_name(name: str) -> tuple[str, str]:
-    if not name: return "", ""
-    if "|" in name:
-        a, b = name.split("|", 1)
-        return a.strip(), b.strip()
-    return str(name).strip(), ""
-
 def _draw_totals_bg_block(c: canvas.Canvas, W, H, L: dict):
-    """Cuadro crema para páginas intermedias (debajo del detalle)."""
     bg = L.get("TOTALS_BG", None)
     if not bg:
         return
@@ -191,7 +196,7 @@ def _draw_totals_bg_block(c: canvas.Canvas, W, H, L: dict):
     x_px      = bg.get("x_px", 470)
     bottom_py = bg.get("bottom_py", 865)
     top_py    = bg.get("top_py", 1000)
-    width_px  = bg.get("width_px", None)  # None => hasta el borde derecho
+    width_px  = bg.get("width_px", None)
 
     X = lambda px: _x_img(W, px)
     Y = lambda py: _y_img(H, py)
@@ -204,9 +209,8 @@ def _draw_totals_bg_block(c: canvas.Canvas, W, H, L: dict):
     c.setFillColor(color)
     c.rect(x, y_bottom, w, h, stroke=0, fill=1)
 
-# ---------- helpers de wrapping ----------
+# ---------- wrapping ----------
 def _wrap_words(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int):
-    """Word wrap clásico (para PRODUCTO)."""
     words = str(text).split(" ")
     lines, current = [], ""
     for w in words:
@@ -214,27 +218,60 @@ def _wrap_words(c: canvas.Canvas, text: str, max_width: float, font_name: str, f
         if c.stringWidth(test, font_name, font_size) <= max_width:
             current = test
         else:
-            if current: lines.append(current)
-            current = w
-    if current: lines.append(current)
-    return lines
+            if current:
+                lines.append(current)
+                current = w
+            else:
+                lines.append(w)
+                current = ""
+    if current:
+        lines.append(current)
+    return lines if lines else [""]
+
+def _wrap_chars(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int):
+    s = str(text or "")
+    if c.stringWidth(s, font_name, font_size) <= max_width:
+        return [s]
+    out, cur = [], ""
+    for ch in s:
+        test = cur + ch
+        if c.stringWidth(test, font_name, font_size) <= max_width:
+            cur = test
+        else:
+            if cur:
+                out.append(cur)
+                cur = ch
+            else:
+                out.append(ch)
+                cur = ""
+    if cur:
+        out.append(cur)
+    return out if out else [""]
+
+def _wrap_smart(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int):
+    s = str(text or "")
+    if c.stringWidth(s, font_name, font_size) <= max_width:
+        return [s]
+    lines = _wrap_words(c, s, max_width, font_name, font_size)
+    fixed = []
+    for ln in lines:
+        if c.stringWidth(ln, font_name, font_size) <= max_width:
+            fixed.append(ln)
+        else:
+            fixed.extend(_wrap_chars(c, ln, max_width, font_name, font_size))
+    return fixed if fixed else [""]
 
 def _wrap_code_with_hyphen(c: canvas.Canvas, code: str, max_width: float, font_name: str, font_size: int):
-    """
-    Rompe CÓDIGO por caracteres para que NUNCA invada la columna PRODUCTO.
-    Si hay corte, agrega '-' al final de la línea (menos en la última).
-    """
     s = str(code or "")
     out = []
     while s:
-        # buscar el prefijo más largo que entra
         last_fit = 0
         for i in range(1, len(s)+1):
             if c.stringWidth(s[:i], font_name, font_size) <= max_width:
                 last_fit = i
             else:
                 break
-        if last_fit == 0:  # si ni un solo char entra, forzar 1
+        if last_fit == 0:
             last_fit = 1
         if last_fit < len(s):
             out.append(s[:last_fit] + "-")
@@ -244,8 +281,12 @@ def _wrap_code_with_hyphen(c: canvas.Canvas, code: str, max_width: float, font_n
             s = ""
     return out
 
+def _draw_right_multiline(c: canvas.Canvas, x_right: float, y_top: float, lines: list[str], line_h: float):
+    for i, ln in enumerate(lines):
+        c.drawRightString(x_right, y_top - i * line_h, ln)
+
 # =====================================================
-# Generación de PDF (paginado + observaciones por página)
+# Generación de PDF
 # =====================================================
 
 def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | None = None) -> str:
@@ -253,7 +294,6 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
     is_alt = cc in {"PE", "PY"}
     L = LAYOUT_ALT if is_alt else LAYOUT_VE
 
-    # Color “negro” para PE/PY
     TEXT_COLOR = colors.HexColor("#551f31") if is_alt else colors.black
 
     cliente_raw  = (datos.get("cliente","") or "").strip()
@@ -265,11 +305,8 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         nro_cot = _next_quote_number(cc)
         nro_cot2 = nro_cot.rsplit("-", 1)[1]
 
-    if out_path:
-        out_path = out_path
-    else:
+    if not out_path:
         out_path = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
-
 
     c = canvas.Canvas(out_path, pagesize=A4)
     c.setTitle(f"Cotización - {cliente_raw}")
@@ -286,16 +323,9 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             c.drawImage(TEMPLATE_PATH, 0, 0, width=W, height=H)
 
     def _draw_label_colon_value(y_px: int, label: str, value: str):
-        """
-        Dibuja: [LABEL]  ":"  [VALUE]
-        ":" anclado a CLIENT_RIGHT_PX.
-        LABEL alineado a la derecha en (CLIENT_RIGHT_PX - CLIENT_LABEL_GAP_PX).
-        VALUE alineado a la izquierda en (CLIENT_RIGHT_PX + CLIENT_VALUE_GAP_PX).
-        """
         colon_x = X(L["CLIENT_RIGHT_PX"])
         pad_l   = X(L.get("CLIENT_LABEL_GAP_PX", 6))
         pad_r   = X(L.get("CLIENT_VALUE_GAP_PX", 6))
-
         y = Y(y_px)
         c.drawRightString(colon_x - pad_l, y, label)
         c.drawString(colon_x, y, ":")
@@ -305,26 +335,23 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         fecha_str = datetime.datetime.now().strftime("%d/%m/%Y")
         id_lbl    = id_label_for_country(APP_COUNTRY)
 
-        # Fecha
         c.setFont(FONT_REG, 10)
         c.setFillColor(TEXT_COLOR if is_alt else colors.white)
         c.drawString(X(L["DATE_PX"]), Y(L["DATE_PY"]), f"{fecha_str}")
 
-        # Cotización N°
         if L["QUOTE_SHOW"]:
             c.setFillColor(TEXT_COLOR)
             c.setFont(FONT_BOLD, 20)
             c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{nro_cot2}")
 
-        # Cliente / ID / Teléfono
         c.setFont(FONT_BOLD, 10)
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
         y_cli, y_id, y_tel = L["CLIENT_Ys"]
 
         if is_alt:
             _draw_label_colon_value(y_cli, "Nombre/Empresa", (datos.get("cliente","") or ""))
-            _draw_label_colon_value(y_id,  id_lbl,             (datos.get("cedula","") or ""))
-            _draw_label_colon_value(y_tel, "Teléfono",         (datos.get("telefono","") or ""))
+            _draw_label_colon_value(y_id,  id_lbl,           (datos.get("cedula","") or ""))
+            _draw_label_colon_value(y_tel, "Teléfono",       (datos.get("telefono","") or ""))
         else:
             cli_right = X(L["CLIENT_RIGHT_PX"])
             c.drawRightString(cli_right, Y(y_cli), f"Nombre/Empresa: {datos.get('cliente','')}")
@@ -332,27 +359,43 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             c.drawRightString(cli_right, Y(y_tel), f"Teléfono: {datos.get('telefono','')}")
 
     def _anchor_x(col_key: str, shift_x: float) -> float:
-        """Ancla horizontal compartida entre header y celdas para ALINEACIÓN PERFECTA."""
         base = L["COLS_PX"][col_key] + shift_x
         add  = L["COLS_HEADER_ANCHOR_ADD"].get(col_key, 0)
         return X(base + add)
 
     def draw_table_header(shift_x, shift_y):
         header_y = Y(L["HEADER_Y_PX"] + shift_y)
-        c.setFont(FONT_BOLD, 10 if is_alt else 9)
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
 
-        # izquierdas
-        c.drawString(_anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"]),   header_y, "CÓDIGO")
-        c.drawString(_anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"]), header_y, "PRODUCTO")
+        if is_alt:
+            c.setFont(FONT_BOLD, 4)  # ✅ -2 vs 6
+            col_codigo   = _anchor_x("codigo",   shift_x)
+            col_producto = _anchor_x("producto", shift_x)
+            c.drawString(col_codigo,   header_y, "CÓDIGO")
+            c.drawString(col_producto, header_y, "PRODUCTO")
 
-        # derechas (alineadas al MISMO ancla de números)
-        c.drawRightString(_anchor_x("cantidad", shift_x), header_y, "CANTIDAD")
-        c.drawRightString(_anchor_x("precio",   shift_x), header_y, "PRECIO UNITARIO")
-        c.drawRightString(_anchor_x("subtotal", shift_x), header_y, "SUBTOTAL")
+            ax_cant    = _anchor_x("cantidad",  shift_x)
+            ax_precio  = _anchor_x("precio",    shift_x)
+            ax_subsin  = _anchor_x("subsin",    shift_x)
+            ax_desc    = _anchor_x("descuento", shift_x)
+            ax_subtot  = _anchor_x("subtotal",  shift_x)
+
+            lh = 6
+            _draw_right_multiline(c, ax_cant,   header_y, ["CANTIDAD"], lh)
+            _draw_right_multiline(c, ax_precio, header_y, ["PRECIO", "UNITARIO"], lh)
+            _draw_right_multiline(c, ax_subsin, header_y, ["SUBTOTAL SIN", "DESCUENTO"], lh)
+            _draw_right_multiline(c, ax_desc,   header_y, ["DESCUENTO"], lh)
+            _draw_right_multiline(c, ax_subtot, header_y, ["SUBTOTAL"], lh)
+        else:
+            c.setFont(FONT_BOLD, 9)
+            c.drawString(_anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"]),   header_y, "CÓDIGO")
+            c.drawString(_anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"]), header_y, "PRODUCTO")
+            c.drawRightString(_anchor_x("cantidad", shift_x), header_y, "CANTIDAD")
+            c.drawRightString(_anchor_x("precio",   shift_x), header_y, "PRECIO UNITARIO")
+            c.drawRightString(_anchor_x("subtotal", shift_x), header_y, "SUBTOTAL")
+
         return header_y
 
-    # Paginado
     all_items = datos["items"]
     idx = 0
     n_items = len(all_items)
@@ -364,62 +407,109 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         shift_x, shift_y = L["TABLE_SHIFT_X"], L["TABLE_SHIFT_Y"]
         header_y = draw_table_header(shift_x, shift_y)
 
-        # Anclas compartidas para celdas
-        col_codigo   = _anchor_x("codigo",   shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["codigo"])
-        col_producto = _anchor_x("producto", shift_x) - X(L["COLS_HEADER_ANCHOR_ADD"]["producto"])
+        col_codigo   = _anchor_x("codigo",   shift_x)
+        col_producto = _anchor_x("producto", shift_x)
+
         ax_cantidad  = _anchor_x("cantidad", shift_x)
         ax_precio    = _anchor_x("precio",   shift_x)
-        ax_subtotal  = _anchor_x("subtotal", shift_x)
+
+        if is_alt:
+            ax_subsin   = _anchor_x("subsin",   shift_x)
+            ax_desc     = _anchor_x("descuento",shift_x)
+            ax_subtotal = _anchor_x("subtotal", shift_x)
+        else:
+            ax_subtotal = _anchor_x("subtotal", shift_x)
 
         row_y = header_y - L["HEADER_TO_FIRST_ROW_GAP"]
         bottom_limit = Y(L["BOTTOM_LIMIT_PY"] + shift_y)
         line_h = L["ROW_LINE_H"]
 
-        # anchos máximos para wrap
-        max_prod_width = (ax_cantidad - X(8)) - col_producto
         max_code_width = (col_producto - X(L["CODE_TO_PRODUCT_GAP_PX"])) - col_codigo
 
-        # Observaciones SOLO de esta página
-        page_obs_lines = []
+        if is_alt:
+            gap   = X(L.get("NUM_COL_GAP_PX", 2))
+            qty_w = X(L.get("QTY_COL_W_PX", 55))
 
-        def _cell_wrap_heights(prod_text: str, code_text: str, font_size: int):
-            prod_lines = _wrap_words(c, prod_text, max_prod_width, FONT_REG, font_size)
-            code_lines = _wrap_code_with_hyphen(c, code_text, max_code_width, FONT_REG, font_size)
-            n_lines = max(len(prod_lines), len(code_lines))
-            return prod_lines, code_lines, n_lines
+            max_prod_width = (ax_cantidad - gap - qty_w) - col_producto
+
+            max_qty_width      = qty_w
+            max_precio_width   = (ax_precio   - ax_cantidad) - gap
+            max_subsin_width   = (ax_subsin   - ax_precio)   - gap
+            max_desc_width     = (ax_desc     - ax_subsin)   - gap
+            max_subtotal_width = (ax_subtotal - ax_desc)     - gap
+        else:
+            max_prod_width = (ax_cantidad - X(8)) - col_producto
+
+        page_obs_lines = []
 
         while idx < n_items:
             it = all_items[idx]
+
             full_name = it["producto"]
             if it.get("fragancia"):
                 full_name += f" ({it['fragancia']})"
             if it.get("observacion"):
                 full_name += f" | {it['observacion']}"
 
-            body_fs = 10 if is_alt else 9
-            prod_lines, code_lines, n_lines = _cell_wrap_heights(full_name, str(it["codigo"]), body_fs)
-            h_needed = n_lines * line_h + 2
+            body_fs = 5 if is_alt else 9  # ✅ -2 vs 7
+            c.setFont(FONT_REG, body_fs)
 
+            prod_lines = _wrap_smart(c, full_name, max_prod_width, FONT_REG, body_fs)
+            code_lines = _wrap_code_with_hyphen(c, str(it["codigo"]), max_code_width, FONT_REG, body_fs)
+
+            if is_alt:
+                qty_txt      = cantidad_para_mostrar(it)
+                precio_txt   = fmt_money_pdf(float(nz(it.get("precio"))))
+                subsin_txt   = fmt_money_pdf(float(nz(it.get("subtotal"))))
+
+                # ✅ descuento SIN "-"
+                d = float(nz(it.get("descuento"), 0.0))
+                d_txt = fmt_money_pdf(abs(d))
+
+                subtotal_txt = fmt_money_pdf(float(nz(it.get("total"))))
+
+                qty_lines      = _wrap_smart(c, qty_txt,      max_qty_width,      FONT_REG, body_fs)
+                precio_lines   = _wrap_smart(c, precio_txt,   max_precio_width,   FONT_REG, body_fs)
+                subsin_lines   = _wrap_smart(c, subsin_txt,   max_subsin_width,   FONT_REG, body_fs)
+                desc_lines     = _wrap_smart(c, d_txt,        max_desc_width,     FONT_REG, body_fs)
+                subtotal_lines = _wrap_smart(c, subtotal_txt, max_subtotal_width, FONT_REG, body_fs)
+
+                n_lines = max(
+                    len(prod_lines), len(code_lines),
+                    len(qty_lines), len(precio_lines), len(subsin_lines), len(desc_lines), len(subtotal_lines)
+                )
+            else:
+                n_lines = max(len(prod_lines), len(code_lines))
+
+            h_needed = n_lines * line_h + 2
             if row_y - h_needed < bottom_limit:
                 break
 
-            # Fila
-            c.setFont(FONT_REG, body_fs)
             c.setFillColor(TEXT_COLOR if is_alt else colors.black)
-            # Código (envuelve con guión)
+
             for lidx, line in enumerate(code_lines):
                 c.drawString(col_codigo, row_y - lidx * line_h, line)
-            # Producto (word wrap)
+
             for lidx, line in enumerate(prod_lines):
                 c.drawString(col_producto, row_y - lidx * line_h, line)
 
-            qty_txt = cantidad_para_mostrar(it)
-            c.drawRightString(ax_cantidad, row_y, qty_txt)
-            # precio y subtotal ya vienen en moneda actual desde _build_items_for_pdf()
-            c.drawRightString(ax_precio,   row_y, fmt_money_pdf(float(nz(it.get("precio")))))
-            c.drawRightString(ax_subtotal, row_y, fmt_money_pdf(float(nz(it.get("total")))))
+            if is_alt:
+                for lidx, line in enumerate(qty_lines):
+                    c.drawRightString(ax_cantidad, row_y - lidx * line_h, line)
+                for lidx, line in enumerate(precio_lines):
+                    c.drawRightString(ax_precio, row_y - lidx * line_h, line)
+                for lidx, line in enumerate(subsin_lines):
+                    c.drawRightString(ax_subsin, row_y - lidx * line_h, line)
+                for lidx, line in enumerate(desc_lines):
+                    c.drawRightString(ax_desc, row_y - lidx * line_h, line)
+                for lidx, line in enumerate(subtotal_lines):
+                    c.drawRightString(ax_subtotal, row_y - lidx * line_h, line)
+            else:
+                qty_txt = cantidad_para_mostrar(it)
+                c.drawRightString(ax_cantidad, row_y, qty_txt)
+                c.drawRightString(ax_precio,   row_y, fmt_money_pdf(float(nz(it.get("precio")))))
+                c.drawRightString(ax_subtotal, row_y, fmt_money_pdf(float(nz(it.get("total")))))
 
-            # Observación SOLO de esta página
             obs_txt = (it.get("observacion") or "").strip()
             if obs_txt:
                 page_obs_lines.append(f"- {it['codigo']}: {obs_txt}")
@@ -431,7 +521,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         if not is_last_page:
             _draw_totals_bg_block(c, W, H, L)
 
-        # Observaciones de la página
+        # Observaciones
         c.setFont(FONT_REG, 9)
         c.setFillColor(TEXT_COLOR if is_alt else colors.black)
         obs_x = X(L["OBS_X_PX"])
@@ -444,25 +534,16 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
                 break
 
         if is_last_page:
-            # ======== NUEVA LÓGICA DE TOTALES =========
-            # Usa los campos que manda la app (ya en moneda actual):
-            #   - subtotal_bruto: suma sin descuentos
-            #   - descuento_total: suma de descuentos
-            #   - total_general: total final
             subtotal_bruto   = float(nz(datos.get("subtotal_bruto"), 0.0))
             descuento_total  = float(nz(datos.get("descuento_total"), 0.0))
             total_general    = float(nz(datos.get("total_general"), 0.0))
 
-            # Fallback suave para versiones viejas / datos incompletos:
             if subtotal_bruto == 0 and descuento_total == 0 and total_general == 0:
-                # Si los items vienen con 'subtotal' y 'descuento', los usamos
                 subtotal_bruto = round(
-                    sum(float(nz(i.get("subtotal", nz(i.get("total"), 0.0)))) for i in all_items),
-                    2
+                    sum(float(nz(i.get("subtotal", nz(i.get("total"), 0.0)))) for i in all_items), 2
                 )
                 descuento_total = round(
-                    sum(float(nz(i.get("descuento", 0.0))) for i in all_items),
-                    2
+                    sum(float(nz(i.get("descuento", 0.0))) for i in all_items), 2
                 )
                 total_general = round(subtotal_bruto - descuento_total, 2)
 
@@ -478,19 +559,23 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
                 lx = X(L["TOTALS_LABEL_X_PXs"][i])
                 vx = X(L["TOTALS_VALUE_X_PXs"][i])
 
-                # Label (según SHOW_LABELS del layout)
                 if shows[i]:
                     c.setFont(FONT_BOLD, L["TOTALS_FONT_SIZES"][i])
                     c.setFillColor(L["TOTALS_COLOR_LABEL"])
                     c.drawRightString(lx, y, L["TOTALS_LABEL_TEXTS"][i])
 
-                # Valor
                 c.setFont(FONT_REG, L["TOTALS_FONT_SIZES"][i])
                 c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+
                 val = values[i]
-                txt = fmt_money_pdf(val if i != 1 else abs(val))
-                if i == 1 and val != 0:
-                    txt = f"- {txt}"
+                # ✅ descuento SIN "-" para PE/PY (y también sin "-" en el total)
+                if i == 1 and is_alt:
+                    txt = fmt_money_pdf(abs(val))
+                else:
+                    txt = fmt_money_pdf(val if i != 1 else abs(val))
+                    if i == 1 and val != 0:
+                        txt = f"- {txt}"
+
                 c.drawRightString(vx, y, txt)
         else:
             c.showPage()

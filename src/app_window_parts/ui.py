@@ -33,6 +33,7 @@ from ..models import ItemsModel
 from .delegates import QuantityDelegate
 from ..widgets import Toast
 
+
 class UiMixin:
     def _update_title_with_client(self, text: str):
         name = (text or "").strip()
@@ -138,12 +139,16 @@ class UiMixin:
     def _is_py_cash_mode(self) -> bool:
         return bool(getattr(self, "_py_cash_mode", False))
 
-    def _set_py_cash_mode(self, enabled: bool):
+    def _set_py_cash_mode(self, enabled: bool, *, assume_items_already: bool = False):
+        """
+        assume_items_already=True:
+          - Usar al reabrir desde histórico.
+          - No re-aplica BASE, solo sincroniza para evitar duplicado.
+        """
         self._py_cash_mode = bool(enabled)
-        # si el modelo ya existe, aplicamos regla en caliente
         try:
             if hasattr(self, "model") and self.model is not None:
-                self.model.set_py_cash_mode(self._py_cash_mode)
+                self.model.set_py_cash_mode(self._py_cash_mode, assume_items_already=assume_items_already)
         except Exception:
             pass
 
@@ -152,6 +157,25 @@ class UiMixin:
             return
         is_cash = (btn is getattr(self, "btn_pay_cash", None))
         self._set_py_cash_mode(is_cash)
+
+    # =============================
+    # Pago PE: input libre (observación)
+    # =============================
+    def _get_pe_payment_text(self) -> str:
+        try:
+            if getattr(self, "entry_metodo_pago", None) is None:
+                return ""
+            return (self.entry_metodo_pago.text() or "").strip()
+        except Exception:
+            return ""
+
+    def _set_pe_payment_text(self, text: str):
+        try:
+            if getattr(self, "entry_metodo_pago", None) is None:
+                return
+            self.entry_metodo_pago.setText((text or "").strip())
+        except Exception:
+            pass
 
     # =============================
     # UI helpers
@@ -231,6 +255,10 @@ class UiMixin:
 
         htop.addStretch(1)
 
+        # =============================
+        # Pago (según país)
+        # =============================
+
         # ✅ Toggle Tarjeta/Efectivo SOLO Paraguay
         self._py_cash_mode = False
         if APP_COUNTRY == "PARAGUAY":
@@ -255,6 +283,20 @@ class UiMixin:
             hp.addWidget(self.btn_pay_card)
             hp.addWidget(self.btn_pay_cash)
 
+            htop.addWidget(grp_pay)
+
+        # ✅ Input libre SOLO Perú
+        elif APP_COUNTRY == "PERU":
+            grp_pay = QGroupBox("Pago")
+            hp = QHBoxLayout(grp_pay)
+            hp.setContentsMargins(8, 6, 8, 6)
+
+            self.entry_metodo_pago = QLineEdit()
+            self.entry_metodo_pago.setPlaceholderText("Método de pago (opcional)")
+            self.entry_metodo_pago.setClearButtonEnabled(True)
+            self.entry_metodo_pago.setFixedWidth(220)
+
+            hp.addWidget(self.entry_metodo_pago)
             htop.addWidget(grp_pay)
 
         htop.addWidget(btn_listado)
@@ -292,13 +334,12 @@ class UiMixin:
         self.table = QTableView()
         self.model = ItemsModel(self.items)
         self.table.setModel(self.model)
-        # ✅ Toast no-bloqueante (reutilizable)
+
         try:
             self.model.toast_requested.connect(lambda msg: Toast.notify(self, msg, duration_ms=4000, fade_ms=1000))
         except Exception:
             pass
 
-        # ✅ aplicar modo efectivo al modelo (por si el toggle ya existe)
         if APP_COUNTRY == "PARAGUAY":
             self.model.set_py_cash_mode(self._is_py_cash_mode())
 

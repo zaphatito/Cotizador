@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = [
     # =========================
@@ -172,6 +172,8 @@ DDL = [
         cliente TEXT NOT NULL,
         cedula TEXT NOT NULL,
         telefono TEXT NOT NULL,
+
+        metodo_pago TEXT NOT NULL DEFAULT '',
 
         currency_shown TEXT NOT NULL,
         tasa_shown REAL,

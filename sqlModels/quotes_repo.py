@@ -5,6 +5,15 @@ import sqlite3
 from typing import Any
 
 
+def _has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        cols = {str(r["name"]).lower() for r in rows}
+        return col.lower() in cols
+    except Exception:
+        return False
+
+
 def insert_quote(
     con: sqlite3.Connection,
     *,
@@ -14,6 +23,7 @@ def insert_quote(
     cliente: str,
     cedula: str,
     telefono: str,
+    metodo_pago: str = "",
     currency_shown: str,
     tasa_shown: float | None,
     subtotal_bruto_base: float,
@@ -34,29 +44,41 @@ def insert_quote(
     if len(items_base) != len(items_shown):
         raise ValueError("items_base y items_shown deben tener el mismo tamaño")
 
-    cur = con.execute(
-        """
-        INSERT INTO quotes(
-            country_code, quote_no, created_at,
-            cliente, cedula, telefono,
-            currency_shown, tasa_shown,
-            subtotal_bruto_base, descuento_total_base, total_neto_base,
-            subtotal_bruto_shown, descuento_total_shown, total_neto_shown,
-            pdf_path, deleted_at
-        )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
-        """,
-        (
-            country_code, quote_no, created_at,
-            cliente, cedula, telefono,
-            currency_shown, tasa_shown,
-            float(subtotal_bruto_base), float(descuento_total_base), float(total_neto_base),
-            float(subtotal_bruto_shown), float(descuento_total_shown), float(total_neto_shown),
-            pdf_path,
-        ),
-    )
+    has_mp = _has_column(con, "quotes", "metodo_pago")
+
+    # ✅ Insert dinámico: NO incluimos deleted_at (queda NULL por defecto)
+    cols: list[str] = [
+        "country_code", "quote_no", "created_at",
+        "cliente", "cedula", "telefono",
+        "currency_shown", "tasa_shown",
+        "subtotal_bruto_base", "descuento_total_base", "total_neto_base",
+        "subtotal_bruto_shown", "descuento_total_shown", "total_neto_shown",
+        "pdf_path",
+    ]
+    vals: list[Any] = [
+        country_code, quote_no, created_at,
+        cliente, cedula, telefono,
+        currency_shown, tasa_shown,
+        float(subtotal_bruto_base), float(descuento_total_base), float(total_neto_base),
+        float(subtotal_bruto_shown), float(descuento_total_shown), float(total_neto_shown),
+        pdf_path,
+    ]
+
+    if has_mp:
+        # Insertamos metodo_pago justo después de telefono (por legibilidad; el orden no importa si usas cols)
+        insert_pos = cols.index("telefono") + 1
+        cols.insert(insert_pos, "metodo_pago")
+        vals.insert(insert_pos, str(metodo_pago or ""))
+
+    placeholders = ",".join(["?"] * len(cols))
+    sql = f"INSERT INTO quotes({', '.join(cols)}) VALUES({placeholders})"
+
+    cur = con.execute(sql, tuple(vals))
     quote_id = int(cur.lastrowid)
 
+    # =========================
+    # Quote items
+    # =========================
     rows: list[tuple[Any, ...]] = []
     for b, s in zip(items_base, items_shown):
         rows.append((
@@ -83,7 +105,6 @@ def insert_quote(
             float(s.get("total") or 0.0),
         ))
 
-    # 🔧 FIX: 19 columnas => 19 placeholders
     con.executemany(
         """
         INSERT INTO quote_items(
@@ -102,6 +123,7 @@ def insert_quote(
         """,
         rows,
     )
+
     return quote_id
 
 
@@ -154,6 +176,9 @@ def list_quotes(
         tuple(params),
     ).fetchone()["n"]
 
+    has_mp = _has_column(con, "quotes", "metodo_pago")
+    pago_expr = "q.metodo_pago" if has_mp else "'' AS metodo_pago"
+
     rows = con.execute(
         f"""
         SELECT
@@ -163,6 +188,7 @@ def list_quotes(
             q.cliente,
             q.cedula,
             q.telefono,
+            {pago_expr},
             q.total_neto_shown AS total_shown,
             q.currency_shown,
             q.pdf_path,

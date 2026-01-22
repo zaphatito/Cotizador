@@ -90,22 +90,84 @@ class ItemsModel(QAbstractTableModel):
     def is_py_cash_mode(self) -> bool:
         return bool(self._py_cash_mode) if APP_COUNTRY == "PARAGUAY" else False
 
-    def set_py_cash_mode(self, enabled: bool):
-        """Activa/desactiva modo Efectivo (solo Paraguay)."""
+    def _sync_py_cash_user_pct_from_loaded_items(self) -> bool:
+        """
+        Sync para cotizaciones reabiertas desde histórico:
+        - NO vuelve a sumar BASE.
+        - Solo infiere y guarda _py_user_disc_pct para que futuros toggles no dupliquen.
+        - Si detecta que el % total está por debajo de BASE, lo fuerza a BASE.
+        """
+        changed = False
+        for it in self._items:
+            unit = float(nz(it.get("precio"), 0.0))
+            subtotal = float(nz(it.get("subtotal_base"), 0.0))
+            if subtotal <= 0:
+                subtotal = self._compute_subtotal_base(it, unit_price=unit)
+                it["subtotal_base"] = subtotal
+
+            d_pct = float(nz(it.get("descuento_pct"), 0.0))
+            d_monto = float(nz(it.get("descuento_monto"), 0.0))
+            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+
+            # user = total - base
+            user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
+            user_pct = self._clamp_pct(user_pct)
+
+            prev = it.get("_py_user_disc_pct", None)
+            if prev is None or abs(float(nz(prev, 0.0)) - user_pct) > 1e-9:
+                it["_py_user_disc_pct"] = user_pct
+                changed = True
+
+            # si por alguna razón quedó menor que BASE, lo corregimos
+            if subtotal > 0 and (cur_total_pct + _PCT_EPS) < PY_CASH_BASE_PCT:
+                it["descuento_mode"] = "percent"
+                it["descuento_pct"] = PY_CASH_BASE_PCT
+                it["descuento_monto"] = round(subtotal * PY_CASH_BASE_PCT / 100.0, 2)
+                it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+                changed = True
+
+        return changed
+
+    def set_py_cash_mode(self, enabled: bool, *, assume_items_already: bool = False):
+        """
+        Activa/desactiva modo Efectivo (solo Paraguay).
+
+        assume_items_already=True:
+          - Usar al reabrir desde histórico.
+          - NO aplica ni quita BASE automáticamente.
+          - Solo sincroniza _py_user_disc_pct (si enabled=True) para evitar duplicar BASE.
+        """
         if APP_COUNTRY != "PARAGUAY":
             return
         enabled = bool(enabled)
+
+        # Si ya estamos en el mismo modo:
         if self._py_cash_mode == enabled:
+            if enabled and assume_items_already:
+                changed = self._sync_py_cash_user_pct_from_loaded_items()
+                if changed and self.rowCount() > 0:
+                    top = self.index(0, 0)
+                    bottom = self.index(self.rowCount() - 1, self.columnCount() - 1)
+                    self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return
 
-        if enabled:
-            # Estamos en tarjeta -> efectivo: guardar descuento usuario (actual) y sumar base
-            self._py_cash_mode = True
-            changed = self._apply_cash_base_to_all()
+        # Cambio de modo
+        changed = False
+
+        if assume_items_already:
+            # Solo cambia flag; si es cash, sincroniza user pct para evitar duplicado futuro
+            self._py_cash_mode = enabled
+            if enabled:
+                changed = self._sync_py_cash_user_pct_from_loaded_items()
         else:
-            # Estamos en efectivo -> tarjeta: restar base a todos
-            self._py_cash_mode = False
-            changed = self._remove_cash_base_from_all()
+            if enabled:
+                # Tarjeta -> Efectivo: sumar base a todos
+                self._py_cash_mode = True
+                changed = self._apply_cash_base_to_all()
+            else:
+                # Efectivo -> Tarjeta: restar base a todos
+                self._py_cash_mode = False
+                changed = self._remove_cash_base_from_all()
 
         if changed and self.rowCount() > 0:
             top = self.index(0, 0)
@@ -179,7 +241,6 @@ class ItemsModel(QAbstractTableModel):
             it["descuento_pct"] = total_pct
             it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
 
-            # recalcular total neto
             it["subtotal_base"] = subtotal
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
 
@@ -201,11 +262,9 @@ class ItemsModel(QAbstractTableModel):
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
             cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
 
-            # restar base (y nunca negativo)
             user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
             user_pct = self._clamp_pct(user_pct)
 
-            # limpiar huella
             it["_py_user_disc_pct"] = user_pct
 
             if user_pct <= _PCT_EPS:
@@ -227,14 +286,6 @@ class ItemsModel(QAbstractTableModel):
     # Normalización descuento/totales
     # =========================
     def _normalize_discount_and_totals(self, it: dict, unit_price: float):
-        """
-        Recalcula subtotal/total y mantiene consistencia del descuento.
-
-        Si PY efectivo:
-          - guarda / usa _py_user_disc_pct como descuento sin base
-          - aplica descuento_total = _py_user_disc_pct + BASE
-          - nunca permite descuento_total < BASE (porque BASE siempre suma)
-        """
         unit_price = float(nz(unit_price, 0.0))
         it["precio"] = unit_price
 
@@ -255,9 +306,8 @@ class ItemsModel(QAbstractTableModel):
             it["total"] = 0.0
             return
 
-        # ---- Paraguay efectivo: siempre % y siempre BASE sumado ----
+        # ---- Paraguay efectivo ----
         if self.is_py_cash_mode():
-            # user_pct: si existe lo respetamos, si no inferimos desde el descuento actual restando BASE
             try:
                 user_pct = float(nz(it.get("_py_user_disc_pct"), None))
             except Exception:
@@ -278,12 +328,7 @@ class ItemsModel(QAbstractTableModel):
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
             return
 
-        # ---- Tarjeta / otros países: lógica estándar ----
-        # si salimos de efectivo, no necesitamos la llave interna
-        if "_py_user_disc_pct" in it:
-            # la dejamos, pero no afecta (puedes borrarla si prefieres)
-            pass
-
+        # ---- Tarjeta / otros países ----
         if not mode:
             if d_pct > 0:
                 mode = "percent"
@@ -338,7 +383,6 @@ class ItemsModel(QAbstractTableModel):
         it = self._items[index.row()]
         col = index.column()
 
-        # 🔴 Chequeo de stock usando float → columna Cantidad (3)
         if role == Qt.ForegroundRole and col == 3:
             try:
                 cat_u = (it.get("categoria") or "").upper()
@@ -350,12 +394,10 @@ class ItemsModel(QAbstractTableModel):
             except Exception:
                 pass
 
-        # Precio overridden → colorear columna de precio (4)
         if role == Qt.ForegroundRole and col == 4:
             if it.get("precio_override") is not None:
                 return QBrush(Qt.darkMagenta)
 
-        # Tooltips
         if role == Qt.ToolTipRole:
             if col == 4:
                 if it.get("precio_override") is not None:
@@ -395,7 +437,6 @@ class ItemsModel(QAbstractTableModel):
                     return f"-{fmt_money_ui(convert_from_base(d_monto))}"
                 return "—"
             elif col == 3:
-
                 cat = (it.get("categoria") or "").upper()
                 if APP_COUNTRY == "PERU" and cat in CATS:
                     try:
@@ -477,7 +518,6 @@ class ItemsModel(QAbstractTableModel):
             if not isinstance(value, dict):
                 return False
 
-            # subtotal actual (base)
             unit = float(nz(it.get("precio"), 0.0))
             subtotal = float(nz(it.get("subtotal_base"), 0.0))
             if subtotal <= 0:
@@ -486,9 +526,7 @@ class ItemsModel(QAbstractTableModel):
 
             mode = (value.get("mode") or "").lower()
 
-            # Si estamos en efectivo PY, interpretamos lo que el usuario ponga como DESCUENTO TOTAL (incluye base)
             if self.is_py_cash_mode():
-                # total_pct deseado
                 if mode == "clear":
                     total_pct = 0.0
                 elif mode == "percent":
@@ -506,14 +544,12 @@ class ItemsModel(QAbstractTableModel):
                 else:
                     return False
 
-                # En efectivo, el descuento total NO puede ser menor que BASE
                 if subtotal > 0:
                     if total_pct + _PCT_EPS < PY_CASH_BASE_PCT:
                         total_pct = PY_CASH_BASE_PCT
 
                 total_pct = self._clamp_pct(total_pct)
 
-                # Guardamos descuento usuario = total - base (nunca negativo)
                 user_pct = max(0.0, total_pct - PY_CASH_BASE_PCT)
                 user_pct = self._clamp_pct(user_pct)
                 it["_py_user_disc_pct"] = user_pct
@@ -528,7 +564,6 @@ class ItemsModel(QAbstractTableModel):
                 self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
                 return True
 
-            # --- Tarjeta / otros países: tu lógica original ---
             d_pct = 0.0
             d_monto = 0.0
             d_mode = None
@@ -589,7 +624,6 @@ class ItemsModel(QAbstractTableModel):
 
             it["cantidad"] = new_qty
             self._recalc_price_for_qty(it)
-            # ✅ Notificación: si BOTELLAS pasa de 12 unidades
             try:
                 if cat == "BOTELLAS" and old_qty <= 12 and float(new_qty) >= 12:
                     self.toast_requested.emit("Recuerda revisar si el producto tiene descuento por cantidad")
@@ -603,7 +637,6 @@ class ItemsModel(QAbstractTableModel):
 
         # ----- Columna de PRECIO UNITARIO (4) -----
         if col == 4 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
-            # Soporta payload dict del selector o entrada numérica directa
             if isinstance(value, dict):
                 mode = (value.get("mode") or "").lower()
                 if mode == "custom":
@@ -655,7 +688,6 @@ class ItemsModel(QAbstractTableModel):
     # Gestión de filas
     # =========================
     def add_item(self, item: dict):
-        # Inicializar llaves de precio/discount si no existen
         if "precio_override" not in item:
             item["precio_override"] = None
         if "precio_tier" not in item:
@@ -673,13 +705,11 @@ class ItemsModel(QAbstractTableModel):
             except Exception:
                 item["factor_total"] = 1.0
 
-        # Normalizar totales (subtotal / total) según precio y cantidad actuales
         try:
             unit_price = float(nz(item.get("precio"), 0.0))
         except Exception:
             unit_price = 0.0
 
-        # ✅ si PY efectivo está activo, este normalize aplica BASE automático al item nuevo
         self._normalize_discount_and_totals(item, unit_price)
 
         self.beginInsertRows(QModelIndex(), len(self._items), len(self._items))

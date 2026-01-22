@@ -27,6 +27,7 @@ hiddenimports = [
 excludes = [
     "PySide6.scripts",
     "project_lib",
+    "jinja2",
 
     # WebEngine (EL GIGANTE)
     "PySide6.QtWebEngineCore",

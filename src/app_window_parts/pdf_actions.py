@@ -10,7 +10,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 
 from ..paths import COTIZACIONES_DIR, resolve_country_asset
-from ..config import COUNTRY_CODE, convert_from_base, get_currency_context
+from ..config import APP_COUNTRY, COUNTRY_CODE, convert_from_base, get_currency_context
 from ..utils import nz
 from ..pdfgen import generar_pdf
 from ..logging_setup import get_logger
@@ -87,6 +87,24 @@ class PdfActionsMixin:
             it["descuento"] = convert_from_base(d_monto_base)
         return cloned
 
+    def _get_metodo_pago_actual(self) -> str:
+        """
+        Paraguay: Tarjeta/Efectivo (toggle)
+        Perú: texto libre (puede ser vacío)
+        Otros países: "Transferencia" (solo para PDF)
+        """
+        if APP_COUNTRY == "PARAGUAY":
+            is_cash = bool(getattr(self, "_py_cash_mode", False))
+            return "Efectivo" if is_cash else "Tarjeta"
+
+        if APP_COUNTRY == "PERU":
+            try:
+                return (getattr(self, "entry_metodo_pago").text() or "").strip()
+            except Exception:
+                return ""
+
+        return "Transferencia"
+
     def generar_cotizacion(self):
         c = self.entry_cliente.text()
         ci = self.entry_cedula.text()
@@ -121,12 +139,17 @@ class PdfActionsMixin:
         descuento_total_shown = convert_from_base(descuento_total_base)
         total_neto_shown = convert_from_base(total_neto_base)
 
+        metodo_pago_pdf = self._get_metodo_pago_actual()
+
+        # ✅ BD: solo Paraguay y Perú guardan metodo_pago (Perú puede ser vacío)
+        metodo_pago_db = metodo_pago_pdf if APP_COUNTRY in ("PARAGUAY", "PERU") else ""
+
         datos = {
             "fecha": datetime.datetime.now().strftime("%d/%m/%Y"),
             "cliente": c,
             "cedula": ci,
             "telefono": t,
-            "metodo_pago": "Transferencia",
+            "metodo_pago": metodo_pago_pdf,
             "items": items_pdf,
             "subtotal_bruto": subtotal_bruto_shown,
             "descuento_total": descuento_total_shown,
@@ -134,10 +157,9 @@ class PdfActionsMixin:
         }
 
         db_warn = ""
-        saved_ok = False  # ✅ para tiempo real correcto
+        saved_ok = False
 
         try:
-            # ===== DB: reservar correlativo antes del PDF =====
             db_path = resolve_db_path()
             con = connect(db_path)
             ensure_schema(con)
@@ -148,11 +170,9 @@ class PdfActionsMixin:
             with tx(con):
                 quote_no = next_quote_no(con, COUNTRY_CODE, width=7)
 
-            # ===== PDF =====
             ruta = generar_pdf(datos, fixed_quote_no=quote_no)
             log.info("PDF generado en %s", ruta)
 
-            # ===== Guardar cotización en DB =====
             try:
                 with tx(con):
                     insert_quote(
@@ -163,6 +183,7 @@ class PdfActionsMixin:
                         cliente=c,
                         cedula=ci,
                         telefono=t,
+                        metodo_pago=metodo_pago_db,
                         currency_shown=str(curr or ""),
                         tasa_shown=float(rate) if rate is not None else None,
                         subtotal_bruto_base=float(subtotal_bruto_base),
@@ -181,7 +202,6 @@ class PdfActionsMixin:
                 db_warn = f"\n\n⚠️ No se pudo guardar en histórico:\n{e}"
                 saved_ok = False
 
-            # ✅ Tiempo real: emite solo si realmente se guardó en DB
             if saved_ok:
                 qe = getattr(self, "_quote_events", None)
                 if qe is not None:
@@ -192,7 +212,6 @@ class PdfActionsMixin:
 
             con.close()
 
-            # ===== Ticket =====
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=ruta,
                 items_pdf=datos["items"],

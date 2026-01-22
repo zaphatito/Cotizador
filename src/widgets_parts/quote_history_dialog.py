@@ -23,7 +23,7 @@ from ..utils import nz
 from ..paths import DATA_DIR, COTIZACIONES_DIR
 from ..db_path import resolve_db_path
 from ..catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
-from ..config import APP_CURRENCY, get_currency_context, set_currency_context
+from ..config import APP_CURRENCY, APP_COUNTRY, get_currency_context, set_currency_context
 
 from ..app_window import SistemaCotizaciones
 from ..app_window_parts.ticket_actions import generar_ticket_para_cotizacion
@@ -86,14 +86,21 @@ def format_dt_legible(value) -> str:
 
 
 class QuotesTableModel(QAbstractTableModel):
-    HEADERS = [
-        "Fecha/Hora", "N°", "Cliente", "Cédula/RUC", "Teléfono",
-        "Total", "Moneda", "Items", "PDF"
-    ]
-
-    def __init__(self):
+    def __init__(self, *, show_payment: bool):
         super().__init__()
         self.rows: list[dict] = []
+        self.show_payment = bool(show_payment)
+
+        if self.show_payment:
+            self.HEADERS = [
+                "Fecha/Hora", "N°", "Cliente", "Cédula/RUC", "Teléfono",
+                "Pago", "Total", "Moneda", "Items", "PDF"
+            ]
+        else:
+            self.HEADERS = [
+                "Fecha/Hora", "N°", "Cliente", "Cédula/RUC", "Teléfono",
+                "Total", "Moneda", "Items", "PDF"
+            ]
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self.rows)
@@ -107,6 +114,24 @@ class QuotesTableModel(QAbstractTableModel):
         if orientation == Qt.Horizontal:
             return self.HEADERS[section]
         return str(section + 1)
+
+    def _idx_no(self) -> int:
+        return 1
+
+    def _idx_pago(self) -> int | None:
+        return 5 if self.show_payment else None
+
+    def _idx_total(self) -> int:
+        return 6 if self.show_payment else 5
+
+    def _idx_currency(self) -> int:
+        return 7 if self.show_payment else 6
+
+    def _idx_items(self) -> int:
+        return 8 if self.show_payment else 7
+
+    def _idx_pdf(self) -> int:
+        return 9 if self.show_payment else 8
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
@@ -125,25 +150,36 @@ class QuotesTableModel(QAbstractTableModel):
                 return r.get("cedula", "")
             if c == 4:
                 return r.get("telefono", "")
-            if c == 5:
+
+            if self.show_payment and c == self._idx_pago():
+                # ✅ Si está vacío, se queda vacío (no placeholder)
+                return (r.get("metodo_pago") or "").strip()
+
+            if c == self._idx_total():
                 try:
                     return f"{float(nz(r.get('total_shown'), 0.0)):.2f}"
                 except Exception:
                     return str(r.get("total_shown", "0.00"))
-            if c == 6:
+
+            if c == self._idx_currency():
                 return r.get("currency_shown", "")
-            if c == 7:
+
+            if c == self._idx_items():
                 return str(r.get("items_count", 0))
-            if c == 8:
+
+            if c == self._idx_pdf():
                 p = r.get("pdf_path", "") or ""
                 return os.path.basename(p)
 
         if role == Qt.TextAlignmentRole:
-            if c in (1, 5, 6, 7):
+            centered_cols = {self._idx_no(), self._idx_total(), self._idx_currency(), self._idx_items()}
+            if self.show_payment and self._idx_pago() is not None:
+                centered_cols.add(self._idx_pago())
+            if c in centered_cols:
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
 
-        if role == Qt.ToolTipRole and c == 8:
+        if role == Qt.ToolTipRole and c == self._idx_pdf():
             return r.get("pdf_path", "")
 
         return None
@@ -158,7 +194,6 @@ class QuotesTableModel(QAbstractTableModel):
             return int(self.rows[row]["id"])
         return None
 
-    # ===== sorting =====
     def _sort_key(self, r: dict, c: int):
         def key_text(v):
             s = "" if v is None else str(v)
@@ -183,7 +218,7 @@ class QuotesTableModel(QAbstractTableModel):
             dt = _parse_dt(r.get("created_at"))
             return (dt is None, dt or datetime.datetime.min)
 
-        if c == 1:
+        if c == self._idx_no():
             qn = r.get("quote_no")
             try:
                 return (False, int(str(qn).strip()))
@@ -199,16 +234,24 @@ class QuotesTableModel(QAbstractTableModel):
         if c == 4:
             v = r.get("telefono")
             return (v is None, key_text(v))
-        if c == 5:
+
+        if self.show_payment and c == self._idx_pago():
+            v = r.get("metodo_pago")
+            return (v is None, key_text(v))
+
+        if c == self._idx_total():
             v = r.get("total_shown")
             return (v is None, key_float(v))
-        if c == 6:
+
+        if c == self._idx_currency():
             v = r.get("currency_shown")
             return (v is None, key_text(v))
-        if c == 7:
+
+        if c == self._idx_items():
             v = r.get("items_count")
             return (v is None, key_int(v))
-        if c == 8:
+
+        if c == self._idx_pdf():
             p = r.get("pdf_path") or ""
             return (not bool(p), key_text(os.path.basename(p)))
 
@@ -233,40 +276,38 @@ class QuoteHistoryWindow(QMainWindow):
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
 
-        # ✅ resolver 1 sola vez
         self._db_path = resolve_db_path()
 
         self._centered_once = False
         self.catalog_manager = catalog_manager
         self.quote_events = quote_events
 
-        self.model = QuotesTableModel()
+        # ✅ Paraguay y Perú muestran "Pago"
+        show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
+        self.model = QuotesTableModel(show_payment=show_payment)
+
         self.page_size = 200
         self.offset = 0
         self.total = 0
 
         self._open_windows: list[SistemaCotizaciones] = []
 
-        # debounce para filtros
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(220)
         self._filter_timer.timeout.connect(self._reload_first_page)
 
-        # ✅ debounce para “tiempo real” por eventos
         self._rt_timer = QTimer(self)
         self._rt_timer.setSingleShot(True)
         self._rt_timer.setInterval(120)
         self._rt_timer.timeout.connect(self._reload_first_page)
 
-        # ✅ escuchar eventos (tiempo real en la misma app)
         if self.quote_events is not None:
             try:
                 self.quote_events.quote_saved.connect(self._on_quote_saved)
             except Exception:
                 pass
 
-        # ✅ escuchar catálogo actualizado (para habilitar/deshabilitar botones en tiempo real)
         if self.catalog_manager is not None:
             try:
                 self.catalog_manager.catalog_updated.connect(self._on_catalog_updated)
@@ -313,10 +354,24 @@ class QuoteHistoryWindow(QMainWindow):
 
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+
+        try:
+            idx_no = 1
+            idx_pago = self.model._idx_pago()
+            idx_total = self.model._idx_total()
+            idx_items = self.model._idx_items()
+            idx_pdf = self.model._idx_pdf()
+            idx_curr = self.model._idx_currency()
+
+            hh.setSectionResizeMode(idx_no, QHeaderView.ResizeToContents)
+            if idx_pago is not None:
+                hh.setSectionResizeMode(idx_pago, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_total, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_curr, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_items, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_pdf, QHeaderView.ResizeToContents)
+        except Exception:
+            pass
 
         main.addWidget(self.table)
 
@@ -349,16 +404,12 @@ class QuoteHistoryWindow(QMainWindow):
         self._apply_catalog_gate()
         self._reload_first_page()
 
-    # ====== tiempo real ======
     def _on_quote_saved(self):
-        # coalescer: si llegan varios eventos seguidos, recarga una sola vez
         self._rt_timer.start()
 
     def _on_catalog_updated(self, *_):
-        # habilita/deshabilita botones en tiempo real
         self._apply_catalog_gate()
 
-    # ====== gating por catálogo ======
     def _has_products(self) -> bool:
         try:
             df = getattr(self.catalog_manager, "df_productos", None)
@@ -501,7 +552,6 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addSeparator()
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
-    # ===== acciones =====
     def _open_new_quote(self):
         if not self._has_products():
             QMessageBox.warning(
@@ -523,68 +573,13 @@ class QuoteHistoryWindow(QMainWindow):
         center_on_screen(win)
         self._open_windows.append(win)
 
-    def _open_rates_dialog(self):
-        dlg = RatesDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            try:
-                curr, _sec, _rate = get_currency_context()
-                con = connect(self._db_path)
-                ensure_schema(con)
-                rates = load_rates(con, APP_CURRENCY)
-                con.close()
-
-                if curr and curr != APP_CURRENCY and curr in rates:
-                    set_currency_context(curr, float(rates[curr]))
-            except Exception:
-                pass
-
-            try:
-                self.quote_events.rates_updated.emit()
-            except Exception:
-                pass
-
-    def _open_rates_history_dialog(self):
-        dlg = RatesHistoryDialog(self, base_currency=APP_CURRENCY, quote_events=self.quote_events)
-        dlg.exec()
-
-    def _update_catalog(self):
-        try:
-            con = connect(self._db_path)
-            ensure_schema(con)
-
-            with tx(con):
-                sync_catalog_from_excel_to_db(con, DATA_DIR)
-
-            df_productos, df_presentaciones = load_catalog_from_db(con)
-            con.close()
-
-            if df_productos is None or df_productos.empty:
-                raise RuntimeError("products_current quedó vacío luego de actualizar.")
-
-            self.catalog_manager.set_catalog(df_productos, df_presentaciones)
-            self._apply_catalog_gate()
-
-            QMessageBox.information(
-                self,
-                "Catálogo actualizado",
-                f"Productos: {len(df_productos)}\nPresentaciones: {len(df_presentaciones)}\n\n"
-                "Se actualizó el catálogo en todas las ventanas abiertas.",
-            )
-        except Exception as e:
-            log.exception("Error actualizando catálogo")
-            QMessageBox.critical(self, "Error", f"No se pudo actualizar el catálogo:\n{e}")
-
-    def _open_data_folder(self):
-        try:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(DATA_DIR)))
-        except Exception:
-            pass
-
-    def _open_quotes_folder(self):
-        try:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
-        except Exception:
-            pass
+    def _open_main_menu(self):
+        MainMenuWindow.show_singleton(
+            catalog_manager=self.catalog_manager,
+            quote_events=self.quote_events,
+            app_icon=self.windowIcon(),
+            parent=self,
+        )
 
     def _open_pdf(self):
         qid = self._selected_quote_id()
@@ -636,22 +631,65 @@ class QuoteHistoryWindow(QMainWindow):
                 catalog_manager=self.catalog_manager,
                 quote_events=self.quote_events,
             )
+
+            # ✅ Paraguay: toggle + sync (sin re-aplicar)
+            if APP_COUNTRY == "PARAGUAY":
+                mp = (header.get("metodo_pago") or "").strip().lower()
+                is_cash = (mp == "efectivo")
+
+                try:
+                    if getattr(win, "btn_pay_cash", None) is not None:
+                        win.btn_pay_cash.blockSignals(True)
+                    if getattr(win, "btn_pay_card", None) is not None:
+                        win.btn_pay_card.blockSignals(True)
+
+                    if is_cash and getattr(win, "btn_pay_cash", None) is not None:
+                        win.btn_pay_cash.setChecked(True)
+                    elif getattr(win, "btn_pay_card", None) is not None:
+                        win.btn_pay_card.setChecked(True)
+                finally:
+                    try:
+                        if getattr(win, "btn_pay_cash", None) is not None:
+                            win.btn_pay_cash.blockSignals(False)
+                        if getattr(win, "btn_pay_card", None) is not None:
+                            win.btn_pay_card.blockSignals(False)
+                    except Exception:
+                        pass
+
+                try:
+                    if hasattr(win, "_set_py_cash_mode"):
+                        win._set_py_cash_mode(is_cash, assume_items_already=True)
+                except Exception:
+                    pass
+
+            # ✅ Perú: precargar texto (puede ser vacío)
+            elif APP_COUNTRY == "PERU":
+                mp = (header.get("metodo_pago") or "")
+                try:
+                    if getattr(win, "entry_metodo_pago", None) is not None:
+                        win.entry_metodo_pago.setText(mp)
+                except Exception:
+                    pass
+
             win.show()
             center_on_screen(win)
             self._open_windows.append(win)
+
             win.load_from_history_payload(payload)
+
+            # ✅ Paraguay: sync DESPUÉS de cargar items
+            if APP_COUNTRY == "PARAGUAY":
+                mp = (header.get("metodo_pago") or "").strip().lower()
+                is_cash = (mp == "efectivo")
+                try:
+                    if hasattr(win, "_set_py_cash_mode"):
+                        win._set_py_cash_mode(is_cash, assume_items_already=True)
+                except Exception:
+                    pass
 
         except Exception as e:
             log.exception("Error duplicando cotización")
             QMessageBox.critical(self, "Error", f"No se pudo duplicar:\n{e}")
-
-    def _open_main_menu(self):
-        MainMenuWindow.show_singleton(
-            catalog_manager=self.catalog_manager,
-            quote_events=self.quote_events,
-            app_icon=self.windowIcon(),
-            parent=self,
-        )
 
     def _soft_delete(self):
         qid = self._selected_quote_id()
@@ -728,12 +766,23 @@ class QuoteHistoryWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
                 return
 
+            metodo_pago = (header.get("metodo_pago") or "").strip()
+            # ✅ Perú: no default (puede quedar vacío)
+            if APP_COUNTRY == "PERU":
+                pass
+            elif APP_COUNTRY == "PARAGUAY":
+                if not metodo_pago:
+                    metodo_pago = "Tarjeta"
+            else:
+                if not metodo_pago:
+                    metodo_pago = "Transferencia"
+
             datos = {
                 "fecha": (header.get("created_at", "") or "")[:10],
                 "cliente": header.get("cliente", ""),
                 "cedula": header.get("cedula", ""),
                 "telefono": header.get("telefono", ""),
-                "metodo_pago": "Transferencia",
+                "metodo_pago": metodo_pago,
                 "items": items_shown,
                 "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
                 "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
