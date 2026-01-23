@@ -12,22 +12,12 @@ pip freeze > Utilidades/requirements.txt
 # iniciar
 python main.py
 
-# iniciar Test
-pytest -q tests/test_presentations.py
-
 
 # ejecutable
-# para hacerla obligatoria usar -mandatory
 powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 
-powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch -mandatory
-
+# bash
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch
-
-powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch
--mandatory
--PruneOpenGLSW
-
 
 
 # Desactivar entorno virtual

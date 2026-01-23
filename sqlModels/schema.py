@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL = [
     # =========================
@@ -174,6 +174,7 @@ DDL = [
         telefono TEXT NOT NULL,
 
         metodo_pago TEXT NOT NULL DEFAULT '',
+        estado TEXT NOT NULL DEFAULT '',
 
         currency_shown TEXT NOT NULL,
         tasa_shown REAL,
@@ -193,6 +194,7 @@ DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_quotes_created ON quotes(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_deleted ON quotes(deleted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_estado ON quotes(estado)",
 
     """
     CREATE TABLE IF NOT EXISTS quote_items (

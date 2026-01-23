@@ -1,4 +1,3 @@
-# sqlModels/migrations.py
 from __future__ import annotations
 
 import sqlite3
@@ -63,7 +62,6 @@ def mig_3(con: sqlite3.Connection) -> None:
         """
     )
 
-    # backfill (1 sola vez por par) usando updated_at como recorded_at
     if _table_exists(con, "exchange_rates"):
         con.execute(
             """
@@ -89,10 +87,20 @@ def mig_4(con: sqlite3.Connection) -> None:
     _add_column_if_missing(con, "quotes", "metodo_pago", "TEXT NOT NULL DEFAULT ''")
 
 
-# Mapa: versión destino -> función migración
+def mig_5(con: sqlite3.Connection) -> None:
+    """
+    v5: Estado en quotes
+    - Agrega columna quotes.estado (si falta)
+    - Crea index idx_quotes_estado
+    """
+    _add_column_if_missing(con, "quotes", "estado", "TEXT NOT NULL DEFAULT ''")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_quotes_estado ON quotes(estado)")
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
     3: mig_3,
     4: mig_4,
+    5: mig_5,
 }

@@ -2,7 +2,59 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
+from typing import Any, Optional
+
+
+# =========================
+# Estado (guardado en quotes.estado)
+# =========================
+STATUS_PAGADO = "PAGADO"
+STATUS_POR_PAGAR = "POR_PAGAR"
+STATUS_PENDIENTE = "PENDIENTE"
+STATUS_NO_APLICA = "NO_APLICA"
+
+ALL_STATUSES = {STATUS_PAGADO, STATUS_POR_PAGAR, STATUS_PENDIENTE, STATUS_NO_APLICA}
+
+STATUS_LABELS = {
+    STATUS_PAGADO: "Pagado",
+    STATUS_POR_PAGAR: "Por pagar",
+    STATUS_PENDIENTE: "Pendiente",
+    STATUS_NO_APLICA: "No aplica",
+}
+
+
+def normalize_status(value: str | None) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    u = s.upper().replace(" ", "_")
+
+    aliases = {
+        "PAGO": STATUS_PAGADO,
+        "PAGADO": STATUS_PAGADO,
+        "PAID": STATUS_PAGADO,
+        "POR_PAGAR": STATUS_POR_PAGAR,
+        "PORPAGAR": STATUS_POR_PAGAR,
+        "POR-PAGAR": STATUS_POR_PAGAR,
+        "PENDIENTE": STATUS_PENDIENTE,
+        "PENDING": STATUS_PENDIENTE,
+        "NO_APLICA": STATUS_NO_APLICA,
+        "NOAPLICA": STATUS_NO_APLICA,
+        "INACTIVA": STATUS_NO_APLICA,
+        "INACTIVO": STATUS_NO_APLICA,
+        "INACTIVE": STATUS_NO_APLICA,
+    }
+    u = aliases.get(u, u)
+    return u if u in ALL_STATUSES else None
+
+
+def status_label(status: str | None) -> str:
+    st = normalize_status(status)
+    if not st:
+        return ""
+    return STATUS_LABELS.get(st, st)
 
 
 def _has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
@@ -45,8 +97,8 @@ def insert_quote(
         raise ValueError("items_base y items_shown deben tener el mismo tamaño")
 
     has_mp = _has_column(con, "quotes", "metodo_pago")
+    has_estado = _has_column(con, "quotes", "estado")
 
-    # ✅ Insert dinámico: NO incluimos deleted_at (queda NULL por defecto)
     cols: list[str] = [
         "country_code", "quote_no", "created_at",
         "cliente", "cedula", "telefono",
@@ -65,10 +117,17 @@ def insert_quote(
     ]
 
     if has_mp:
-        # Insertamos metodo_pago justo después de telefono (por legibilidad; el orden no importa si usas cols)
         insert_pos = cols.index("telefono") + 1
         cols.insert(insert_pos, "metodo_pago")
         vals.insert(insert_pos, str(metodo_pago or ""))
+
+    if has_estado:
+        # por defecto sin estado (''), para no colorear
+        insert_pos = cols.index("telefono") + 1
+        if has_mp:
+            insert_pos += 1
+        cols.insert(insert_pos, "estado")
+        vals.insert(insert_pos, "")
 
     placeholders = ",".join(["?"] * len(cols))
     sql = f"INSERT INTO quotes({', '.join(cols)}) VALUES({placeholders})"
@@ -76,9 +135,6 @@ def insert_quote(
     cur = con.execute(sql, tuple(vals))
     quote_id = int(cur.lastrowid)
 
-    # =========================
-    # Quote items
-    # =========================
     rows: list[tuple[Any, ...]] = []
     for b, s in zip(items_base, items_shown):
         rows.append((
@@ -137,6 +193,17 @@ def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: st
     )
 
 
+def update_quote_status(con: sqlite3.Connection, quote_id: int, estado: str | None) -> None:
+    """Actualiza estado en la cabecera (si la columna existe). None => ''. """
+    if not _has_column(con, "quotes", "estado"):
+        raise RuntimeError("La columna 'estado' no existe en la tabla 'quotes'.")
+    st = normalize_status(estado) or ""
+    con.execute(
+        "UPDATE quotes SET estado = ? WHERE id = ?",
+        (st, int(quote_id)),
+    )
+
+
 def soft_delete_quote(con: sqlite3.Connection, quote_id: int, deleted_at_iso: str) -> None:
     con.execute(
         "UPDATE quotes SET deleted_at = ? WHERE id = ?",
@@ -162,20 +229,51 @@ def list_quotes(
     if not include_deleted:
         where.append("q.deleted_at IS NULL")
 
+    has_mp = _has_column(con, "quotes", "metodo_pago")
+    has_estado = _has_column(con, "quotes", "estado")
+
+    # “Buscar por cualquier columna” (incluye estado/pago/moneda/total/items/pdf/fecha)
     if st:
-        where.append("(q.quote_no LIKE ? OR q.cliente LIKE ? OR q.cedula LIKE ? OR q.telefono LIKE ?)")
         like = f"%{st}%"
-        params.extend([like, like, like, like])
+        pago_w = "q.metodo_pago LIKE ?" if has_mp else "0"
+        estado_w = "q.estado LIKE ? OR REPLACE(q.estado,'_',' ') LIKE ?" if has_estado else "0"
+
+        where.append(
+            f"""
+            (
+                q.created_at LIKE ?
+                OR q.quote_no LIKE ?
+                OR q.cliente LIKE ?
+                OR q.cedula LIKE ?
+                OR q.telefono LIKE ?
+                OR {pago_w}
+                OR {estado_w}
+                OR q.currency_shown LIKE ?
+                OR q.pdf_path LIKE ?
+                OR CAST(q.total_neto_shown AS TEXT) LIKE ?
+                OR CAST((SELECT COUNT(*) FROM quote_items qi2 WHERE qi2.quote_id = q.id) AS TEXT) LIKE ?
+            )
+            """
+        )
+
+        params.extend([like, like, like, like, like, like])  # created_at..telefono
+        if has_mp:
+            params.append(like)  # metodo_pago
+        if has_estado:
+            params.extend([like, like])  # estado + estado con espacios
+        params.extend([like, like, like, like])  # currency, pdf, total, items_count
 
     if cp:
-        where.append("""
+        where.append(
+            """
             EXISTS (
                 SELECT 1
                 FROM quote_items qi
                 WHERE qi.quote_id = q.id
                   AND (qi.codigo LIKE ? OR qi.producto LIKE ?)
             )
-        """)
+            """
+        )
         likep = f"%{cp}%"
         params.extend([likep, likep])
 
@@ -186,8 +284,8 @@ def list_quotes(
         tuple(params),
     ).fetchone()["n"]
 
-    has_mp = _has_column(con, "quotes", "metodo_pago")
     pago_expr = "q.metodo_pago" if has_mp else "'' AS metodo_pago"
+    estado_expr = "q.estado" if has_estado else "'' AS estado"
 
     rows = con.execute(
         f"""
@@ -198,6 +296,7 @@ def list_quotes(
             q.cliente,
             q.cedula,
             q.telefono,
+            {estado_expr},
             {pago_expr},
             q.total_neto_shown AS total_shown,
             q.currency_shown,

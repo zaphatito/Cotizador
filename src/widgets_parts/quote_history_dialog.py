@@ -5,7 +5,7 @@ import os
 import datetime
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent
+from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
@@ -14,7 +14,10 @@ from PySide6.QtWidgets import (
 
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.quotes_repo import (
-    list_quotes, get_quote_header, get_quote_items, soft_delete_quote, update_quote_payment
+    list_quotes, get_quote_header, get_quote_items, soft_delete_quote,
+    update_quote_payment, update_quote_status,
+    normalize_status, status_label,
+    STATUS_PAGADO, STATUS_POR_PAGAR, STATUS_PENDIENTE, STATUS_NO_APLICA
 )
 from sqlModels.rates_repo import load_rates
 
@@ -32,6 +35,10 @@ from ..pdfgen import generar_pdf
 
 from .menu import MainMenuWindow, RatesDialog
 from .rates_history_dialog import RatesHistoryDialog
+from .quote_status_dialog import QuoteStatusDialog
+
+# ✅ fuente única de colores + contraste
+from .status_colors import bg_for_status, best_text_color_for_bg
 
 log = get_logger(__name__)
 
@@ -56,7 +63,6 @@ def _doc_header_for_country(country: str) -> str:
         return "DNI / RUC"
     if c == "VENEZUELA":
         return "Cédula/RIF"
-    # Paraguay (y default)
     return "Cédula/RUC"
 
 
@@ -96,21 +102,33 @@ def format_dt_legible(value) -> str:
     return out.replace("AM", "am").replace("PM", "pm")
 
 
+def _is_today(value) -> bool:
+    dt = _parse_dt(value)
+    if not dt:
+        return False
+    try:
+        return dt.date() == datetime.datetime.now().date()
+    except Exception:
+        return False
+
+
 class QuotesTableModel(QAbstractTableModel):
     def __init__(self, *, show_payment: bool):
         super().__init__()
         self.rows: list[dict] = []
         self.show_payment = bool(show_payment)
         doc_hdr = _doc_header_for_country(APP_COUNTRY)
+
+        # Fecha/Hora | N° | Cliente | Doc | Tel | Estado | (Pago) | Total | Moneda | Items | PDF
         if self.show_payment:
             self.HEADERS = [
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
-                "Pago", "Total", "Moneda", "Items", "PDF"
+                "Estado", "Pago", "Total", "Moneda", "Items", "PDF"
             ]
         else:
             self.HEADERS = [
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
-                "Total", "Moneda", "Items", "PDF"
+                "Estado", "Total", "Moneda", "Items", "PDF"
             ]
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -129,26 +147,52 @@ class QuotesTableModel(QAbstractTableModel):
     def _idx_no(self) -> int:
         return 1
 
+    def _idx_estado(self) -> int:
+        return 5
+
     def _idx_pago(self) -> int | None:
-        return 5 if self.show_payment else None
+        return 6 if self.show_payment else None
 
     def _idx_total(self) -> int:
-        return 6 if self.show_payment else 5
-
-    def _idx_currency(self) -> int:
         return 7 if self.show_payment else 6
 
-    def _idx_items(self) -> int:
+    def _idx_currency(self) -> int:
         return 8 if self.show_payment else 7
 
-    def _idx_pdf(self) -> int:
+    def _idx_items(self) -> int:
         return 9 if self.show_payment else 8
+
+    def _idx_pdf(self) -> int:
+        return 10 if self.show_payment else 9
+
+    def _row_bg(self, r: dict):
+        return bg_for_status(r.get("estado"))
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
         r = self.rows[index.row()]
         c = index.column()
+
+        # 2) Cotizaciones del día en negrita
+        if role == Qt.FontRole:
+            if _is_today(r.get("created_at")):
+                f = QFont()
+                f.setBold(True)
+                return f
+            return None
+
+        # Fondo por estado
+        if role == Qt.BackgroundRole:
+            bg = self._row_bg(r)
+            return QBrush(bg) if bg is not None else None
+
+        # Texto por contraste según fondo
+        if role == Qt.ForegroundRole:
+            bg = self._row_bg(r)
+            if bg is None:
+                return None
+            return QBrush(best_text_color_for_bg(bg))
 
         if role == Qt.DisplayRole:
             if c == 0:
@@ -161,6 +205,9 @@ class QuotesTableModel(QAbstractTableModel):
                 return r.get("cedula", "")
             if c == 4:
                 return r.get("telefono", "")
+
+            if c == self._idx_estado():
+                return status_label(r.get("estado"))
 
             if self.show_payment and c == self._idx_pago():
                 return (r.get("metodo_pago") or "").strip()
@@ -182,7 +229,7 @@ class QuotesTableModel(QAbstractTableModel):
                 return os.path.basename(p)
 
         if role == Qt.TextAlignmentRole:
-            centered_cols = {self._idx_no(), self._idx_total(), self._idx_currency(), self._idx_items()}
+            centered_cols = {self._idx_no(), self._idx_estado(), self._idx_total(), self._idx_currency(), self._idx_items()}
             if self.show_payment and self._idx_pago() is not None:
                 centered_cols.add(self._idx_pago())
             if c in centered_cols:
@@ -243,6 +290,10 @@ class QuotesTableModel(QAbstractTableModel):
             return (v is None, key_text(v))
         if c == 4:
             v = r.get("telefono")
+            return (v is None, key_text(v))
+
+        if c == self._idx_estado():
+            v = status_label(r.get("estado"))
             return (v is None, key_text(v))
 
         if self.show_payment and c == self._idx_pago():
@@ -331,7 +382,9 @@ class QuoteHistoryWindow(QMainWindow):
         top = QHBoxLayout()
 
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Filtrar: cliente / cédula / teléfono / N°")
+        self.txt_search.setPlaceholderText(
+            "Filtrar (cualquier columna): cliente / doc / teléfono / N° / estado / pago / total / moneda / items / PDF…"
+        )
         self.txt_search.textChanged.connect(self._on_filters_changed)
 
         self.txt_prod = QLineEdit()
@@ -366,7 +419,8 @@ class QuoteHistoryWindow(QMainWindow):
         hh.setSectionResizeMode(QHeaderView.Stretch)
 
         try:
-            idx_no = 1
+            idx_no = self.model._idx_no()
+            idx_estado = self.model._idx_estado()
             idx_pago = self.model._idx_pago()
             idx_total = self.model._idx_total()
             idx_items = self.model._idx_items()
@@ -374,6 +428,7 @@ class QuoteHistoryWindow(QMainWindow):
             idx_curr = self.model._idx_currency()
 
             hh.setSectionResizeMode(idx_no, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_estado, QHeaderView.ResizeToContents)
             if idx_pago is not None:
                 hh.setSectionResizeMode(idx_pago, QHeaderView.ResizeToContents)
             hh.setSectionResizeMode(idx_total, QHeaderView.ResizeToContents)
@@ -608,11 +663,11 @@ class QuoteHistoryWindow(QMainWindow):
 
         act_dup = QAction("Abrir Cotización", self)
         act_pdf = QAction("Abrir PDF", self)
+        act_state = QAction("Cambiar estado…", self)
         act_ticket = QAction("Reimprimir ticket", self)
         act_regen = QAction("Regenerar PDF", self)
         act_hide = QAction("Eliminar", self)
 
-        # ✅ SOLO PERÚ: editar método de pago desde histórico
         act_edit_pay = None
         if APP_COUNTRY == "PERU":
             act_edit_pay = QAction("Editar pago…", self)
@@ -621,12 +676,14 @@ class QuoteHistoryWindow(QMainWindow):
 
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
+        act_state.setEnabled(has_sel)
         act_ticket.setEnabled(has_sel)
         act_regen.setEnabled(has_sel)
         act_hide.setEnabled(has_sel)
 
         act_dup.triggered.connect(self._duplicate)
         act_pdf.triggered.connect(self._open_pdf)
+        act_state.triggered.connect(self._change_status)
         act_ticket.triggered.connect(self._reprint_ticket)
         act_regen.triggered.connect(self._regen_pdf_overwrite)
         act_hide.triggered.connect(self._soft_delete)
@@ -634,6 +691,7 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addAction(act_dup)
         menu.addSeparator()
         menu.addAction(act_pdf)
+        menu.addAction(act_state)
 
         if act_edit_pay is not None:
             menu.addAction(act_edit_pay)
@@ -644,6 +702,41 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addAction(act_hide)
         menu.addSeparator()
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _change_status(self):
+        qid = self._selected_quote_id()
+        if not qid:
+            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            return
+
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            header = get_quote_header(con, qid)
+            con.close()
+            current = (header.get("estado") or "").strip()
+        except Exception:
+            current = ""
+
+        dlg = QuoteStatusDialog(self, current_status=current)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        new_status = dlg.status()
+
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            with tx(con):
+                update_quote_status(con, qid, new_status)
+            con.close()
+
+            self._reload_current_page()
+            self._select_row_by_quote_id(qid)
+
+        except Exception as e:
+            log.exception("Error actualizando estado")
+            QMessageBox.critical(self, "Error", f"No se pudo actualizar el estado:\n{e}")
 
     def _edit_payment_peru(self):
         if APP_COUNTRY != "PERU":
@@ -710,7 +803,6 @@ class QuoteHistoryWindow(QMainWindow):
             quote_events=self.quote_events,
         )
 
-        # ✅ para que al generar se cierre y vuelva foco al histórico
         win._history_window = self
 
         win.show()
@@ -776,7 +868,6 @@ class QuoteHistoryWindow(QMainWindow):
                 quote_events=self.quote_events,
             )
 
-            # ✅ para que al generar se cierre y vuelva foco al histórico
             win._history_window = self
 
             if APP_COUNTRY == "PARAGUAY":
