@@ -88,11 +88,6 @@ def insert_quote(
     items_base: list[dict],
     items_shown: list[dict],
 ) -> int:
-    """
-    items_base: items tal como están en self.items (moneda base interna)
-    items_shown: items_pdf tal como los construyes (ya convertidos para mostrar/PDF)
-    Deben estar en el mismo orden / mismo largo.
-    """
     if len(items_base) != len(items_shown):
         raise ValueError("items_base y items_shown deben tener el mismo tamaño")
 
@@ -122,7 +117,6 @@ def insert_quote(
         vals.insert(insert_pos, str(metodo_pago or ""))
 
     if has_estado:
-        # por defecto sin estado (''), para no colorear
         insert_pos = cols.index("telefono") + 1
         if has_mp:
             insert_pos += 1
@@ -131,7 +125,6 @@ def insert_quote(
 
     placeholders = ",".join(["?"] * len(cols))
     sql = f"INSERT INTO quotes({', '.join(cols)}) VALUES({placeholders})"
-
     cur = con.execute(sql, tuple(vals))
     quote_id = int(cur.lastrowid)
 
@@ -184,7 +177,6 @@ def insert_quote(
 
 
 def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: str) -> None:
-    """Actualiza metodo_pago en la cabecera de una cotización (si la columna existe)."""
     if not _has_column(con, "quotes", "metodo_pago"):
         raise RuntimeError("La columna 'metodo_pago' no existe en la tabla 'quotes'.")
     con.execute(
@@ -194,7 +186,6 @@ def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: st
 
 
 def update_quote_status(con: sqlite3.Connection, quote_id: int, estado: str | None) -> None:
-    """Actualiza estado en la cabecera (si la columna existe). None => ''. """
     if not _has_column(con, "quotes", "estado"):
         raise RuntimeError("La columna 'estado' no existe en la tabla 'quotes'.")
     st = normalize_status(estado) or ""
@@ -223,7 +214,7 @@ def list_quotes(
     st = (search_text or "").strip()
     cp = (contains_product or "").strip()
 
-    where = []
+    where: list[str] = []
     params: list[Any] = []
 
     if not include_deleted:
@@ -232,37 +223,107 @@ def list_quotes(
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
 
-    # “Buscar por cualquier columna” (incluye estado/pago/moneda/total/items/pdf/fecha)
+    # ✅ Buscar por cualquier columna, pero usando valores FORMATEADOS como se ven en el histórico
     if st:
         like = f"%{st}%"
-        pago_w = "q.metodo_pago LIKE ?" if has_mp else "0"
-        estado_w = "q.estado LIKE ? OR REPLACE(q.estado,'_',' ') LIKE ?" if has_estado else "0"
 
-        where.append(
-            f"""
-            (
-                q.created_at LIKE ?
-                OR q.quote_no LIKE ?
-                OR q.cliente LIKE ?
-                OR q.cedula LIKE ?
-                OR q.telefono LIKE ?
-                OR {pago_w}
-                OR {estado_w}
-                OR q.currency_shown LIKE ?
-                OR q.pdf_path LIKE ?
-                OR CAST(q.total_neto_shown AS TEXT) LIKE ?
-                OR CAST((SELECT COUNT(*) FROM quote_items qi2 WHERE qi2.quote_id = q.id) AS TEXT) LIKE ?
-            )
-            """
+        # Normaliza created_at a "YYYY-MM-DD HH:MM:SS" (desde "YYYY-MM-DDTHH:MM:SS")
+        dt = "replace(substr(q.created_at,1,19), 'T', ' ')"
+        date_ddmm = f"(substr({dt},9,2) || '/' || substr({dt},6,2))"
+        date_ddmmyyyy = f"({date_ddmm} || '/' || substr({dt},1,4))"
+
+        h24 = f"CAST(substr({dt},12,2) AS INTEGER)"
+        h12 = f"(({h24} + 11) % 12) + 1"
+        h12_2 = f"printf('%02d', {h12})"          # 02
+        h12_1 = f"CAST({h12} AS TEXT)"            # 2
+        mm = f"substr({dt},15,2)"
+        ampm = f"(CASE WHEN {h24} < 12 THEN 'am' ELSE 'pm' END)"
+
+        # "02:15 pm" / "2:15 pm"
+        time12_2 = f"({h12_2} || ':' || {mm} || ' ' || {ampm})"
+        time12_1 = f"({h12_1} || ':' || {mm} || ' ' || {ampm})"
+
+        # "23/01/2026 02:15 pm" / "23/01/2026 2:15 pm"  (igual que tu UI)
+        dt_ui_2 = f"({date_ddmmyyyy} || ' ' || {time12_2})"
+        dt_ui_1 = f"({date_ddmmyyyy} || ' ' || {time12_1})"
+
+        # Total como se ve: "2256.06"
+        total_2 = "printf('%.2f', q.total_neto_shown)"
+
+        # Items como se ve: "9"
+        items_txt = "CAST((SELECT COUNT(*) FROM quote_items qi2 WHERE qi2.quote_id = q.id) AS TEXT)"
+
+        # Estado como se ve: "Pagado", "Por pagar", etc.
+        estado_label_sql = (
+            "CASE q.estado "
+            "WHEN 'PAGADO' THEN 'Pagado' "
+            "WHEN 'POR_PAGAR' THEN 'Por pagar' "
+            "WHEN 'PENDIENTE' THEN 'Pendiente' "
+            "WHEN 'NO_APLICA' THEN 'No aplica' "
+            "ELSE q.estado END"
         )
 
-        params.extend([like, like, like, like, like, like])  # created_at..telefono
-        if has_mp:
-            params.append(like)  # metodo_pago
-        if has_estado:
-            params.extend([like, like])  # estado + estado con espacios
-        params.extend([like, like, like, like])  # currency, pdf, total, items_count
+        or_terms: list[str] = []
 
+        # Fecha/hora (ISO + formato UI)
+        or_terms.extend([
+            "q.created_at LIKE ?",
+            f"{date_ddmm} LIKE ?",
+            f"{date_ddmmyyyy} LIKE ?",
+            f"{dt_ui_2} LIKE ?",
+            f"{dt_ui_1} LIKE ?",
+            f"{time12_2} LIKE ?",
+            f"{time12_1} LIKE ?",
+        ])
+        params.extend([like] * 7)
+
+        # N° (como se ve con ceros, y también sin ceros)
+        or_terms.extend([
+            "q.quote_no LIKE ?",
+            "CAST(CAST(q.quote_no AS INTEGER) AS TEXT) LIKE ?",
+        ])
+        params.extend([like, like])
+
+        # Texto base visible
+        or_terms.extend([
+            "q.cliente LIKE ?",
+            "q.cedula LIKE ?",
+            "q.telefono LIKE ?",
+        ])
+        params.extend([like, like, like])
+
+        # Estado (raw + con espacios + label)
+        if has_estado:
+            or_terms.append("(q.estado LIKE ? OR REPLACE(q.estado,'_',' ') LIKE ? OR " + estado_label_sql + " LIKE ?)")
+            params.extend([like, like, like])
+
+        # Pago
+        if has_mp:
+            or_terms.append("q.metodo_pago LIKE ?")
+            params.append(like)
+
+        # Total (2 decimales + raw)
+        or_terms.extend([
+            f"{total_2} LIKE ?",
+            "CAST(q.total_neto_shown AS TEXT) LIKE ?",
+        ])
+        params.extend([like, like])
+
+        # Moneda
+        or_terms.append("q.currency_shown LIKE ?")
+        params.append(like)
+
+        # Items (conteo como se ve)
+        or_terms.append(f"{items_txt} LIKE ?")
+        params.append(like)
+
+        # PDF (en tu UI se ve el nombre; en DB normalmente ya guardas basename)
+        or_terms.append("q.pdf_path LIKE ?")
+        params.append(like)
+
+        where.append("(" + " OR ".join(or_terms) + ")")
+
+    # filtro por producto (código o nombre)
     if cp:
         where.append(
             """
