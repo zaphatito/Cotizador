@@ -1,3 +1,4 @@
+#tools/apply_update.py
 from __future__ import annotations
 
 import argparse
@@ -165,6 +166,7 @@ _PROTECTED_SUFFIXES = (
     os.sep + "sqlModels" + os.sep + "app.sqlite3-shm",
 )
 
+
 def _is_protected(p: str, app_root: str) -> bool:
     if not p:
         return False
@@ -188,6 +190,35 @@ def _is_protected(p: str, app_root: str) -> bool:
             return True
 
     return False
+
+
+def _pending_changelog_marker(app_root: str) -> str:
+    d = os.path.join(app_root, "updater")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "pending_changelog.json")
+
+
+def _write_pending_changelog(app_root: str, plan: dict, log_fn) -> None:
+    try:
+        version = str(plan.get("version") or "").strip()
+        if not version:
+            return
+        rel = str(plan.get("changelog_rel") or "changelog.txt").strip() or "changelog.txt"
+
+        payload = {
+            "version": version,
+            "changelog_rel": rel,
+            "ts": int(time.time()),
+        }
+
+        p = _pending_changelog_marker(app_root)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+        log_fn(f"Wrote pending changelog: {p} data={payload}")
+    except Exception as e:
+        log_fn(f"WARN: no se pudo escribir pending_changelog.json: {e}")
 
 
 def main() -> int:
@@ -324,6 +355,10 @@ def main() -> int:
 
         log(f"Delete plan: {args.plan}")
         _safe_remove(args.plan)
+
+        # ✅ marcar changelog pendiente para el primer arranque post-update
+        if app_root:
+            _write_pending_changelog(app_root, plan, log)
 
         ui.advance("Reiniciando…")
         if args.restart:

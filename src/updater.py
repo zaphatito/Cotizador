@@ -1,3 +1,4 @@
+# src/updater.py
 from __future__ import annotations
 """
 Actualizador automático para Sistema de Cotizaciones.
@@ -10,12 +11,43 @@ Mejoras:
 - El instalador YA NO se ejecuta desde la app: se ejecuta desde apply_update.exe (después de cerrar).
 - Evita cache viejo agregando ?ts= a TODAS las descargas (incluye media.githubusercontent.com)
 - Ignora sqlModels/app.sqlite3 y updater/apply_update.exe
+- ✅ 404 legacy NO detiene la actualización si el archivo ya existe localmente.
+- ✅ Plan incluye changelog_rel para mostrar en el primer arranque post-update.
 """
 
-import os, sys, json, re, hashlib, tempfile, subprocess, time, urllib.request, shutil, tempfile
+import os
+import sys
+import json
+import re
+import hashlib
+import tempfile
+import subprocess
+import time
+import urllib.request
+import urllib.error
+import shutil
 from typing import Dict, Any, Tuple, Optional, Callable
 
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
+
+
+# -------- errores de descarga --------
+
+class DownloadHTTPError(RuntimeError):
+    def __init__(self, rel: str, url: str, code: int, reason: str):
+        self.rel = rel
+        self.url = url
+        self.code = code
+        self.reason = reason
+        super().__init__(f"{rel}: HTTP {code} {reason} | URL={url}")
+
+
+class DownloadNetError(RuntimeError):
+    def __init__(self, rel: str, url: str, reason: str):
+        self.rel = rel
+        self.url = url
+        self.reason = reason
+        super().__init__(f"{rel}: Error de red: {reason} | URL={url}")
 
 
 def _emit(ui: UiCb, kind: str, **payload) -> None:
@@ -34,20 +66,26 @@ def _parse_version(v: str) -> tuple[int, int, int]:
         nums.append(0)
     return tuple(nums)
 
+
 def _is_newer(remote: str, local: str) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
+
 def _normalize_github_url(url: str) -> str:
     u = str(url or "").strip()
+
     m = re.match(r"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$", u, re.I)
     if m:
         owner, repo, branch, path = m.groups()
         return f"https://media.githubusercontent.com/media/{owner}/{repo}/{branch}/{path}"
+
     m = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/raw/([^/]+)/(.*)$", u, re.I)
     if m:
         owner, repo, branch, path = m.groups()
         return f"https://media.githubusercontent.com/media/{owner}/{repo}/{branch}/{path}"
+
     return u
+
 
 def _is_git_lfs_pointer_file(path: str) -> bool:
     try:
@@ -57,9 +95,11 @@ def _is_git_lfs_pointer_file(path: str) -> bool:
     except Exception:
         return False
 
+
 def _cachebust(url: str) -> str:
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}ts={int(time.time())}"
+
 
 def _http_get_raw(url: str, timeout: int = 12, log=None) -> bytes:
     u = _cachebust(url) if "raw.githubusercontent.com" in url else url
@@ -77,6 +117,7 @@ def _http_get_raw(url: str, timeout: int = 12, log=None) -> bytes:
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
+
 def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any], str]:
     try:
         raw = _http_get_raw(url, timeout=timeout, log=log)
@@ -84,6 +125,7 @@ def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any
         if log:
             log.warning(f"Updater: error descargando manifiesto: {e}")
         return {}, ""
+
     text = ""
     try:
         text = raw.decode("utf-8-sig")
@@ -95,32 +137,52 @@ def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any
             log.warning(f"Updater: JSON inválido. Error={e}. Inicio respuesta='{head[:240]}'")
         return {}, text
 
+
 def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None, rel: str = "") -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    u = _cachebust(_normalize_github_url(url))  # ✅ cachebust también para media
-    req = urllib.request.Request(u, headers={"User-Agent": "Cotizador-Updater/1.6", "Cache-Control": "no-cache"})
+
+    u = _cachebust(_normalize_github_url(url))
+    req = urllib.request.Request(
+        u,
+        headers={
+            "User-Agent": "Cotizador-Updater/1.6",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+
     if log:
         log.debug(f"Updater: GET {u} -> {dest}")
 
-    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
-        total = 0
-        try:
-            total = int(r.headers.get("Content-Length") or 0)
-        except Exception:
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
             total = 0
+            try:
+                total = int(r.headers.get("Content-Length") or 0)
+            except Exception:
+                total = 0
 
-        read = 0
-        last_ui = 0.0
-        while True:
-            chunk = r.read(1024 * 64)
-            if not chunk:
-                break
-            f.write(chunk)
-            read += len(chunk)
-            now = time.time()
-            if ui and (now - last_ui) >= 0.12:
-                last_ui = now
-                _emit(ui, "download_bytes", rel=rel, read=read, total=total)
+            read = 0
+            last_ui = 0.0
+            while True:
+                chunk = r.read(1024 * 64)
+                if not chunk:
+                    break
+                f.write(chunk)
+                read += len(chunk)
+
+                now = time.time()
+                if ui and (now - last_ui) >= 0.12:
+                    last_ui = now
+                    _emit(ui, "download_bytes", rel=rel, read=read, total=total)
+
+    except urllib.error.HTTPError as e:
+        raise DownloadHTTPError(rel or dest, u, int(getattr(e, "code", 0) or 0), str(getattr(e, "reason", "") or "HTTPError")) from e
+    except urllib.error.URLError as e:
+        raise DownloadNetError(rel or dest, u, str(getattr(e, "reason", e))) from e
+    except Exception as e:
+        raise RuntimeError(f"{rel or dest}: Error descargando | URL={u} | {e}") from e
+
 
 def _sha256_file(path: str) -> str:
     h = hashlib.sha256()
@@ -129,10 +191,12 @@ def _sha256_file(path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
 def _app_root() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 
 def _is_safe_relpath(rel: str) -> bool:
     if not rel:
@@ -146,11 +210,14 @@ def _is_safe_relpath(rel: str) -> bool:
         return False
     return True
 
+
 def _dst_for_rel(rel: str) -> str:
     return os.path.join(_app_root(), rel.replace("/", os.sep).replace("\\", os.sep))
 
+
 def _normalize_rel(rel: str) -> str:
     return rel.replace("\\", "/").strip().lower()
+
 
 def _build_ignore_set(app_config: Dict[str, Any]) -> set[str]:
     ignore: set[str] = set()
@@ -160,20 +227,23 @@ def _build_ignore_set(app_config: Dict[str, Any]) -> set[str]:
             if isinstance(x, str) and x.strip():
                 ignore.add(_normalize_rel(x))
 
-    # Config local (no tocar)
     ignore.add("config/config.json")
 
-    # DB + WAL/SHM (no tocar jamás)
     ignore.add("sqlmodels/app.sqlite3")
     ignore.add("sqlmodels/app.sqlite3-wal")
     ignore.add("sqlmodels/app.sqlite3-shm")
 
-    # Archivos runtime del updater (no tocar)
     ignore.add("updater/apply_update.exe")
     ignore.add("updater/apply_update.log")
     ignore.add("updater/update_state.json")
 
     return ignore
+
+
+def _changelog_rel(manifest: Dict[str, Any], app_config: Dict[str, Any]) -> str:
+    # prioridad: manifiesto -> config -> default
+    v = str(manifest.get("changelog_rel") or app_config.get("update_changelog_rel") or "changelog.txt").strip()
+    return v or "changelog.txt"
 
 
 # ----------------- retry-later -----------------
@@ -182,6 +252,7 @@ def _state_path() -> str:
     d = os.path.join(_app_root(), "updater")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "update_state.json")
+
 
 def _read_state(log=None) -> Dict[str, Any]:
     p = _state_path()
@@ -195,6 +266,7 @@ def _read_state(log=None) -> Dict[str, Any]:
             log.debug("Updater: no se pudo leer update_state.json", exc_info=True)
     return {}
 
+
 def _write_state(state: Dict[str, Any], log=None) -> None:
     p = _state_path()
     try:
@@ -206,6 +278,7 @@ def _write_state(state: Dict[str, Any], log=None) -> None:
         if log:
             log.debug("Updater: no se pudo escribir update_state.json", exc_info=True)
 
+
 def _retry_params(app_config: Dict[str, Any]) -> tuple[int, int]:
     base = int(app_config.get("update_retry_base_seconds", 300) or 300)
     maxs = int(app_config.get("update_retry_max_seconds", 6 * 3600) or (6 * 3600))
@@ -213,12 +286,14 @@ def _retry_params(app_config: Dict[str, Any]) -> tuple[int, int]:
     maxs = max(base, maxs)
     return base, maxs
 
+
 def _should_backoff(state: Dict[str, Any]) -> bool:
     try:
         next_ts = float(state.get("next_retry_ts") or 0)
         return time.time() < next_ts
     except Exception:
         return False
+
 
 def _mark_failure(app_config: Dict[str, Any], state: Dict[str, Any], remote_version: str, err: Exception, log=None) -> int:
     base, maxs = _retry_params(app_config)
@@ -241,6 +316,7 @@ def _mark_failure(app_config: Dict[str, Any], state: Dict[str, Any], remote_vers
         log.warning("Updater: falló update v%s; retry en %ss; err=%s", remote_version, delay, state["last_error"])
     return delay
 
+
 def _clear_failure(state: Dict[str, Any], log=None) -> None:
     changed = False
     for k in ("pending_version", "fail_count", "last_error", "last_fail_ts", "next_retry_ts"):
@@ -257,12 +333,12 @@ def _apply_exe(app_config: Dict[str, Any]) -> str:
     rel_apply = str(app_config.get("update_apply_exe", "") or "").strip() or r"updater\apply_update.exe"
     return os.path.join(_app_root(), rel_apply.replace("/", os.sep).replace("\\", os.sep))
 
+
 def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui=None, log=None) -> None:
-    apply_src = _apply_exe(app_config)  # tu ruta actual en {app}\updater\apply_update.exe
+    apply_src = _apply_exe(app_config)
     if not os.path.exists(apply_src):
         raise RuntimeError(f"No existe apply_update.exe: {apply_src}")
 
-    # ✅ copiar a TEMP para que el instalador pueda reemplazar {app}\updater\apply_update.exe sin locks
     run_dir = os.path.join(tempfile.gettempdir(), "CotizadorUpdate")
     os.makedirs(run_dir, exist_ok=True)
     apply_run = os.path.join(run_dir, "apply_update_run.exe")
@@ -281,6 +357,7 @@ def _spawn_apply(plan: Dict[str, Any], app_config: Dict[str, Any], ui=None, log=
         [apply_run, "--plan", plan_path, "--pid", str(pid), "--restart", restart_exe, "--log", log_path],
         close_fds=True
     )
+
 
 # ----------------- FILES -----------------
 
@@ -306,6 +383,8 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
         "staging_root": staging_root,
         "files": [],
         "delete": [],
+        "changelog_rel": _changelog_rel(manifest, app_config),
+        "skipped": [],  # opcional, para debug
     }
 
     deletes = manifest.get("delete", [])
@@ -318,15 +397,12 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
 
             rel_n = _normalize_rel(rel)
 
-            # ✅ PROTECCIÓN: jamás borrar sqlModels (ni folder ni contenido)
             if rel_n == "sqlmodels" or rel_n.startswith("sqlmodels/"):
                 continue
-
             if rel_n in ignore:
                 continue
 
             plan["delete"].append(_dst_for_rel(rel))
-
 
     need_items: list[dict[str, str]] = []
     for f in files:
@@ -363,7 +439,23 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
         url = _normalize_github_url(base_url + rel)
         staged = os.path.join(staging_root, rel.replace("/", os.sep))
 
-        _download(url, staged, timeout=180, log=log, ui=ui, rel=rel)
+        try:
+            _download(url, staged, timeout=180, log=log, ui=ui, rel=rel)
+        except DownloadHTTPError as e:
+            # ✅ si es 404 pero el archivo YA existe localmente: se omite (legacy) y seguimos
+            if e.code == 404:
+                dst = _dst_for_rel(rel)
+                if os.path.exists(dst):
+                    if log:
+                        log.warning("Updater: 404 en %s; se omite (legacy). URL=%s", rel, e.url)
+                    plan["skipped"].append({"rel": rel, "reason": "HTTP 404 (legacy/omitido)"})
+                    _emit(ui, "status", text=f"Omitiendo (legacy): {rel} (404)")
+                    _emit(ui, "progress", current=idx, total=len(need_items), text=f"Omitido: {rel} (404)")
+                    continue
+            raise
+        # otros errores: fatal
+        except Exception:
+            raise
 
         if _is_git_lfs_pointer_file(staged):
             raise RuntimeError(f"Pointer LFS en {rel}")
@@ -419,6 +511,7 @@ def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=No
         "staging_root": "",
         "files": [],
         "delete": [],
+        "changelog_rel": _changelog_rel(manifest, app_config),
         "installer": {
             "path": tmp,
             "args": extra_flags,
@@ -450,8 +543,7 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
             retry_in = max(1, nxt - int(time.time()))
             _emit(ui, "status", text=f"Actualización en espera. Reintento en ~{retry_in}s.")
             return {"status": "BACKOFF", "retry_in": retry_in}
-        
-        
+
         def _get_local_version(log=None) -> str:
             try:
                 p = os.path.join(_app_root(), "version.txt")
@@ -469,8 +561,6 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
             except Exception:
                 return "0.0.0"
 
-
-        
         try:
             local_version = _get_local_version(log=log)
         except Exception:
@@ -494,6 +584,7 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
             if pkg_type == "files":
                 _emit(ui, "status", text="Preparando actualización (files)…")
                 plan = _plan_files_update(manifest, app_config, log=log, ui=ui)
+
                 if not plan.get("files") and not plan.get("delete"):
                     _clear_failure(state, log=log)
                     _emit(ui, "status", text="No hay cambios que aplicar.")
@@ -502,20 +593,17 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
                 _spawn_apply(plan, app_config, ui=ui, log=log)
                 return {"status": "UPDATE_STARTED", "method": "files", "remote": remote_version}
 
-            # installer directo
             _emit(ui, "status", text="Preparando actualización (installer)…")
             plan = _plan_installer(manifest, app_config, log=log, ui=ui)
             _spawn_apply(plan, app_config, ui=ui, log=log)
             return {"status": "UPDATE_STARTED", "method": "installer", "remote": remote_version}
 
         except Exception as e:
-            # mostrar el error real antes del fallback
             _emit(ui, "status", text=f"Error en actualización: {e}")
             if log:
                 log.exception("Updater: fallo; intentando fallback instalador")
 
             try:
-                # fallback si hay url
                 if str(manifest.get("url", "") or "").strip():
                     _emit(ui, "status", text="Fallback: usando instalador…")
                     plan = _plan_installer(manifest, app_config, log=log, ui=ui)

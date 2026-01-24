@@ -1,9 +1,18 @@
-import os, sys, time, ctypes, pandas as pd
+# src/app.py
+from __future__ import annotations
+
+import os
+import sys
+import time
+import json
+import ctypes
+import pandas as pd
 from ctypes import wintypes
+
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPlainTextEdit, QPushButton
 )
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt
 
 from .paths import set_win_app_id, load_app_icon, ensure_data_seed_if_empty, DATA_DIR
 from .logging_setup import get_logger
@@ -23,6 +32,12 @@ _MUTEX_HANDLE = None
 _MUTEX_NAME = "Local\\SistemaCotizaciones_SingleInstance"
 _SHOW_EVENT_NAME = "Local\\SistemaCotizaciones_ShowMainWindow"
 ERROR_ALREADY_EXISTS = 183
+
+
+def _app_root() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 class UpdateProgressDialog(QDialog):
@@ -51,7 +66,6 @@ class UpdateProgressDialog(QDialog):
         lay.addWidget(self.out)
 
     def handle_event(self, kind: str, payload: dict):
-        # status text
         if kind == "status":
             t = str(payload.get("text", "") or "")
             if t:
@@ -80,7 +94,6 @@ class UpdateProgressDialog(QDialog):
                 self.out.appendPlainText(text)
 
         elif kind == "download_bytes":
-            # opcional: no cambiamos barra global por bytes (solo dejamos log)
             rel = str(payload.get("rel") or "")
             read = int(payload.get("read") or 0)
             total = int(payload.get("total") or 0)
@@ -91,7 +104,7 @@ class UpdateProgressDialog(QDialog):
         elif kind == "failed":
             err = str(payload.get("error") or "")
             retry_in = int(payload.get("retry_in") or 0)
-            msg = f"Falló la actualización. Se reintentará luego."
+            msg = "Falló la actualización. Se reintentará luego."
             if retry_in > 0:
                 msg += f" (en ~{retry_in}s)"
             if err:
@@ -99,6 +112,79 @@ class UpdateProgressDialog(QDialog):
             self.out.appendPlainText(msg)
 
         QApplication.processEvents()
+
+
+class ChangelogDialog(QDialog):
+    def __init__(self, version: str, text: str, app_icon=None):
+        super().__init__(None)
+        self.setWindowTitle("Novedades de la actualización")
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setMinimumWidth(560)
+
+        if app_icon is not None and not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+
+        lay = QVBoxLayout(self)
+
+        title = "Se instalaron cambios nuevos."
+        if version:
+            title = f"Actualización instalada: {version}"
+        lay.addWidget(QLabel(title))
+
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setMaximumBlockCount(2000)
+        box.setPlainText(text or "")
+        lay.addWidget(box)
+
+        btn = QPushButton("Entendido")
+        btn.clicked.connect(self.accept)
+        lay.addWidget(btn, alignment=Qt.AlignRight)
+
+
+def _pending_changelog_path(app_root: str) -> str:
+    return os.path.join(app_root, "updater", "pending_changelog.json")
+
+
+def _show_changelog_if_pending(app_root: str, app_icon=None) -> None:
+    p = _pending_changelog_path(app_root)
+    if not os.path.exists(p):
+        return
+
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    version = str(data.get("version") or "").strip()
+    rel = str(data.get("changelog_rel") or "changelog.txt").strip() or "changelog.txt"
+
+    changelog_path = rel
+    if not os.path.isabs(changelog_path):
+        changelog_path = os.path.join(app_root, rel)
+
+    text = ""
+    try:
+        if os.path.exists(changelog_path):
+            text = (open(changelog_path, "r", encoding="utf-8-sig", errors="ignore").read() or "").strip()
+        else:
+            text = "(No se encontró el archivo de changelog.)"
+    except Exception as e:
+        text = f"(No se pudo leer el changelog: {e})"
+
+    # mostrar anuncio
+    dlg = ChangelogDialog(version=version, text=text, app_icon=app_icon)
+    dlg.exec()
+
+    # mostrar solo una vez
+    try:
+        os.remove(p)
+    except Exception:
+        pass
 
 
 def _request_show_existing_and_exit() -> None:
@@ -171,13 +257,11 @@ def run_app():
     # Si inició update -> cerrar app para que apply_update pueda trabajar
     if res.get("status") == "UPDATE_STARTED":
         dlg.handle_event("status", {"text": "Actualización iniciada. Cerrando para aplicar…"})
-
-        # deja respirar la UI un instante
         QApplication.processEvents()
         time.sleep(0.35)
         os._exit(0)
 
-    # Si falló -> botón "Reintentar luego" y continuar abriendo la app
+    # Si falló -> continuar abriendo la app
     if res.get("status") == "FAILED_RETRY_LATER":
         dlg.close()
         mb = QMessageBox()
@@ -196,6 +280,12 @@ def run_app():
         mb.exec()
     else:
         dlg.close()
+
+    # ✅ mostrar changelog SOLO en el primer arranque post-update
+    try:
+        _show_changelog_if_pending(_app_root(), app_icon=app_icon)
+    except Exception:
+        log.exception("No se pudo mostrar el changelog")
 
     # ===== normal arranque =====
     ensure_data_seed_if_empty()
