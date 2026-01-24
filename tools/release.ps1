@@ -64,6 +64,57 @@ function Remove-Dir-Robust([string]$path) {
   } catch {}
 }
 
+function Update-ChangelogHeader([string]$Path, [string]$Version) {
+  $date = (Get-Date).ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+
+  if (!(Test-Path $Path)) {
+    # si no existe, lo creamos mínimo (pero en tu caso ya existe)
+    $tpl = @"
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+
+Versión: $Version
+Fecha: $date
+
+Resumen
+- Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
+
+Cambios y mejoras
+- [Mejora] ________________________________________________
+- [Mejora] ________________________________________________
+- [Mejora] ________________________________________________
+
+Correcciones
+- [Fix] _________________________________________________
+- [Fix] _________________________________________________
+- [Fix] _________________________________________________
+
+Notas importantes
+- _________________________________________________
+- _________________________________________________
+
+Compatibilidad
+- No se requieren acciones adicionales para continuar usando el sistema.
+- La base de datos local y la configuración del usuario se conservan.
+
+Soporte
+- Si notas algún comportamiento inesperado después de actualizar, reinicia la aplicación y vuelve a intentar.
+- Si el problema persiste, llama al soporte técnico.
+"@
+    Set-ContentUtf8NoBOM -Path $Path -Text $tpl
+    return
+  }
+
+  $txt = Get-Content -Raw -LiteralPath $Path
+
+  # soporta "Versión" con o sin tilde por si acaso
+  $txt2 = [regex]::Replace($txt, '(?m)^\s*Versi[oó]n\s*:\s*.*$', "Versión: $Version")
+  $txt2 = [regex]::Replace($txt2, '(?m)^\s*Fecha\s*:\s*.*$', "Fecha: $date")
+
+  if ($txt2 -ne $txt) {
+    Set-ContentUtf8NoBOM -Path $Path -Text $txt2
+  }
+}
+
 # --- venv ---
 if (-not $VenvPath -or -not (Test-Path $VenvPath)) {
   $cand1 = Join-Path $ProjectRoot ".venv"
@@ -112,6 +163,10 @@ Write-Host "Bump='$Bump' OK. ($cur -> $next)"
 
 $verTxt = $verTxt -replace '__version__\s*=\s*"[^"]+"', "__version__ = `"$next`""
 Set-Content -Path $verFile -Value $verTxt -Encoding UTF8
+
+$changelogPath = Join-Path $ProjectRoot "changelog.txt"
+Update-ChangelogHeader -Path $changelogPath -Version $next
+Write-Host "OK: changelog actualizado (Versión/Fecha) -> $changelogPath"
 
 # 2) patch .iss
 $issFull = Join-Path $ProjectRoot $IssPath
@@ -313,6 +368,7 @@ $filesToAdd = @(
   "src/updater.py",
   "tools/apply_update.py",
   $IssPath,
+  "changelog.txt",                 # ✅ se commitea con versión/fecha actualizadas
   ("Output\" + $setupName),
   ("Output/updates/" + $next),
   "config/cotizador.json"

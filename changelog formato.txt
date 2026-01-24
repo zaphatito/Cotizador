@@ -1,0 +1,29 @@
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+
+Versión: 1.2.10
+Fecha: 2026-01-24
+
+Resumen
+- Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
+
+Cambios y mejoras
+- [Mejora] ________________________________________________
+- [Mejora] ________________________________________________
+- [Mejora] ________________________________________________
+
+Correcciones
+- [Fix] _________________________________________________
+- [Fix] _________________________________________________
+- [Fix] _________________________________________________
+
+Notas importantes
+- _________________________________________________
+- _________________________________________________
+
+Compatibilidad
+- No se requieren acciones adicionales para continuar usando el sistema.
+- La base de datos local y la configuración del usuario se conservan.
+
+Soporte
+- Si notas algún comportamiento inesperado después de actualizar, reinicia la aplicación y vuelve a intentar.
+- Si el problema persiste, llama al soporte técnico.
