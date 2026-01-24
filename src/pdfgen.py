@@ -369,7 +369,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
 
         if is_alt:
-            c.setFont(FONT_BOLD, 4)  # ✅ -2 vs 6
+            c.setFont(FONT_BOLD, 5)  # ✅ -2 vs 6
             col_codigo   = _anchor_x("codigo",   shift_x)
             col_producto = _anchor_x("producto", shift_x)
             c.drawString(col_codigo,   header_y, "CÓDIGO")
@@ -452,7 +452,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             if it.get("observacion"):
                 full_name += f" | {it['observacion']}"
 
-            body_fs = 6 if is_alt else 9  # ✅ -2 vs 7
+            body_fs = 7 if is_alt else 9  # ✅ -2 vs 7
             c.setFont(FONT_REG, body_fs)
 
             prod_lines = _wrap_smart(c, full_name, max_prod_width, FONT_REG, body_fs)
