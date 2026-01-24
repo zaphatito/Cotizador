@@ -229,6 +229,14 @@ if (Test-Path $maybeShm) { Remove-Item -Force $maybeShm }
 
 Set-ContentUtf8NoBOM -Path (Join-Path $distDir "version.txt") -Text $next
 
+$changelogPath = Join-Path $ProjectRoot "changelog.txt"
+if (Test-Path $changelogPath) {
+  Copy-Item -Force $changelogPath (Join-Path $distDir "changelog.txt")
+  Write-Host "OK: changelog.txt -> dist\SistemaCotizaciones\changelog.txt"
+} else {
+  Write-Host "WARN: no existe changelog.txt en la raíz: $changelogPath"
+}
+
 # 4) build apply_update.exe
 $applyScript = Join-Path $ProjectRoot "tools\apply_update.py"
 if (!(Test-Path $applyScript)) { throw "No existe tools\apply_update.py" }

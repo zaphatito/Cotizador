@@ -16,6 +16,10 @@ if cfg.exists():
 
 datas.append((str(ROOT / "templates"), "templates"))
 
+changelog = ROOT / "changelog.txt"
+if changelog.exists():
+    datas.append((str(changelog), "."))
+
 # Solo lo que tú usas (Widgets/Gui/Core)
 hiddenimports = [
     "PySide6.QtCore",
@@ -59,7 +63,6 @@ excludes = [
     # Pillow: no uso AVIF
     "PIL._avif",
     "PIL.AvifImagePlugin",
-
 ]
 
 a = Analysis(
