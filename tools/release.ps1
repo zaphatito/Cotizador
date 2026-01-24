@@ -64,17 +64,47 @@ function Remove-Dir-Robust([string]$path) {
   } catch {}
 }
 
+function Read-TextAuto([string]$Path) {
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  $sr = New-Object System.IO.StreamReader($Path, $utf8, $true)
+  try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+}
+
+function Set-ContentUtf8BOM([string]$Path, [string]$Text) {
+  $enc = New-Object System.Text.UTF8Encoding($true)
+  [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+function Fix-MojibakeIfNeeded([string]$Text) {
+  $pat = '(\u00C3|\u00C2|\u00E2)'   # Ã, Â, â
+
+  if ($Text -notmatch $pat) { return $Text }
+
+  try {
+    $win1252 = [System.Text.Encoding]::GetEncoding(1252)
+    $bytes   = $win1252.GetBytes($Text)
+    $fixed   = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+    $before = ([regex]::Matches($Text,  $pat).Count)
+    $after  = ([regex]::Matches($fixed, $pat).Count)
+
+    if ($after -lt $before) { return $fixed }
+  } catch {}
+
+  return $Text
+}
+
 function Update-ChangelogHeader([string]$Path, [string]$Version) {
   $date = (Get-Date).ToString("yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+  $verLine  = "Versi$([char]0x00F3)n: $Version"  # ó
+  $dateLine = "Fecha: $date"
 
   if (!(Test-Path $Path)) {
-    # si no existe, lo creamos mínimo (pero en tu caso ya existe)
     $tpl = @"
-SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+SISTEMA DE COTIZACIONES - REGISTRO DE CAMBIOS
 
-Versión: $Version
-Fecha: $date
-
+$verLine
+$dateLine
 Resumen
 - Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
 
@@ -104,14 +134,28 @@ Soporte
     return
   }
 
-  $txt = Get-Content -Raw -LiteralPath $Path
+  $txt = Read-TextAuto -Path $Path
+  $txt = Fix-MojibakeIfNeeded -Text $txt
 
-  # soporta "Versión" con o sin tilde por si acaso
-  $txt2 = [regex]::Replace($txt, '(?m)^\s*Versi[oó]n\s*:\s*.*$', "Versión: $Version")
-  $txt2 = [regex]::Replace($txt2, '(?m)^\s*Fecha\s*:\s*.*$', "Fecha: $date")
+  # Regex: soporta Version / Versión (con ó via \u00F3)
+  $verPattern  = '(?mi)^\s*Versi(?:o|\u00F3)n\s*:\s*.*$|^\s*Version\s*:\s*.*$'
+  $datePattern = '(?mi)^\s*Fecha\s*:\s*.*$'
+
+  $txt2 = [regex]::Replace($txt,  $verPattern,  $verLine)
+  $txt2 = [regex]::Replace($txt2, $datePattern, $dateLine)
+
+  # Si no encontró líneas, las inserta debajo del título (primera línea)
+  if ($txt2 -eq $txt) {
+    if ($txt2 -notmatch '(?mi)^\s*Versi(?:o|\u00F3)n\s*:|(?mi)^\s*Version\s*:') {
+      $txt2 = $txt2 -replace '(?m)^(.*\r?\n)', "`$1`r`n$verLine`r`n"
+    }
+    if ($txt2 -notmatch '(?mi)^\s*Fecha\s*:') {
+      $txt2 = $txt2 -replace '(?m)^(.*\r?\n)', "`$1`r`n$dateLine`r`n"
+    }
+  }
 
   if ($txt2 -ne $txt) {
-    Set-ContentUtf8NoBOM -Path $Path -Text $txt2
+    Set-ContentUtf8BOM -Path $Path -Text $txt2
   }
 }
 

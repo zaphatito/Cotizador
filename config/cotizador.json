@@ -5,11 +5,11 @@
     "files":  [
                   {
                       "path":  "changelog.txt",
-                      "sha256":  "2a56149e0420bb81c294dc36fd70564008ae40170d064a249f06187e80a0bf17"
+                      "sha256":  "fda87e9bd5afdefc8abb07172b81dba3f2db60800adb42eb3dce4ad0d13d6b45"
                   },
                   {
                       "path":  "SistemaCotizaciones.exe",
-                      "sha256":  "72438d519af08315727b291783d1f30ca6da24e5f8d5af5f8f85c92c5a3569b9"
+                      "sha256":  "b3315cf374d05a8ae7be641103e231eeaaf98a33f7711765c623da449e98b053"
                   },
                   {
                       "path":  "version.txt",
@@ -17,7 +17,7 @@
                   },
                   {
                       "path":  "updater/apply_update.exe",
-                      "sha256":  "7052ca24f6286acf885486e0b596b63d38b8051e5dce66bdab4c2f77a9172de2"
+                      "sha256":  "4095d29796572b84332f878ab7ea1edf79b9377209486bb70bb12013ece3eaba"
                   },
                   {
                       "path":  "_internal/api-ms-win-core-console-l1-1-0.dll",
@@ -181,11 +181,11 @@
                   },
                   {
                       "path":  "_internal/base_library.zip",
-                      "sha256":  "01b57b15ae64cef7592bb0dcdb6748a1313a0c8cba223744dd9eade21383ac1f"
+                      "sha256":  "ef124b61d0de3df02b3c54d28373a954d93d9bcd689af93089c75ffaa0e96d62"
                   },
                   {
                       "path":  "_internal/changelog.txt",
-                      "sha256":  "2a56149e0420bb81c294dc36fd70564008ae40170d064a249f06187e80a0bf17"
+                      "sha256":  "fda87e9bd5afdefc8abb07172b81dba3f2db60800adb42eb3dce4ad0d13d6b45"
                   },
                   {
                       "path":  "_internal/libcrypto-3.dll",
@@ -305,7 +305,7 @@
                   },
                   {
                       "path":  "_internal/config/cotizador.json",
-                      "sha256":  "deae29980424ed5f7226464cbff79a9b43709d9c7b05cab96461ff55a458695f"
+                      "sha256":  "72a3dea753623bb5f2c4fa76accfbb99b957e91f07a433d216a644212f427ba6"
                   },
                   {
                       "path":  "_internal/dateutil/zoneinfo/dateutil-zoneinfo.tar.gz",
@@ -3806,5 +3806,5 @@
     "mandatory":  false,
     "notes":  "Release 1.2.12",
     "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.12.exe",
-    "sha256":  "1CE337EA226BA087A02F5F1930A52B5F8E9A8B7756E1CB9E02DBFCDB57D4666D"
+    "sha256":  "D2AF32EC9824FE85334FC1E6201D36ADAE341E3F3E59E685B22D824E411EB37A"
 }
