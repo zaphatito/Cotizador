@@ -1,23 +1,23 @@
 {
-    "version":  "1.2.12",
+    "version":  "1.2.13",
     "type":  "files",
-    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/1.2.12/",
+    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/1.2.13/",
     "files":  [
                   {
                       "path":  "changelog.txt",
-                      "sha256":  "fda87e9bd5afdefc8abb07172b81dba3f2db60800adb42eb3dce4ad0d13d6b45"
+                      "sha256":  "6b47a3f40991ed0c245453bf859217da0212df0ce5e9d00a99368b8a3d1644ee"
                   },
                   {
                       "path":  "SistemaCotizaciones.exe",
-                      "sha256":  "b3315cf374d05a8ae7be641103e231eeaaf98a33f7711765c623da449e98b053"
+                      "sha256":  "d0159e1424748f4cb9e6905fd3c4de950b342c73e64950c5cd524ecf55ffc9ec"
                   },
                   {
                       "path":  "version.txt",
-                      "sha256":  "4e2b85bed6a382e7a6ad7dfa29c998d989fb2e565ac56acd296e22def3bbfa2c"
+                      "sha256":  "3559958f5a80ab5176f67b450bd5de5365c2fff440cc47906d076967a56aadfa"
                   },
                   {
                       "path":  "updater/apply_update.exe",
-                      "sha256":  "4095d29796572b84332f878ab7ea1edf79b9377209486bb70bb12013ece3eaba"
+                      "sha256":  "5c4897969e6d6dfd8b73576153d56442db14631f6f7f2120a28cbd14d961523a"
                   },
                   {
                       "path":  "_internal/api-ms-win-core-console-l1-1-0.dll",
@@ -181,11 +181,11 @@
                   },
                   {
                       "path":  "_internal/base_library.zip",
-                      "sha256":  "ef124b61d0de3df02b3c54d28373a954d93d9bcd689af93089c75ffaa0e96d62"
+                      "sha256":  "90bfadfdab8d11787bbfd2b65f60fa94b3e16628da1325f81f3720e480a1170e"
                   },
                   {
                       "path":  "_internal/changelog.txt",
-                      "sha256":  "fda87e9bd5afdefc8abb07172b81dba3f2db60800adb42eb3dce4ad0d13d6b45"
+                      "sha256":  "6b47a3f40991ed0c245453bf859217da0212df0ce5e9d00a99368b8a3d1644ee"
                   },
                   {
                       "path":  "_internal/libcrypto-3.dll",
@@ -305,7 +305,7 @@
                   },
                   {
                       "path":  "_internal/config/cotizador.json",
-                      "sha256":  "72a3dea753623bb5f2c4fa76accfbb99b957e91f07a433d216a644212f427ba6"
+                      "sha256":  "462f802624924b900cb1e76ef091d374a047dad9c91813371b0f85a0706984a4"
                   },
                   {
                       "path":  "_internal/dateutil/zoneinfo/dateutil-zoneinfo.tar.gz",
@@ -3804,7 +3804,7 @@
 
                ],
     "mandatory":  false,
-    "notes":  "Release 1.2.12",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.12.exe",
-    "sha256":  "D2AF32EC9824FE85334FC1E6201D36ADAE341E3F3E59E685B22D824E411EB37A"
+    "notes":  "Release 1.2.13",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_1.2.13.exe",
+    "sha256":  "FC4ABD064280AB010916E9982B811BDE58FF93B8B5B251DC7E08D9FBE9480013"
 }

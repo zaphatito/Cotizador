@@ -1,16 +1,14 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 1.2.12
-Fecha: 2026-01-24
+Versión: 1.2.13
+Fecha: 2026-01-27
 
 Resumen
 - Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
 
 Cambios y mejoras
-- [Mejora] Se implementó el registro de cambios y mejoras
+- [Mejora] Se implementó un contador de esencias y botellas en la previsualización de la cotización
 
-Correcciones
-- [Fix] Se aumentó el tamaño de la letra del pdf
-
+- [Cambio] (Perú) ahora las cantidades en las esencias se ingresa como entero y se refleja como decimales, ejemplo: escribir 50 ahora se refleja como 0.050
 
 
 Compatibilidad

@@ -1,4 +1,6 @@
 # src/models.py
+import re
+
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush
 
@@ -70,6 +72,58 @@ def _price_from_tier(prod: dict, tier: str) -> float:
     if t == "base":
         return _first_from_aliases(prod, BASE_ALIASES)
     return 0.0
+
+
+def _parse_qty_peru_cats(value) -> float:
+    """
+    PERÚ + CATS: "shift decimal" con 3 decimales implícitos cuando NO hay separador decimal.
+
+    Ejemplos (entrada -> valor guardado):
+      "2"      -> 0.002
+      "50"     -> 0.050
+      "100"    -> 0.100
+      "1000"   -> 1.000
+      "1234"   -> 1.234
+
+    Si el usuario escribe/pega con '.' o ',':
+      "1.23456" -> 1.235 (redondeo a 3)
+      "0,5"     -> 0.500
+
+    Siempre:
+      - máximo 3 decimales (round)
+      - mínimo permitido: 0.001
+    """
+    s = str(value).strip()
+    if not s:
+        return 0.001
+
+    # Decimal explícito: respetar y redondear a 3
+    if "." in s or "," in s:
+        t = s.replace(",", ".")
+        t = re.sub(r"[^\d\.\-]", "", t)
+        try:
+            x = float(t) if t else 0.0
+        except Exception:
+            x = 0.0
+        x = round(x, 3)
+        if x < 0.001:
+            x = 0.001
+        return x
+
+    # Solo dígitos: shift a 3 decimales
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return 0.001
+
+    try:
+        x = int(digits) / 1000.0
+    except Exception:
+        x = 0.0
+
+    x = round(x, 3)
+    if x < 0.001:
+        x = 0.001
+    return x
 
 
 class ItemsModel(QAbstractTableModel):
@@ -410,7 +464,6 @@ class ItemsModel(QAbstractTableModel):
             except Exception:
                 pass
 
-
         if role == Qt.ForegroundRole and col == 4:
             if it.get("precio_override") is not None:
                 return QBrush(Qt.darkMagenta)
@@ -457,12 +510,12 @@ class ItemsModel(QAbstractTableModel):
                 cat = (it.get("categoria") or "").upper()
                 if APP_COUNTRY == "PERU" and cat in CATS:
                     try:
-                        return f"{float(it.get('cantidad', 0.0)):.3f}"
+                        return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
-                        return "0.000"
+                        return "0.001"
                 else:
                     try:
-                        return str(int(round(float(it.get('cantidad', 0)))))
+                        return str(int(round(float(nz(it.get('cantidad'), 0)))))
                     except Exception:
                         return "1"
             elif col == 4:
@@ -481,7 +534,7 @@ class ItemsModel(QAbstractTableModel):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
-                        return "0.000"
+                        return "0.001"
                 try:
                     return str(int(round(float(nz(it.get("cantidad"), 0)))))
                 except Exception:
@@ -527,8 +580,6 @@ class ItemsModel(QAbstractTableModel):
         row = index.row()
         it = self._items[row]
         col = index.column()
-
-        import re
 
         # ----- Columna de DESCUENTO (2) -----
         if col == 2:
@@ -623,16 +674,15 @@ class ItemsModel(QAbstractTableModel):
         if col == 3:
             old_qty = float(nz(it.get("cantidad"), 0.0))
             cat = (it.get("categoria") or "").upper()
-            txt = str(value).strip().lower().replace(",", ".")
-            txt = re.sub(r"[^\d\.\-]", "", txt)
+            txt_raw = str(value).strip()
 
             try:
                 if APP_COUNTRY == "PERU" and (cat in CATS):
-                    new_qty = float(txt) if txt else 0.001
-                    if new_qty < 0.001:
-                        new_qty = 0.001
-                    new_qty = round(new_qty, 3)
+                    new_qty = _parse_qty_peru_cats(txt_raw)
+                    # ya viene round(3) y min 0.001
                 else:
+                    txt = txt_raw.lower().replace(",", ".")
+                    txt = re.sub(r"[^\d\.\-]", "", txt)
                     new_qty = int(float(txt)) if txt else 1
                     if new_qty < 1:
                         new_qty = 1

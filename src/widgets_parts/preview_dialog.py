@@ -1,6 +1,8 @@
 # src/widgets_parts/preview_dialog.py
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QBrush
 from PySide6.QtWidgets import (
@@ -18,6 +20,29 @@ from PySide6.QtWidgets import (
 from ..config import APP_COUNTRY, CATS, convert_from_base, id_label_for_country
 from ..pricing import cantidad_para_mostrar
 from ..utils import fmt_money_ui, nz
+
+
+def _fmt_qty(x: float) -> str:
+    """Formatea cantidades: si es entero, sin decimales; si no, con decimales limpios."""
+    try:
+        if math.isfinite(x) and math.isclose(x, round(x), abs_tol=1e-9):
+            return str(int(round(x)))
+    except Exception:
+        pass
+    return f"{x:.3f}".rstrip("0").rstrip(".")
+
+
+def _esencia_a_gramos(cant: float) -> float:
+    """
+    Convierte 'cantidad' a gramos para categorías en CATS,
+    consistente con cómo se suele mostrar en UI:
+
+    - VE/PY: 1 unidad = 50 g
+    - Otros (ej. PERÚ): cantidad está en KG => gramos = KG * 1000
+    """
+    if APP_COUNTRY in ("VENEZUELA", "PARAGUAY"):
+        return cant * 50.0
+    return cant * 1000.0
 
 
 def show_preview_dialog(
@@ -53,6 +78,10 @@ def show_preview_dialog(
     subtotal_bruto_base = 0.0
     descuento_total_base = 0.0
     total_neto_base = 0.0
+
+    # Totales extra
+    total_botellas = 0.0
+    total_esencias_g = 0.0
 
     for it in items:
         r = tbl.rowCount()
@@ -92,6 +121,19 @@ def show_preview_dialog(
         for col, val in enumerate(vals):
             tbl.setItem(r, col, QTableWidgetItem(str(val)))
 
+        # Categoría / cantidades para labels
+        try:
+            cat_u = (it.get("categoria") or "").upper()
+            cant = float(nz(it.get("cantidad"), 0.0))
+
+            if cat_u == "BOTELLAS":
+                total_botellas += cant
+
+            if cat_u in CATS:
+                total_esencias_g += _esencia_a_gramos(cant)
+        except Exception:
+            pass
+
         # Chequeo de stock visual
         try:
             cat_u = (it.get("categoria") or "").upper()
@@ -106,6 +148,12 @@ def show_preview_dialog(
             pass
 
     v.addWidget(tbl)
+
+    # Labels adicionales (solo si aplica)
+    if total_botellas > 0:
+        v.addWidget(QLabel(f"<b>Total de Botellas:</b> {_fmt_qty(total_botellas)}"))
+    if total_esencias_g > 0:
+        v.addWidget(QLabel(f"<b>Total de Esencias:</b> {_fmt_qty(total_esencias_g)} g"))
 
     v.addWidget(
         QLabel(
