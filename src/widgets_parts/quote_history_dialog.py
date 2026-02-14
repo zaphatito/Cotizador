@@ -36,9 +36,10 @@ from ..pdfgen import generar_pdf
 from .menu import MainMenuWindow, RatesDialog
 from .rates_history_dialog import RatesHistoryDialog
 from .quote_status_dialog import QuoteStatusDialog
-
-# ✅ fuente única de colores + contraste
 from .status_colors import bg_for_status, best_text_color_for_bg
+
+# ✅ NUEVO: dock assistant
+from ..ai.assistant import attach_assistant
 
 log = get_logger(__name__)
 
@@ -119,7 +120,6 @@ class QuotesTableModel(QAbstractTableModel):
         self.show_payment = bool(show_payment)
         doc_hdr = _doc_header_for_country(APP_COUNTRY)
 
-        # Fecha/Hora | N° | Cliente | Doc | Tel | Estado | (Pago) | Total | Moneda | Items | PDF
         if self.show_payment:
             self.HEADERS = [
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
@@ -174,7 +174,6 @@ class QuotesTableModel(QAbstractTableModel):
         r = self.rows[index.row()]
         c = index.column()
 
-        # 2) Cotizaciones del día en negrita
         if role == Qt.FontRole:
             if _is_today(r.get("created_at")):
                 f = QFont()
@@ -182,12 +181,10 @@ class QuotesTableModel(QAbstractTableModel):
                 return f
             return None
 
-        # Fondo por estado
         if role == Qt.BackgroundRole:
             bg = self._row_bg(r)
             return QBrush(bg) if bg is not None else None
 
-        # Texto por contraste según fondo
         if role == Qt.ForegroundRole:
             bg = self._row_bg(r)
             if bg is None:
@@ -343,6 +340,14 @@ class QuoteHistoryWindow(QMainWindow):
         self.catalog_manager = catalog_manager
         self.quote_events = quote_events
 
+        # ✅ Asistente dock (reemplaza ChatQuoteDialog)
+        self.assistant = attach_assistant(
+            self,
+            catalog_manager=self.catalog_manager,
+            quote_events=self.quote_events,
+            app_icon=self.windowIcon(),
+        )
+
         show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
         self.model = QuotesTableModel(show_payment=show_payment)
 
@@ -393,6 +398,10 @@ class QuoteHistoryWindow(QMainWindow):
 
         self.btn_new = QPushButton("➕ Nueva cotización")
         self.btn_new.clicked.connect(self._open_new_quote)
+
+        self.btn_chat = QPushButton("💬 Chat")
+        self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra.")
+        self.btn_chat.clicked.connect(self._open_chat)
 
         self.btn_menu = QPushButton("☰ Menú")
         self.btn_menu.clicked.connect(self._open_main_menu)
@@ -450,6 +459,7 @@ class QuoteHistoryWindow(QMainWindow):
         nav.addStretch(1)
         nav.addWidget(btn_prev)
         nav.addWidget(btn_next)
+        nav.addWidget(self.btn_chat, 0)
         main.addLayout(nav)
 
         actions = QHBoxLayout()
@@ -549,9 +559,11 @@ class QuoteHistoryWindow(QMainWindow):
         ok = self._has_products()
         self.btn_new.setEnabled(ok)
         self.btn_dup.setEnabled(ok)
+        self.btn_chat.setEnabled(ok)
         tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
         self.btn_new.setToolTip("" if ok else tip)
         self.btn_dup.setToolTip("" if ok else tip)
+        self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra." if ok else tip)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -703,6 +715,15 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addSeparator()
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _open_chat(self):
+        if not self._has_products():
+            QMessageBox.warning(self, "Sin productos", "Usa ☰ Menú → Actualizar productos.")
+            return
+        try:
+            self.assistant.toggle()
+        except Exception:
+            pass
+        
     def _change_status(self):
         qid = self._selected_quote_id()
         if not qid:

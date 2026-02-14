@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, QStringListModel
-from PySide6.QtWidgets import QCompleter
+from PySide6.QtWidgets import QCompleter, QApplication
 
 from ..config import listing_allows_products, listing_allows_presentations, ALLOW_NO_STOCK
 from ..utils import nz
@@ -13,7 +13,6 @@ def build_completer_strings(productos, botellas_pc):
 
     if listing_allows_products():
         for p in productos or []:
-            # ✅ NO sugerir sin stock si está deshabilitado
             if (not ALLOW_NO_STOCK) and float(nz(p.get("cantidad_disponible"), 0.0)) <= 0.0:
                 continue
 
@@ -25,17 +24,64 @@ def build_completer_strings(productos, botellas_pc):
 
     if listing_allows_presentations():
         for pc in botellas_pc or []:
-            # ✅ NO sugerir sin stock si está deshabilitado
             if (not ALLOW_NO_STOCK) and float(nz(pc.get("cantidad_disponible"), 0.0)) <= 0.0:
                 continue
-
             sugs.append(f"{pc.get('id')} - Presentación (PC) - {pc.get('nombre', '')}")
 
     return sugs
 
 
 class CompleterMixin:
+    def _hide_all_client_popups(self):
+        for k in ("_ai_cli", "_ai_doc", "_ai_tel"):
+            c = getattr(self, k, None)
+            try:
+                if c is not None:
+                    c.hide_popup()
+            except Exception:
+                pass
+
+    def _on_ai_client_picked(self, payload: dict):
+        """
+        Rellena cliente / DNI / teléfono desde el payload.
+        Evita popups duplicados cerrando todos primero.
+        """
+        try:
+            # ✅ cierra todos los popups de cliente (por si 2 quedaron abiertos)
+            self._hide_all_client_popups()
+
+            cli = str(payload.get("cliente") or "").strip()
+            doc = str(payload.get("cedula") or "").strip()
+            tel = str(payload.get("telefono") or "").strip()
+
+            # setText() ya NO abrirá popups porque SmartCompleter usa textEdited
+            if cli:
+                self.entry_cliente.setText(cli)
+            if doc:
+                self.entry_cedula.setText(doc)
+            if tel:
+                self.entry_telefono.setText(tel)
+
+            # mover foco según el campo donde estabas
+            w = QApplication.focusWidget()
+            if w is getattr(self, "entry_cliente", None):
+                self._go_doc()
+            elif w is getattr(self, "entry_cedula", None):
+                self._go_phone()
+            elif w is getattr(self, "entry_telefono", None):
+                self._go_product_search()
+
+        except Exception:
+            pass
+
     def _build_completer(self):
+        if bool(getattr(self, "_use_ai_completer", False)):
+            try:
+                self._setup_ai_completers()
+            except Exception:
+                pass
+            return
+
         self._sug_model = QStringListModel(
             build_completer_strings(self.productos, self._botellas_pc)
         )

@@ -85,12 +85,21 @@ class SistemaCotizaciones(
             self._rates,
         )
 
+        self._use_ai_completer = True
         self._build_ui()
         self.entry_cliente.textChanged.connect(self._update_title_with_client)
         self._update_title_with_client(self.entry_cliente.text())
         self._build_completer()
 
         self.model.item_added.connect(self._focus_last_row)
+
+
+        # --- Asistente tipo chat (acciones con confirmación) ---
+        try:
+            from ..ai.assistant import attach_assistant
+            self._assistant = attach_assistant(self)
+        except Exception:
+            self._assistant = None
 
         # Suscripción a catálogo global
         if self._catalog_manager is not None:

@@ -89,35 +89,48 @@ class MainMenuWindow(QMainWindow):
     _instance = None
 
     @classmethod
-    def show_singleton(cls, *, catalog_manager, quote_events, app_icon: QIcon, parent=None):
+    def show_singleton(cls, *, catalog_manager, quote_events, app_icon: QIcon, parent=None, assistant_controller=None):
         if cls._instance is not None:
             cls._instance.show()
             cls._instance.raise_()
             cls._instance.activateWindow()
             return cls._instance
 
-        win = cls(catalog_manager=catalog_manager, quote_events=quote_events, app_icon=app_icon, parent=parent)
+        # auto-detect (para no obligarte a cambiar el caller)
+        if assistant_controller is None and parent is not None:
+            for attr in ("assistant_controller", "_assistant_controller", "ai_assistant", "_ai_assistant"):
+                if hasattr(parent, attr):
+                    assistant_controller = getattr(parent, attr, None)
+                    if assistant_controller is not None:
+                        break
+
+        win = cls(
+            catalog_manager=catalog_manager,
+            quote_events=quote_events,
+            app_icon=app_icon,
+            parent=parent,
+            assistant_controller=assistant_controller,
+        )
         cls._instance = win
         win.show()
         win.raise_()
         win.activateWindow()
         return win
 
-    def __init__(self, *, catalog_manager, quote_events, app_icon: QIcon, parent=None):
+    def __init__(self, *, catalog_manager, quote_events, app_icon: QIcon, parent=None, assistant_controller=None):
         super().__init__(parent)
         self.setWindowTitle("Menú")
-        self.resize(520, 400)
+        self.resize(520, 420)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
 
         self.catalog_manager = catalog_manager
         self.quote_events = quote_events
         self._app_icon = app_icon
+        self.assistant_controller = assistant_controller
 
-        # solo por si quieres mantener referencias
         self._open_windows: list[SistemaCotizaciones] = []
 
-        # Si el catálogo se actualiza desde otra ventana, refrescar estado del botón
         if self.catalog_manager is not None:
             try:
                 self.catalog_manager.catalog_updated.connect(self._on_catalog_updated)
@@ -128,6 +141,7 @@ class MainMenuWindow(QMainWindow):
         lay = QVBoxLayout(w)
 
         self.btn_new = QPushButton("➕ Crear nueva cotización")
+        btn_chat_style = QPushButton("🎨 Personalizar chat")
         btn_rates = QPushButton("💱 Configurar tasas de cambio")
         btn_rates_hist = QPushButton("📈 Ver histórico de tasas")
         btn_update = QPushButton("📦 Actualizar productos")
@@ -135,6 +149,7 @@ class MainMenuWindow(QMainWindow):
         btn_close = QPushButton("Cerrar menú")
 
         self.btn_new.clicked.connect(self._open_new_quote)
+        btn_chat_style.clicked.connect(self._open_chat_style)
         btn_rates.clicked.connect(self._open_rates)
         btn_rates_hist.clicked.connect(self._open_rates_history)
         btn_update.clicked.connect(self._update_products_choose_excel)
@@ -142,6 +157,8 @@ class MainMenuWindow(QMainWindow):
         btn_close.clicked.connect(self.close)
 
         lay.addWidget(self.btn_new)
+        lay.addWidget(btn_chat_style)
+        lay.addSpacing(6)
         lay.addWidget(btn_rates)
         lay.addWidget(btn_rates_hist)
         lay.addWidget(btn_update)
@@ -152,7 +169,6 @@ class MainMenuWindow(QMainWindow):
 
         self.setCentralWidget(w)
 
-        # ✅ Igual que histórico: no permitir "Nueva cotización" si no hay productos
         self._apply_catalog_gate()
 
     def closeEvent(self, event):
@@ -167,6 +183,7 @@ class MainMenuWindow(QMainWindow):
 
     def _on_catalog_updated(self, *_):
         self._apply_catalog_gate()
+        self._rebuild_ai_index_soon()
 
     def _has_products(self) -> bool:
         try:
@@ -181,7 +198,44 @@ class MainMenuWindow(QMainWindow):
         tip = "Primero importa/actualiza productos para poder crear cotizaciones."
         self.btn_new.setToolTip("" if ok else tip)
 
-    # ✅ La cotización NO depende del menú: al abrirla, cerramos el menú totalmente
+    def _rebuild_ai_index_soon(self):
+        def _run():
+            try:
+                from ..ai.search_index import LocalSearchIndex
+                idx = LocalSearchIndex(resolve_db_path())
+                idx.ensure_and_rebuild()
+            except Exception:
+                return
+        QTimer.singleShot(0, _run)
+
+    def _open_chat_style(self):
+        """
+        Abre el widget de personalización del chat (QSettings por dispositivo).
+        """
+        dock = None
+        try:
+            if self.assistant_controller is not None:
+                dock = getattr(self.assistant_controller, "dock", None)
+        except Exception:
+            dock = None
+
+        if dock is None:
+            QMessageBox.information(
+                self,
+                "Chat no disponible",
+                "No encontré el panel del asistente.\n\n"
+                "Abre el chat (Ctrl+K) para inicializarlo y luego vuelve al menú."
+            )
+            self._close_soon()
+            return
+
+        try:
+            dock.open_personalization_dialog()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo abrir la personalización:\n{e}")
+
+        self._close_soon()
+
     def _open_new_quote(self):
         if not self._has_products():
             QMessageBox.warning(
@@ -246,8 +300,8 @@ class MainMenuWindow(QMainWindow):
 
             self.catalog_manager.set_catalog(df_productos, df_presentaciones)
 
-            # ✅ refresca botón crear cotización
             self._apply_catalog_gate()
+            self._rebuild_ai_index_soon()
 
             QMessageBox.information(
                 self,
@@ -265,7 +319,7 @@ class MainMenuWindow(QMainWindow):
 
     def _open_quotes_folder(self):
         try:
-            os.startfile(COTIZACIONES_DIR)  # Windows
+            os.startfile(COTIZACIONES_DIR)
         except Exception:
             pass
         self._close_soon()

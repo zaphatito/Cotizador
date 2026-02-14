@@ -16,3 +16,10 @@ build/
 *.db-wal
 *.db-shm
 sqlModels/app.sqlite3
+
+
+/vendor/ollama_models/
+/vendor/ollama/*.zip
+
+# Binarios locales (no versionar)
+vendor/ollama/

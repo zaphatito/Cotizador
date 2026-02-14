@@ -2,7 +2,7 @@
 import re
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
-from PySide6.QtGui import QBrush
+from PySide6.QtGui import QBrush, QFont
 
 from ..config import APP_COUNTRY, CATS, convert_from_base
 from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
@@ -11,14 +11,11 @@ from ..logging_setup import get_logger
 
 log = get_logger(__name__)
 
-# Permitir edición de precio unitario en Paraguay y Perú
 CAN_EDIT_UNIT_PRICE = (APP_COUNTRY in ("PARAGUAY", "PERU"))
 
-# ===== PY: descuento base por Efectivo =====
 PY_CASH_BASE_PCT = 4.7619
 _PCT_EPS = 1e-6
 
-# ===== Alias de llaves de precios (para datasets heterogéneos) =====
 UNIT_ALIASES = ["precio_unidad", "precio_unitario", "precio_venta", "unitario"]
 OFFER_ALIASES = [
     "precio_oferta", "precio_oferta_base", "oferta",
@@ -35,6 +32,38 @@ MAX_ALIASES = [
     "precio_venta"
 ]
 BASE_ALIASES = ["precio_unitario", "precio_unidad", "precio_base_50g", "precio_venta"]
+
+
+def _norm_tier_name(tier: str) -> str:
+    """
+    Normaliza tier (inglés/español) a los nombres internos:
+    unitario|oferta|minimo|maximo|base
+    """
+    t = (tier or "").lower().strip()
+    mp = {
+        # oferta
+        "offer": "oferta",
+        "oferta": "oferta",
+        "promo": "oferta",
+        "promotion": "oferta",
+        # minimo
+        "min": "minimo",
+        "minimum": "minimo",
+        "minimo": "minimo",
+        # unitario
+        "unit": "unitario",
+        "unitario": "unitario",
+        "regular": "unitario",
+        # maximo
+        "max": "maximo",
+        "maximum": "maximo",
+        "maximo": "maximo",
+        "lista": "maximo",
+        "pvp": "maximo",
+        # base
+        "base": "base",
+    }
+    return mp.get(t, t)
 
 
 def _first_price(d: dict, *keys):
@@ -57,10 +86,9 @@ def _first_from_aliases(d: dict, aliases: list[str]) -> float:
 
 
 def _price_from_tier(prod: dict, tier: str) -> float:
-    """Obtiene precio por 'tier': unitario | oferta | minimo | maximo | base."""
     if not isinstance(prod, dict):
         return 0.0
-    t = (tier or "").lower().strip()
+    t = _norm_tier_name(tier)
     if t == "unitario":
         return _first_from_aliases(prod, UNIT_ALIASES)
     if t == "oferta":
@@ -75,29 +103,10 @@ def _price_from_tier(prod: dict, tier: str) -> float:
 
 
 def _parse_qty_peru_cats(value) -> float:
-    """
-    PERÚ + CATS: "shift decimal" con 3 decimales implícitos cuando NO hay separador decimal.
-
-    Ejemplos (entrada -> valor guardado):
-      "2"      -> 0.002
-      "50"     -> 0.050
-      "100"    -> 0.100
-      "1000"   -> 1.000
-      "1234"   -> 1.234
-
-    Si el usuario escribe/pega con '.' o ',':
-      "1.23456" -> 1.235 (redondeo a 3)
-      "0,5"     -> 0.500
-
-    Siempre:
-      - máximo 3 decimales (round)
-      - mínimo permitido: 0.001
-    """
     s = str(value).strip()
     if not s:
         return 0.001
 
-    # Decimal explícito: respetar y redondear a 3
     if "." in s or "," in s:
         t = s.replace(",", ".")
         t = re.sub(r"[^\d\.\-]", "", t)
@@ -110,7 +119,6 @@ def _parse_qty_peru_cats(value) -> float:
             x = 0.001
         return x
 
-    # Solo dígitos: shift a 3 decimales
     digits = re.sub(r"\D", "", s)
     if not digits:
         return 0.001
@@ -127,7 +135,6 @@ def _parse_qty_peru_cats(value) -> float:
 
 
 class ItemsModel(QAbstractTableModel):
-    # Nueva columna de descuento entre Producto y Cantidad
     HEADERS = ["Código", "Producto", "Descuento", "Cantidad", "Precio Unitario", "Subtotal"]
 
     item_added = Signal(int)
@@ -136,21 +143,115 @@ class ItemsModel(QAbstractTableModel):
     def __init__(self, items: list[dict]):
         super().__init__()
         self._items = items
-        self._py_cash_mode = False  # solo aplica en Paraguay
+        self._py_cash_mode = False
+        self._recs_preview: list[dict] = []
 
-    # =========================
-    # Modo PY: Tarjeta/Efectivo
-    # =========================
+    def set_recommendations_preview(self, recs: list[dict]):
+        recs = recs or []
+        built: list[dict] = []
+
+        for r in recs:
+            try:
+                code = str(r.get("codigo") or "").strip().upper()
+                if not code:
+                    continue
+
+                nombre = str(r.get("nombre") or "").strip()
+                pr = float(nz(r.get("price_base"), 0.0))
+                if pr <= 0:
+                    continue
+
+                cat = str(r.get("categoria") or "").strip()
+                cat_u = cat.upper()
+
+                qty_in = float(nz(r.get("qty"), 0.0))
+                if APP_COUNTRY == "PERU" and cat_u in CATS:
+                    qty = round(qty_in, 3)
+                    if qty < 0.001:
+                        qty = 0.001
+                else:
+                    qty = int(round(qty_in)) if qty_in else 1
+                    if qty < 1:
+                        qty = 1
+
+                score = float(nz(r.get("score"), 0.0))
+                reason = str(r.get("reason") or "").strip()
+
+                it = {
+                    "__preview": True,
+                    "_rec_reason": reason,
+                    "_rec_score": score,
+                    "_rec_kind": str(r.get("kind") or ""),
+                    "codigo": code,
+                    "producto": nombre or code,
+                    "cantidad": qty,
+                    "precio": pr,
+                    "precio_override": None,
+                    "precio_tier": None,
+                    "descuento_mode": None,
+                    "descuento_pct": 0.0,
+                    "descuento_monto": 0.0,
+                    "categoria": cat,
+                }
+
+                try:
+                    self._normalize_discount_and_totals(it, float(pr))
+                except Exception:
+                    it["subtotal_base"] = round(float(pr) * float(qty), 2)
+                    it["total"] = it["subtotal_base"]
+
+                built.append(it)
+            except Exception:
+                continue
+
+        if built == self._recs_preview:
+            return
+
+        self.beginResetModel()
+        self._recs_preview = built
+        self.endResetModel()
+
+    def clear_recommendations_preview(self):
+        if not self._recs_preview:
+            return
+        self.beginResetModel()
+        self._recs_preview = []
+        self.endResetModel()
+
+    def _is_preview_row(self, row: int) -> bool:
+        return row >= len(self._items)
+
+    def _row_item(self, row: int) -> dict | None:
+        if row < 0:
+            return None
+        if row < len(self._items):
+            return self._items[row]
+        i = row - len(self._items)
+        if 0 <= i < len(self._recs_preview):
+            return self._recs_preview[i]
+        return None
+
+    def is_preview_row(self, row: int) -> bool:
+        return self._is_preview_row(row)
+
+    def get_preview_payload(self, row: int) -> dict | None:
+        it = self._row_item(row)
+        if not it or not it.get("__preview"):
+            return None
+        return {
+            "codigo": str(it.get("codigo") or "").strip().upper(),
+            "qty": float(nz(it.get("cantidad"), 0.0)),
+            "price_base": float(nz(it.get("precio"), 0.0)),
+            "reason": str(it.get("_rec_reason") or "").strip(),
+            "score": float(nz(it.get("_rec_score"), 0.0)),
+            "kind": str(it.get("_rec_kind") or ""),
+            "categoria": str(it.get("categoria") or "").strip(),
+        }
+
     def is_py_cash_mode(self) -> bool:
         return bool(self._py_cash_mode) if APP_COUNTRY == "PARAGUAY" else False
 
     def _sync_py_cash_user_pct_from_loaded_items(self) -> bool:
-        """
-        Sync para cotizaciones reabiertas desde histórico:
-        - NO vuelve a sumar BASE.
-        - Solo infiere y guarda _py_user_disc_pct para que futuros toggles no dupliquen.
-        - Si detecta que el % total está por debajo de BASE, lo fuerza a BASE.
-        """
         changed = False
         for it in self._items:
             unit = float(nz(it.get("precio"), 0.0))
@@ -163,7 +264,6 @@ class ItemsModel(QAbstractTableModel):
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
             cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
 
-            # user = total - base
             user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
             user_pct = self._clamp_pct(user_pct)
 
@@ -172,7 +272,6 @@ class ItemsModel(QAbstractTableModel):
                 it["_py_user_disc_pct"] = user_pct
                 changed = True
 
-            # si por alguna razón quedó menor que BASE, lo corregimos
             if subtotal > 0 and (cur_total_pct + _PCT_EPS) < PY_CASH_BASE_PCT:
                 it["descuento_mode"] = "percent"
                 it["descuento_pct"] = PY_CASH_BASE_PCT
@@ -183,19 +282,10 @@ class ItemsModel(QAbstractTableModel):
         return changed
 
     def set_py_cash_mode(self, enabled: bool, *, assume_items_already: bool = False):
-        """
-        Activa/desactiva modo Efectivo (solo Paraguay).
-
-        assume_items_already=True:
-          - Usar al reabrir desde histórico.
-          - NO aplica ni quita BASE automáticamente.
-          - Solo sincroniza _py_user_disc_pct (si enabled=True) para evitar duplicar BASE.
-        """
         if APP_COUNTRY != "PARAGUAY":
             return
         enabled = bool(enabled)
 
-        # Si ya estamos en el mismo modo:
         if self._py_cash_mode == enabled:
             if enabled and assume_items_already:
                 changed = self._sync_py_cash_user_pct_from_loaded_items()
@@ -205,21 +295,17 @@ class ItemsModel(QAbstractTableModel):
                     self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return
 
-        # Cambio de modo
         changed = False
 
         if assume_items_already:
-            # Solo cambia flag; si es cash, sincroniza user pct para evitar duplicado futuro
             self._py_cash_mode = enabled
             if enabled:
                 changed = self._sync_py_cash_user_pct_from_loaded_items()
         else:
             if enabled:
-                # Tarjeta -> Efectivo: sumar base a todos
                 self._py_cash_mode = True
                 changed = self._apply_cash_base_to_all()
             else:
-                # Efectivo -> Tarjeta: restar base a todos
                 self._py_cash_mode = False
                 changed = self._remove_cash_base_from_all()
 
@@ -228,9 +314,6 @@ class ItemsModel(QAbstractTableModel):
             bottom = self.index(self.rowCount() - 1, self.columnCount() - 1)
             self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
 
-    # =========================
-    # Factor subtotal (CATS PY)
-    # =========================
     def _get_factor_total(self, it: dict) -> float:
         try:
             f = float(nz(it.get("factor_total"), 0.0))
@@ -248,9 +331,6 @@ class ItemsModel(QAbstractTableModel):
         factor = self._get_factor_total(it)
         return round(float(unit_price) * qty * factor, 2)
 
-    # =========================
-    # Utils descuento (% real)
-    # =========================
     def _effective_discount_pct(self, subtotal: float, d_pct: float, d_monto: float) -> float:
         if subtotal <= 0:
             return 0.0
@@ -269,15 +349,35 @@ class ItemsModel(QAbstractTableModel):
             pct = 100.0
         return pct
 
-    # =========================
-    # Aplicar / quitar base efectivo a TODOS
-    # =========================
+    def _maybe_snap_override_to_tier(self, it: dict, unit_price: float) -> float:
+        try:
+            if it.get("precio_override") is None:
+                return float(unit_price)
+        except Exception:
+            return float(unit_price)
+
+        prod = it.get("_prod", {}) or {}
+        try:
+            up = float(unit_price)
+        except Exception:
+            up = 0.0
+
+        def eq2(a: float, b: float) -> bool:
+            try:
+                return round(float(a), 2) == round(float(b), 2)
+            except Exception:
+                return False
+
+        for tier in ("base", "minimo", "maximo", "oferta", "unitario"):
+            p = _price_from_tier(prod, tier)
+            if p and p > 0 and eq2(p, up):
+                it["precio_override"] = None
+                it["precio_tier"] = tier
+                return float(p)
+
+        return float(up)
+
     def _apply_cash_base_to_all(self) -> bool:
-        """
-        Tarjeta -> Efectivo:
-        - user_pct = descuento_total_actual
-        - descuento_total = user_pct + BASE
-        """
         changed = False
         for it in self._items:
             unit = float(nz(it.get("precio"), 0.0))
@@ -288,7 +388,7 @@ class ItemsModel(QAbstractTableModel):
             cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
 
             user_pct = self._clamp_pct(cur_total_pct)
-            it["_py_user_disc_pct"] = user_pct  # guardamos descuento usuario SIN base
+            it["_py_user_disc_pct"] = user_pct
 
             total_pct = self._clamp_pct(user_pct + PY_CASH_BASE_PCT)
             it["descuento_mode"] = "percent"
@@ -302,11 +402,6 @@ class ItemsModel(QAbstractTableModel):
         return changed
 
     def _remove_cash_base_from_all(self) -> bool:
-        """
-        Efectivo -> Tarjeta:
-        - user_pct = max(0, descuento_total_actual - BASE)
-        - descuento_total = user_pct
-        """
         changed = False
         for it in self._items:
             unit = float(nz(it.get("precio"), 0.0))
@@ -336,11 +431,9 @@ class ItemsModel(QAbstractTableModel):
             changed = True
         return changed
 
-    # =========================
-    # Normalización descuento/totales
-    # =========================
     def _normalize_discount_and_totals(self, it: dict, unit_price: float):
         unit_price = float(nz(unit_price, 0.0))
+        unit_price = self._maybe_snap_override_to_tier(it, unit_price)
         it["precio"] = unit_price
 
         factor = self._get_factor_total(it)
@@ -360,7 +453,6 @@ class ItemsModel(QAbstractTableModel):
             it["total"] = 0.0
             return
 
-        # ---- Paraguay efectivo ----
         if self.is_py_cash_mode():
             try:
                 user_pct = float(nz(it.get("_py_user_disc_pct"), None))
@@ -382,7 +474,6 @@ class ItemsModel(QAbstractTableModel):
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
             return
 
-        # ---- Tarjeta / otros países ----
         if not mode:
             if d_pct > 0:
                 mode = "percent"
@@ -405,11 +496,8 @@ class ItemsModel(QAbstractTableModel):
         it["descuento_monto"] = d_monto
         it["total"] = round(subtotal - d_monto, 2)
 
-    # =========================
-    # QAbstractTableModel
-    # =========================
     def rowCount(self, parent=QModelIndex()) -> int:
-        return len(self._items)
+        return len(self._items) + len(self._recs_preview)
 
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self.HEADERS)
@@ -424,9 +512,16 @@ class ItemsModel(QAbstractTableModel):
     def flags(self, index):
         if not index.isValid():
             return Qt.ItemIsEnabled
+
+        row = index.row()
+        col = index.column()
+
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
-        if index.column() == 3:
+        if self._is_preview_row(row):
+            return base
+
+        if col == 3:
             return base | Qt.ItemIsEditable
 
         return base
@@ -434,69 +529,42 @@ class ItemsModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        it = self._items[index.row()]
+
+        row = index.row()
         col = index.column()
+        it = self._row_item(row)
+        if it is None:
+            return None
 
-        if role == Qt.ForegroundRole and col == 3:
-            try:
-                cat_u = (it.get("categoria") or "").upper()
+        is_preview = bool(it.get("__preview"))
 
-                # ✅ Si el item no tiene stock_disponible (reabierto desde histórico),
-                # NO lo pintes rojo (stock desconocido).
-                disp_raw = it.get("stock_disponible", None)
-                if disp_raw is None:
-                    return None
-
-                try:
-                    disp = float(disp_raw)
-                except Exception:
-                    return None
-
-                # stock < 0 => no se controla inventario
-                if disp < 0:
-                    return None
-
-                cant = float(nz(it.get("cantidad"), 0.0))
-                mult = self._get_factor_total(it) if (cat_u in CATS) else 1.0
-
-                if (cant * mult) > disp:
-                    return QBrush(Qt.red)
-            except Exception:
-                pass
-
-        if role == Qt.ForegroundRole and col == 4:
-            if it.get("precio_override") is not None:
-                return QBrush(Qt.darkMagenta)
-
-        if role == Qt.ToolTipRole:
-            if col == 4:
-                if it.get("precio_override") is not None:
-                    return "Precio personalizado (override). Click derecho → 'Quitar precio personalizado'."
-                tier = it.get("precio_tier")
-                if tier:
-                    return f"Usando precio de catálogo: {tier.capitalize()}"
-            elif col == 2:
-                subtotal = float(nz(it.get("subtotal_base"), 0.0))
-                d_pct = float(nz(it.get("descuento_pct"), 0.0))
-                d_monto = float(nz(it.get("descuento_monto"), 0.0))
-                total = float(nz(it.get("total"), subtotal - d_monto))
-                if subtotal <= 0 or (d_pct == 0 and d_monto == 0):
-                    return "Sin descuento aplicado."
-                return (
-                    f"Subtotal base: {fmt_money_ui(convert_from_base(subtotal))}\n"
-                    f"Descuento: {fmt_money_ui(convert_from_base(d_monto))} ({d_pct:.4f}%)\n"
-                    f"Total neto: {fmt_money_ui(convert_from_base(total))}"
-                )
+        if is_preview:
+            if role == Qt.ForegroundRole:
+                return QBrush(Qt.darkGray)
+            if role == Qt.FontRole:
+                f = QFont()
+                f.setItalic(True)
+                return f
+            if role == Qt.ToolTipRole:
+                rsn = str(it.get("_rec_reason") or "").strip()
+                sc = float(nz(it.get("_rec_score"), 0.0))
+                if rsn:
+                    return f"Doble clic / Enter para agregar.\nRecomendación ({sc:.0%}): {rsn}"
+                return f"Doble clic / Enter para agregar.\nRecomendación ({sc:.0%})."
 
         if role == Qt.DisplayRole:
             if col == 0:
                 return it["codigo"]
             elif col == 1:
                 prod = it["producto"]
-                if it.get("fragancia"):
+                if (not is_preview) and it.get("fragancia"):
                     prod += f" ({it['fragancia']})"
-                if it.get("observacion"):
+                if (not is_preview) and it.get("observacion"):
                     prod += f" | {it['observacion']}"
+                if is_preview:
+                    sc = float(nz(it.get("_rec_score"), 0.0))
+                    if sc > 0:
+                        prod = f"{prod}  •  Recomendado {sc:.0%}"
                 return prod
             elif col == 2:
                 d_pct = float(nz(it.get("descuento_pct"), 0.0))
@@ -528,6 +596,9 @@ class ItemsModel(QAbstractTableModel):
                 return fmt_money_ui(convert_from_base(total_base))
 
         if role == Qt.EditRole:
+            if is_preview:
+                return None
+
             if col == 3:
                 cat = (it.get("categoria") or "").upper()
                 if APP_COUNTRY == "PERU" and (cat in CATS):
@@ -548,9 +619,6 @@ class ItemsModel(QAbstractTableModel):
 
         return None
 
-    # =========================
-    # lógica precios / cantidades / descuento
-    # =========================
     def _apply_price_and_total(self, it: dict, unit_price: float):
         self._normalize_discount_and_totals(it, unit_price)
 
@@ -563,7 +631,7 @@ class ItemsModel(QAbstractTableModel):
             self._apply_price_and_total(it, float(nz(it.get("precio_override"), 0.0)))
             return
 
-        t = (it.get("precio_tier") or "").strip().lower()
+        t = _norm_tier_name((it.get("precio_tier") or "").strip().lower())
         if t:
             p = _price_from_tier(prod, t)
             if p and p > 0:
@@ -578,10 +646,13 @@ class ItemsModel(QAbstractTableModel):
             return False
 
         row = index.row()
-        it = self._items[row]
         col = index.column()
 
-        # ----- Columna de DESCUENTO (2) -----
+        if self._is_preview_row(row):
+            return False
+
+        it = self._items[row]
+
         if col == 2:
             if not isinstance(value, dict):
                 return False
@@ -670,7 +741,6 @@ class ItemsModel(QAbstractTableModel):
             self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return True
 
-        # ----- Columna de CANTIDAD (3) -----
         if col == 3:
             old_qty = float(nz(it.get("cantidad"), 0.0))
             cat = (it.get("categoria") or "").upper()
@@ -679,7 +749,6 @@ class ItemsModel(QAbstractTableModel):
             try:
                 if APP_COUNTRY == "PERU" and (cat in CATS):
                     new_qty = _parse_qty_peru_cats(txt_raw)
-                    # ya viene round(3) y min 0.001
                 else:
                     txt = txt_raw.lower().replace(",", ".")
                     txt = re.sub(r"[^\d\.\-]", "", txt)
@@ -702,7 +771,6 @@ class ItemsModel(QAbstractTableModel):
             self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return True
 
-        # ----- Columna de PRECIO UNITARIO (4) -----
         if col == 4 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
             if isinstance(value, dict):
                 mode = (value.get("mode") or "").lower()
@@ -710,18 +778,26 @@ class ItemsModel(QAbstractTableModel):
                     new_price = float(nz(value.get("price"), 0.0))
                     if new_price < 0:
                         new_price = 0.0
+
                     it["precio_override"] = new_price
                     it["precio_tier"] = None
-                    self._apply_price_and_total(it, new_price)
+
+                    snapped = self._maybe_snap_override_to_tier(it, new_price)
+                    self._apply_price_and_total(it, snapped)
 
                 elif mode == "tier":
-                    tier = (value.get("tier") or "").lower().strip()
+                    tier_raw = (value.get("tier") or "")
+                    tier = _norm_tier_name(str(tier_raw))
+
                     if tier == "base":
                         it["precio_override"] = None
                         it["precio_tier"] = None
-                    else:
+                    elif tier in ("unitario", "oferta", "minimo", "maximo"):
                         it["precio_override"] = None
                         it["precio_tier"] = tier
+                    else:
+                        return False
+
                     self._recalc_price_for_qty(it)
                 else:
                     return False
@@ -742,7 +818,9 @@ class ItemsModel(QAbstractTableModel):
 
             it["precio_override"] = new_price
             it["precio_tier"] = None
-            self._apply_price_and_total(it, new_price)
+
+            snapped = self._maybe_snap_override_to_tier(it, new_price)
+            self._apply_price_and_total(it, snapped)
 
             top = self.index(row, 0)
             bottom = self.index(row, self.columnCount() - 1)
@@ -751,9 +829,6 @@ class ItemsModel(QAbstractTableModel):
 
         return False
 
-    # =========================
-    # Gestión de filas
-    # =========================
     def add_item(self, item: dict):
         if "precio_override" not in item:
             item["precio_override"] = None
@@ -787,6 +862,8 @@ class ItemsModel(QAbstractTableModel):
 
     def remove_rows(self, rows: list[int]):
         for r in sorted(set(rows), reverse=True):
+            if r >= len(self._items):
+                continue
             if 0 <= r < len(self._items):
                 self.beginRemoveRows(QModelIndex(), r, r)
                 removed = self._items.pop(r)

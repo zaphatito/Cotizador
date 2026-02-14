@@ -6,6 +6,7 @@ import sys
 import json
 from typing import Dict, Any, Tuple, List
 
+from .currency import normalize_currency_code
 from .paths import DATA_DIR, user_docs_dir
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.settings_repo import (
@@ -20,12 +21,10 @@ DEFAULT_CONFIG_STR: dict[str, str] = {
     "country": "PARAGUAY",
     "listing_type": "AMBOS",
     "allow_no_stock": "0",
-
     "update_mode": "ASK",
     "update_check_on_startup": "1",
     "update_manifest_url": "",
     "update_flags": "/CLOSEAPPLICATIONS",
-
     "log_dir": "",
     "log_level": "INFO",
 }
@@ -205,7 +204,6 @@ def _seed_settings_once(con) -> None:
       - Si meta.settings_seeded NO existe (primera ejecución “real”):
           * Lee config.json/app_config.json si existe
           * APLICA overrides con UPSERT (set_setting) aunque settings ya tenga filas
-            (esto evita que una DB "seed" traída desde dist bloquee el seed)
           * Marca meta.settings_seeded = 1
       - En ejecuciones siguientes:
           * No vuelve a aplicar JSON
@@ -279,7 +277,24 @@ APP_LISTING_TYPE: str = APP_CONFIG["listing_type"]
 ALLOW_NO_STOCK: bool = bool(APP_CONFIG["allow_no_stock"])
 
 
+# -----------------------------
+# Monedas (NORMALIZADAS)
+# -----------------------------
+def _normalize_currencies_list(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for v in values or []:
+        c = normalize_currency_code(v)
+        if c and c not in seen:
+            out.append(c)
+            seen.add(c)
+    return out
+
+
 def currency_for_country(country: str) -> str:
+    """
+    Devuelve moneda BASE (CANÓNICA ISO).
+    """
     c = (country or "").upper()
     if c == "PERU":
         return "PEN"
@@ -289,24 +304,39 @@ def currency_for_country(country: str) -> str:
 
 
 def secondary_currencies_for_country(country: str) -> List[str]:
+    """
+    Devuelve monedas secundarias (CANÓNICAS ISO).
+    """
     c = (country or "").upper()
     if c == "PARAGUAY":
-        return ["ARS", "BRL"]
+        return ["ARS", "BRL", "USD"]
     if c == "VENEZUELA":
         return ["VES"]
     if c == "PERU":
-        return ["BOB"]
+        return ["BOB", "USD"]
     return []
 
 
-def secondary_currency_for_country(country: str) -> str:
-    lst = secondary_currencies_for_country(country)
-    return lst[0] if lst else "USD"
+def secondary_currency_for_country(country: str, base: str) -> str:
+    """
+    Devuelve una secundaria “preferida” distinta a la base.
+    """
+    base_c = normalize_currency_code(base)
+    secs = _normalize_currencies_list(secondary_currencies_for_country(country))
+
+    for s in secs:
+        if s and s != base_c:
+            return s
+
+    # fallback razonable
+    if base_c != "USD":
+        return "USD"
+    return ""
 
 
-APP_CURRENCY: str = currency_for_country(APP_COUNTRY)
-SECONDARY_CURRENCIES: List[str] = secondary_currencies_for_country(APP_COUNTRY)
-SECONDARY_CURRENCY: str = secondary_currency_for_country(APP_COUNTRY)
+APP_CURRENCY: str = normalize_currency_code(currency_for_country(APP_COUNTRY))
+SECONDARY_CURRENCIES: List[str] = _normalize_currencies_list(secondary_currencies_for_country(APP_COUNTRY))
+SECONDARY_CURRENCY: str = normalize_currency_code(secondary_currency_for_country(APP_COUNTRY, APP_CURRENCY))
 
 
 def _country_suffix(country: str) -> str:
@@ -334,12 +364,14 @@ def listing_allows_presentations() -> bool:
     return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
 
 
+# Contexto de moneda actual (siempre CANÓNICO)
 CURRENT_CURRENCY: str = APP_CURRENCY
 _CURRENCY_RATE: float = 1.0
 
 
 def get_currency_context() -> Tuple[str, str, float]:
-    return CURRENT_CURRENCY, SECONDARY_CURRENCY, _CURRENCY_RATE
+    # siempre devuelve normalizado
+    return normalize_currency_code(CURRENT_CURRENCY), normalize_currency_code(SECONDARY_CURRENCY), float(_CURRENCY_RATE)
 
 
 def get_secondary_currencies() -> List[str]:
@@ -347,18 +379,33 @@ def get_secondary_currencies() -> List[str]:
 
 
 def set_currency_context(new_currency: str, rate: float) -> None:
+    """
+    Fija moneda actual y tasa.
+    - new_currency se normaliza (SOL->PEN, GS->PYG, etc)
+    - si new_currency es base => tasa 1
+    - si hay lista de monedas permitidas (base+sec), clampa para evitar códigos raros
+    """
     global CURRENT_CURRENCY, _CURRENCY_RATE
-    new = (new_currency or APP_CURRENCY).upper()
-    if new == APP_CURRENCY:
-        CURRENT_CURRENCY = APP_CURRENCY
+
+    base = normalize_currency_code(APP_CURRENCY)
+    allowed = {base, *(_normalize_currencies_list(SECONDARY_CURRENCIES))}
+    cur = normalize_currency_code(new_currency or base)
+
+    # clamp: si no está permitido, vuelve a base
+    if allowed and cur not in allowed:
+        cur = base
+
+    if not cur or cur == base:
+        CURRENT_CURRENCY = base
         _CURRENCY_RATE = 1.0
-    else:
-        CURRENT_CURRENCY = new
-        try:
-            r = float(rate)
-            _CURRENCY_RATE = r if r > 0 else 1.0
-        except Exception:
-            _CURRENCY_RATE = 1.0
+        return
+
+    CURRENT_CURRENCY = cur
+    try:
+        r = float(rate)
+        _CURRENCY_RATE = r if r > 0 else 1.0
+    except Exception:
+        _CURRENCY_RATE = 1.0
 
 
 def convert_from_base(amount: float) -> float:

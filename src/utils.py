@@ -1,6 +1,9 @@
 # src/utils.py
+from __future__ import annotations
+
 import math
 from .config import APP_CURRENCY, get_currency_context
+from .currency import normalize_currency_code, symbol_ui, symbol_pdf
 
 
 def to_float(val, default=0.0) -> float:
@@ -33,114 +36,36 @@ def nz(x, default=0.0):
 
 def _current_currency_code() -> str:
     """
-    Devuelve el código de la moneda actualmente activa en el contexto
-    (PEN, USD, ARS, VES, BOB, PYG, etc.). Si algo falla, cae a APP_CURRENCY.
+    Devuelve el código CANÓNICO de la moneda actualmente activa (PEN, USD, PYG...).
+    Si algo falla, cae a APP_CURRENCY (también normalizado).
     """
     try:
         cur, _, _ = get_currency_context()
+        cur = normalize_currency_code(cur or "")
         if cur:
             return cur
     except Exception:
         pass
-    return APP_CURRENCY
-
-
-def _symbol_ui(cur: str) -> str:
-    """
-    Símbolo para la UI según código de moneda.
-    """
-    c = (cur or "").upper()
-
-    # Perú
-    if c == "PEN":
-        return "S/"
-
-    # Dólar
-    if c == "USD":
-        return "$"
-
-    # Peso argentino
-    if c == "ARS":
-        return "AR$"  # si prefieres, se puede cambiar a "AR$"
-
-    # Guaraní paraguayo
-    if c in ("PYG", "GS"):
-        return "₲"
-
-    # Bolívar venezolano
-    if c in ("VEF", "VES"):
-        return "Bs."
-
-    # Boliviano
-    if c == "BOB":
-        return "Bs"
-    
-    # Real brasileño
-    if c == "BRL":
-        return "R$"
-
-    # Fallback genérico
-    return c
-
-
-def _symbol_pdf(cur: str) -> str:
-    """
-    Símbolo para el PDF según código de moneda.
-    """
-    c = (cur or "").upper()
-
-    # Perú
-    if c == "PEN":
-        return "S/."
-
-    # Dólar
-    if c == "USD":
-        return "$"
-
-    # Peso argentino
-    if c == "ARS":
-        return "AR$"  # o "AR$" si quieres distinguirlo
-
-    # Guaraní paraguayo
-    if c in ("PYG", "GS"):
-        return "Gs."
-
-    # Bolívar venezolano
-    if c in ("VEF", "VES"):
-        return "Bs."
-
-    # Boliviano
-    if c == "BOB":
-        return "Bs"
-    
-    # Real brasileño
-    if c == "BRL":
-        return "R$"
-
-    # Fallback genérico
-    return c
+    return normalize_currency_code(APP_CURRENCY or "")
 
 
 def fmt_money_ui(n: float) -> str:
     """
-    Formato para la UI, usando la MONEDA ACTUAL (no fija a APP_CURRENCY).
-    Ej: "S/ 123.45", "$ 10.00", "Bs. 50.00", "₲10000.00", etc.
+    Formato para la UI usando la moneda actual (canónica).
     """
     n = nz(n, 0.0)
     cur = _current_currency_code()
-    sym = _symbol_ui(cur)
+    sym = symbol_ui(cur)
     return f"{sym} {n:0.2f}"
 
 
 def fmt_money_pdf(n: float) -> str:
     """
-    Formato para PDF, también usando la MONEDA ACTUAL.
-    (Los montos ya deben venir en la moneda actual si se usó convert_from_base).
-    Ej: "S/. 123.45", "Bs. 50.00", "Gs. 10000.00", etc.
+    Formato para PDF usando la moneda actual (canónica).
     """
     n = nz(n, 0.0)
     cur = _current_currency_code()
-    sym = _symbol_pdf(cur)
+    sym = symbol_pdf(cur)
     return f"{sym} {n:0.2f}"
 
 

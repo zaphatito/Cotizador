@@ -26,6 +26,8 @@ from .quote_events import QuoteEvents
 from sqlModels.db import connect, ensure_schema, tx
 from .widgets_parts.quote_history_dialog import QuoteHistoryWindow
 
+from .ai.search_index import LocalSearchIndex
+from .ai.assistant.ollama_bootstrap import ensure_ollama_on_startup
 log = get_logger(__name__)
 
 _MUTEX_HANDLE = None
@@ -176,11 +178,9 @@ def _show_changelog_if_pending(app_root: str, app_icon=None) -> None:
     except Exception as e:
         text = f"(No se pudo leer el changelog: {e})"
 
-    # mostrar anuncio
     dlg = ChangelogDialog(version=version, text=text, app_icon=app_icon)
     dlg.exec()
 
-    # mostrar solo una vez
     try:
         os.remove(p)
     except Exception:
@@ -261,6 +261,21 @@ def run_app():
         time.sleep(0.35)
         os._exit(0)
 
+    # ===== ✅ OLLAMA: iniciar server siempre + pull solo 1 vez post-update =====
+    # - Mantén el diálogo abierto en el camino "normal" para mostrar logs si toca descargar.
+    # - En FAILED, igual intentamos levantar server pero sin bloquear UI con el dialog.
+    try:
+        
+        app_root = _app_root()
+
+        if res.get("status") != "FAILED_RETRY_LATER":
+            dlg.handle_event("status", {"text": "Inicializando IA offline (Ollama)…"})
+            ensure_ollama_on_startup(app_root=app_root, ui=dlg.handle_event, model="qwen2.5:14b-instruct")
+        else:
+            ensure_ollama_on_startup(app_root=app_root, ui=None, model="qwen2.5:14b-instruct")
+    except Exception:
+        log.exception("Ollama: no se pudo iniciar/asegurar (se usará fallback).")
+
     # Si falló -> continuar abriendo la app
     if res.get("status") == "FAILED_RETRY_LATER":
         dlg.close()
@@ -308,6 +323,13 @@ def run_app():
             df_productos, df_presentaciones = load_catalog_from_db(con)
         except Exception as e:
             log.exception("Falló load_catalog_from_db (se abre sin catálogo): %s", e)
+
+        try:
+            # Rebuild rápido (2000 productos es nada). Esto habilita autocompletado.
+            idx = LocalSearchIndex(db_path)
+            idx.ensure_and_rebuild()
+        except Exception as e:
+            log.exception("AI index: no se pudo reconstruir: %s", e)
 
         con.close()
 
