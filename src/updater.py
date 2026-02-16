@@ -71,6 +71,10 @@ def _is_newer(remote: str, local: str) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
+def _same_version(a: str, b: str) -> bool:
+    return _parse_version(a) == _parse_version(b)
+
+
 def _normalize_github_url(url: str) -> str:
     u = str(url or "").strip()
 
@@ -582,6 +586,13 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
 
         try:
             if pkg_type == "files":
+                from_version = str(manifest.get("from_version", "") or "").strip()
+                if from_version and not _same_version(local_version, from_version):
+                    msg = f"Paquete incremental requiere base {from_version}; local={local_version}"
+                    if log:
+                        log.warning("Updater: %s. Se usa fallback installer.", msg)
+                    _emit(ui, "status", text=f"{msg}. Usando instalador completo...")
+                    raise RuntimeError(msg)
                 _emit(ui, "status", text="Preparando actualización (files)…")
                 plan = _plan_files_update(manifest, app_config, log=log, ui=ui)
 

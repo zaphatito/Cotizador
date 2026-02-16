@@ -250,7 +250,7 @@ end;
 
 var
   HaveOldConfig: Boolean;
-  OldCountry, OldListing, OldCompanyType, OldStoreId: string;
+  OldCountry, OldListing, OldCompanyType, OldStoreId, OldUsername: string;
   OldAllow: Boolean;
   PrevDir: string;
   PrevVersion: string;
@@ -265,10 +265,11 @@ var
   EmpresaPage: TWizardPage;
   cbEmpresa: TNewComboBox;
 
-  TiendaPage: TWizardPage;
+  TiendaUsuarioPage: TWizardPage;
+  lblStoreId: TNewStaticText;
   txtStoreId: TNewEdit;
-
-  StockPage: TWizardPage;
+  lblUsername: TNewStaticText;
+  txtUsername: TNewEdit;
   chkNoStock: TNewCheckBox;
 
 function TryGetPrevAppDir(): Boolean;
@@ -418,7 +419,7 @@ var
   PrevCfg, J: string;
   BackupDir, Tag, FullPath, MiniPath, LastPath: string;
   AllowStr: string;
-  C, L, CT, SID: string;
+  C, L, CT, SID, UN: string;
   A: Boolean;
 begin
   if (not IsReinstall) or (PrevDir = '') then Exit;
@@ -442,12 +443,13 @@ begin
   SaveStringToFile(LastPath, J, False);
 
   C := OldCountry; L := OldListing; A := OldAllow;
-  CT := OldCompanyType; SID := OldStoreId;
+  CT := OldCompanyType; SID := OldStoreId; UN := OldUsername;
 
   if C = '' then JsonExtractStr(J, 'country', C);
   if L = '' then JsonExtractStr(J, 'listing_type', L);
   if CT = '' then JsonExtractStr(J, 'company_type', CT);
   if SID = '' then JsonExtractStr(J, 'store_id', SID);
+  if UN = '' then JsonExtractStr(J, 'username', UN);
   if not JsonExtractBool(J, 'allow_no_stock', A) then A := False;
 
   C := UpperCase(Trim(C));
@@ -460,6 +462,7 @@ begin
 
   CT := NormalizeCompanyType(CT);
   SID := Trim(SID);
+  UN := Trim(UN);
 
   AllowStr := BoolToJson(A);
 
@@ -471,6 +474,7 @@ begin
     '  "listing_type": "' + JsonEscape(L) + '",' + #13#10 +
     '  "company_type": "' + JsonEscape(CT) + '",' + #13#10 +
     '  "store_id": "' + JsonEscape(SID) + '",' + #13#10 +
+    '  "username": "' + JsonEscape(UN) + '",' + #13#10 +
     '  "allow_no_stock": ' + AllowStr + #13#10 +
     '}',
     False
@@ -485,6 +489,7 @@ begin
   OldListing := '';
   OldCompanyType := '';
   OldStoreId := '';
+  OldUsername := '';
   OldAllow := False;
   PrevDir := '';
   PrevVersion := '';
@@ -503,9 +508,11 @@ begin
       if JsonExtractStr(J, 'listing_type', OldListing) then ;
       if JsonExtractStr(J, 'company_type', OldCompanyType) then ;
       if JsonExtractStr(J, 'store_id', OldStoreId) then ;
+      if JsonExtractStr(J, 'username', OldUsername) then ;
       if not JsonExtractBool(J, 'allow_no_stock', OldAllow) then OldAllow := False;
       OldCompanyType := NormalizeCompanyType(OldCompanyType);
       OldStoreId := Trim(OldStoreId);
+      OldUsername := Trim(OldUsername);
       HaveOldConfig := (Length(OldCountry) > 0) and (Length(OldListing) > 0);
     end;
   end;
@@ -590,6 +597,14 @@ begin
   cbListado.Items.Add('Ambos');
   cbListado.ItemIndex := 2;
 
+  chkNoStock := TNewCheckBox.Create(ListadoPage.Surface);
+  chkNoStock.Parent := ListadoPage.Surface;
+  chkNoStock.Caption := 'Permitir listar y cotizar sin stock';
+  chkNoStock.Left := ScaleX(0);
+  chkNoStock.Top := cbListado.Top + cbListado.Height + ScaleY(12);
+  chkNoStock.Width := ListadoPage.SurfaceWidth;
+  chkNoStock.Checked := False;
+
   EmpresaPage := CreateCustomPage(
     ListadoPage.ID,
     'Tipo de empresa',
@@ -605,35 +620,43 @@ begin
   cbEmpresa.Items.Add('EF PERFUMES');
   cbEmpresa.ItemIndex := 0;
 
-  TiendaPage := CreateCustomPage(
+  TiendaUsuarioPage := CreateCustomPage(
     EmpresaPage.ID,
-    'ID de tienda',
-    'Ingrese el ID de tienda que usará este equipo.'
+    'Tienda y usuario',
+    'Ingrese el Store ID y el nombre de usuario de este equipo.'
   );
-  txtStoreId := TNewEdit.Create(TiendaPage.Surface);
-  txtStoreId.Parent := TiendaPage.Surface;
+  lblStoreId := TNewStaticText.Create(TiendaUsuarioPage.Surface);
+  lblStoreId.Parent := TiendaUsuarioPage.Surface;
+  lblStoreId.Caption := 'Store ID:';
+  lblStoreId.Left := ScaleX(0);
+  lblStoreId.Top := ScaleY(8);
+  lblStoreId.AutoSize := True;
+
+  txtStoreId := TNewEdit.Create(TiendaUsuarioPage.Surface);
+  txtStoreId.Parent := TiendaUsuarioPage.Surface;
   txtStoreId.Left := ScaleX(0);
-  txtStoreId.Top := ScaleY(8);
-  txtStoreId.Width := TiendaPage.SurfaceWidth;
+  txtStoreId.Top := lblStoreId.Top + lblStoreId.Height + ScaleY(4);
+  txtStoreId.Width := TiendaUsuarioPage.SurfaceWidth;
   txtStoreId.Text := '';
 
-  StockPage := CreateCustomPage(
-    TiendaPage.ID,
-    'Permitir sin stock',
-    'Puede permitir listar y cotizar productos/presentaciones sin stock disponible.'
-  );
-  chkNoStock := TNewCheckBox.Create(StockPage.Surface);
-  chkNoStock.Parent := StockPage.Surface;
-  chkNoStock.Caption := 'Permitir listar y cotizar sin stock';
-  chkNoStock.Left := ScaleX(0);
-  chkNoStock.Top := ScaleY(8);
-  chkNoStock.Width := StockPage.SurfaceWidth;
-  chkNoStock.Checked := False;
+  lblUsername := TNewStaticText.Create(TiendaUsuarioPage.Surface);
+  lblUsername.Parent := TiendaUsuarioPage.Surface;
+  lblUsername.Caption := 'Nombre de usuario:';
+  lblUsername.Left := ScaleX(0);
+  lblUsername.Top := txtStoreId.Top + txtStoreId.Height + ScaleY(12);
+  lblUsername.AutoSize := True;
+
+  txtUsername := TNewEdit.Create(TiendaUsuarioPage.Surface);
+  txtUsername.Parent := TiendaUsuarioPage.Surface;
+  txtUsername.Left := ScaleX(0);
+  txtUsername.Top := lblUsername.Top + lblUsername.Height + ScaleY(4);
+  txtUsername.Width := TiendaUsuarioPage.SurfaceWidth;
+  txtUsername.Text := '';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, AllowStr: string;
+  PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, UsernameSel, AllowStr: string;
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
 begin
   try
@@ -656,6 +679,7 @@ begin
         ListadoSelUpper := UpperCase(OldListing);
         CompanySel := NormalizeCompanyType(OldCompanyType);
         StoreIdSel := Trim(OldStoreId);
+        UsernameSel := Trim(OldUsername);
         AllowStr := BoolToJson(OldAllow);
       end
       else
@@ -683,6 +707,7 @@ begin
           end;
 
           StoreIdSel := Trim(txtStoreId.Text);
+          UsernameSel := Trim(txtUsername.Text);
           AllowStr := BoolToJson(chkNoStock.Checked);
         end
         else
@@ -691,6 +716,7 @@ begin
           ListadoSelUpper := 'AMBOS';
           CompanySel := 'LA CASA DEL PERFUME';
           StoreIdSel := '';
+          UsernameSel := '';
           AllowStr := 'false';
         end;
       end;
@@ -705,6 +731,7 @@ begin
 
       CompanySel := NormalizeCompanyType(CompanySel);
       StoreIdSel := Trim(StoreIdSel);
+      UsernameSel := Trim(UsernameSel);
 
       ConfigFolder := ExpandConstant('{app}\config');
       ForceDir(ConfigFolder);
@@ -716,6 +743,7 @@ begin
         '  "listing_type": "' + JsonEscape(ListadoSelUpper) + '",' + #13#10 +
         '  "company_type": "' + JsonEscape(CompanySel) + '",' + #13#10 +
         '  "store_id": "' + JsonEscape(StoreIdSel) + '",' + #13#10 +
+        '  "username": "' + JsonEscape(UsernameSel) + '",' + #13#10 +
         '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
         '  "update_mode": "SILENT",' + #13#10 +
         '  "update_check_on_startup": true,' + #13#10 +

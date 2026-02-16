@@ -322,6 +322,8 @@ $exeUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Ou
 # 6) build updates/<version> (FILES)
 $updatesRoot = Join-Path $ProjectRoot "Output\updates"
 $updateVerDir = Join-Path $updatesRoot $next
+$prevUpdateDir = Join-Path $updatesRoot $prev
+$hasPrevUpdate = Test-Path $prevUpdateDir
 Remove-Dir-Robust $updateVerDir
 New-Item -ItemType Directory -Force -Path $updateVerDir | Out-Null
 
@@ -337,67 +339,91 @@ if (Test-Path $updateShm) { Remove-Item -Force $updateShm }
 
 Write-Host "OK: update package -> $updateVerDir"
 
-# 6.1 files[] sha (exclude DB)
-$filesList = @()
-Get-ChildItem -Path $updateVerDir -Recurse -File | ForEach-Object {
+# 6.1 snapshot new/prev + sha (exclude DB)
+$newEntries = @()
+Get-ChildItem -Path $updateVerDir -Recurse -File | Sort-Object FullName | ForEach-Object {
   $full = $_.FullName
   $rel  = $full.Substring($updateVerDir.Length + 1).Replace("\","/")
   $relLower = $rel.ToLower()
   if ($relLower -eq "sqlmodels/app.sqlite3") { return }
   if ($relLower -eq "sqlmodels/app.sqlite3-wal") { return }
   if ($relLower -eq "sqlmodels/app.sqlite3-shm") { return }
-  $sha  = (Get-FileHash $full -Algorithm SHA256).Hash.ToLower()
-  $filesList += [ordered]@{ path = $rel; sha256 = $sha }
+
+  $newEntries += [pscustomobject]@{
+    rel      = $rel
+    relLower = $relLower
+    sha      = (Get-FileHash $full -Algorithm SHA256).Hash.ToLower()
+  }
 }
 
-# 6.2 delete[] (diff contra updates/<prev>) (exclude DB)
-$deleteList = @()
-$prevUpdateDir = Join-Path $updatesRoot $prev
-if (Test-Path $prevUpdateDir) {
-  $prevFiles = Get-ChildItem -Path $prevUpdateDir -Recurse -File | ForEach-Object {
-    $_.FullName.Substring($prevUpdateDir.Length + 1).Replace("\","/").ToLower()
-  }
-  $newFiles = Get-ChildItem -Path $updateVerDir -Recurse -File | ForEach-Object {
-    $_.FullName.Substring($updateVerDir.Length + 1).Replace("\","/").ToLower()
-  }
+$prevEntries = @()
+if ($hasPrevUpdate) {
+  Get-ChildItem -Path $prevUpdateDir -Recurse -File | Sort-Object FullName | ForEach-Object {
+    $full = $_.FullName
+    $rel  = $full.Substring($prevUpdateDir.Length + 1).Replace("\","/")
+    $relLower = $rel.ToLower()
+    if ($relLower -eq "sqlmodels/app.sqlite3") { return }
+    if ($relLower -eq "sqlmodels/app.sqlite3-wal") { return }
+    if ($relLower -eq "sqlmodels/app.sqlite3-shm") { return }
 
-  $prevSet = New-Object "System.Collections.Generic.HashSet[string]"
-  $newSet  = New-Object "System.Collections.Generic.HashSet[string]"
-  foreach($p in $prevFiles){ [void]$prevSet.Add($p) }
-  foreach($n in $newFiles){ [void]$newSet.Add($n) }
-
-  foreach($p in $prevSet){
-    if (-not $newSet.Contains($p)) {
-      if ($p -eq "sqlmodels/app.sqlite3") { continue }
-      if ($p -eq "sqlmodels/app.sqlite3-wal") { continue }
-      if ($p -eq "sqlmodels/app.sqlite3-shm") { continue }
-      $deleteList += $p
+    $prevEntries += [pscustomobject]@{
+      rel      = $relLower
+      relLower = $relLower
+      sha      = (Get-FileHash $full -Algorithm SHA256).Hash.ToLower()
     }
   }
 }
 
-# 6.3 manifest cotizador.json
+$prevShaByRel = @{}
+$newByRel = @{}
+foreach ($it in $prevEntries) { $prevShaByRel[$it.relLower] = $it.sha }
+foreach ($it in $newEntries) { $newByRel[$it.relLower] = $true }
+
+# 6.2 files[] incremental (new + changed)
+$filesList = @()
+foreach ($it in $newEntries) {
+  $prevSha = $null
+  if ($prevShaByRel.ContainsKey($it.relLower)) { $prevSha = [string]$prevShaByRel[$it.relLower] }
+  if ($prevSha -eq $it.sha) { continue }
+  $filesList += [ordered]@{ path = $it.rel; sha256 = $it.sha }
+}
+
+# 6.3 delete[] (rutas que ya no existen)
+$deleteList = @()
+foreach ($it in $prevEntries) {
+  if (-not $newByRel.ContainsKey($it.relLower)) {
+    $deleteList += $it.relLower
+  }
+}
+$deleteList = @($deleteList | Sort-Object -Unique)
+
+$isDeltaManifest = $hasPrevUpdate
+
+# 6.4 manifest cotizador.json
 $manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
 $baseUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Output/updates/$next/"
 
-$manifestObj = [ordered]@{
-  version   = $next
-  type      = "files"
-  base_url  = $baseUrl
-  files     = $filesList
-  delete    = $deleteList
-  mandatory = [bool]$Mandatory
-  notes     = "Release $next"
-
-  # fallback installer (para versiones viejas / si FILES falla)
-  url       = $exeUrl
-  sha256    = $setupSha
-}
+$manifestObj = [ordered]@{}
+$manifestObj["version"] = $next
+$manifestObj["type"] = "files"
+$manifestObj["base_url"] = $baseUrl
+if ($isDeltaManifest) { $manifestObj["from_version"] = $prev }
+$manifestObj["files"] = $filesList
+$manifestObj["delete"] = $deleteList
+$manifestObj["mandatory"] = [bool]$Mandatory
+$manifestObj["notes"] = "Release $next"
+$manifestObj["url"] = $exeUrl
+$manifestObj["sha256"] = $setupSha
 Set-ContentUtf8NoBOM -Path $manifestPath -Text ($manifestObj | ConvertTo-Json -Depth 10)
 
 Write-Host "Manifest actualizado: $manifestPath"
-Write-Host "  files  = $($filesList.Count)"
+Write-Host "  files  = $($filesList.Count) (cambiados de $($newEntries.Count))"
 Write-Host "  delete = $($deleteList.Count)"
+if ($isDeltaManifest) {
+  Write-Host "  from_version = $prev"
+} else {
+  Write-Host "  from_version = (sin base, se publica paquete completo)"
+}
 
 # 7) git lfs + commit
 try { git lfs env | Out-Null } catch { git lfs install | Out-Null }
