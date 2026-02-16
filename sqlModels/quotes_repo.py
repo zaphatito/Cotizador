@@ -277,12 +277,23 @@ def list_quotes(
         ])
         params.extend([like] * 7)
 
-        # N° (como se ve con ceros, y también sin ceros)
+        # N° (soporta legacy "0000001"/"PY-0000001" y nuevo "PY-STORE-0000001")
+        quote_tail = (
+            "CASE "
+            "WHEN instr(q.quote_no,'-') = 0 THEN q.quote_no "
+            "WHEN instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') = 0 "
+            "THEN substr(q.quote_no, instr(q.quote_no,'-') + 1) "
+            "ELSE substr("
+            "substr(q.quote_no, instr(q.quote_no,'-') + 1), "
+            "instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') + 1"
+            ") END"
+        )
         or_terms.extend([
             "q.quote_no LIKE ?",
-            "CAST(CAST(q.quote_no AS INTEGER) AS TEXT) LIKE ?",
+            f"{quote_tail} LIKE ?",
+            f"CAST(CAST({quote_tail} AS INTEGER) AS TEXT) LIKE ?",
         ])
-        params.extend([like, like])
+        params.extend([like, like, like])
 
         # Texto base visible
         or_terms.extend([

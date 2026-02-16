@@ -15,6 +15,7 @@ from ...db_path import resolve_db_path
 from ...app_window import SistemaCotizaciones
 from ...logging_setup import get_logger
 from ...config import APP_COUNTRY
+from ...quote_code import quote_match_key
 
 from sqlModels.quotes_repo import ALL_STATUSES
 
@@ -116,16 +117,13 @@ class AssistantController(ClarifyFlowMixin):
         self._audit_cache_prompt: str = ""
         self._pending_open_quote_no: str = ""
         self._pool = QThreadPool.globalInstance()
+        self._sc_toggle: Optional[QShortcut] = None
+        self._sc_esc: Optional[QShortcut] = None
 
 
 
     def _norm_quote_no(self, v) -> str:
-        s = str(v or "").strip().lstrip("#")
-        s = re.sub(r"\D", "", s)          # solo dígitos
-        if not s:
-            return ""
-        s2 = s.lstrip("0")              
-        return s2 if s2 else "0"
+        return quote_match_key(v)
 
     def _load_recent_examples_prompt(self, *, limit: int = 5) -> str:
         p = str(self.audit_path or "").strip()
@@ -162,8 +160,8 @@ class AssistantController(ClarifyFlowMixin):
         self.dock.close_requested.connect(self._hide_and_reset)
         self.dock.maximize_requested.connect(self._toggle_maximize)
 
-        QShortcut(QKeySequence("Ctrl+K"), self.w, activated=self.toggle)
-        QShortcut(QKeySequence("Esc"), self.w, activated=self._hide_and_reset)
+        self._sc_toggle = QShortcut(QKeySequence("Ctrl+K"), self.w, activated=self.toggle)
+        self._sc_esc = QShortcut(QKeySequence("Esc"), self.w, activated=self._hide_and_reset)
 
         try:
             cm = self.catalog_manager or getattr(self.w, "catalog_manager", None)
@@ -182,6 +180,47 @@ class AssistantController(ClarifyFlowMixin):
             self._pool.start(WarmupTask(self.planner))
         except Exception:
             pass
+
+    def uninstall(self):
+        """
+        Desmonta el asistente del window (dock + atajos).
+        """
+        try:
+            self._hide_and_reset()
+        except Exception:
+            pass
+
+        for attr in ("_sc_toggle", "_sc_esc"):
+            sc = getattr(self, attr, None)
+            if sc is None:
+                continue
+            try:
+                sc.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                sc.activated.disconnect()
+            except Exception:
+                pass
+            try:
+                sc.setParent(None)
+                sc.deleteLater()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+        dock = self.dock
+        if dock is not None:
+            try:
+                self.w.removeDockWidget(dock)
+            except Exception:
+                pass
+            try:
+                dock.setParent(None)
+                dock.deleteLater()
+            except Exception:
+                pass
+        self.dock = None
 
     def _welcome_text(self) -> str:
         return (
@@ -389,7 +428,11 @@ class AssistantController(ClarifyFlowMixin):
         elif re.search(r"\b(cotizaci[oó]n|cotizacion|panel)\b", tail, flags=re.I):
             target = "quote"
 
-        mnum = re.search(r"#?\s*(\d{1,10})\b", tail)
+        mnum = re.search(
+            r"([A-Za-z]{2}-[A-Za-z0-9]+-\d{1,10}|[A-Za-z]{2}-\d{1,10}|#?\d{1,10})\b",
+            tail,
+            flags=re.I,
+        )
         if not mnum:
             return "", ""
         qn = self._norm_quote_no(mnum.group(1))

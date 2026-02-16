@@ -1,20 +1,15 @@
 # src/ai/assistant/open_ui.py
 from __future__ import annotations
 
-import re
 from typing import Optional, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QTableView, QPushButton
+from ...quote_code import quote_match_key
 
 
 def norm_quote_digits(v: object) -> str:
-    s = str(v or "").strip().lstrip("#")
-    s = re.sub(r"\D+", "", s)
-    if not s:
-        return ""
-    s2 = s.lstrip("0")
-    return s2 if s2 else "0"
+    return quote_match_key(v)
 
 
 def pretty_quote_no(digits: str) -> str:

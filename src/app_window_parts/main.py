@@ -12,6 +12,8 @@ from ..config import (
     SECONDARY_CURRENCY,
     get_secondary_currencies,
     set_currency_context,
+    is_ai_enabled,
+    is_recommendations_enabled,
 )
 from ..logging_setup import get_logger
 
@@ -86,19 +88,24 @@ class SistemaCotizaciones(
         )
 
         self._use_ai_completer = True
+        self._recommendations_enabled = bool(is_recommendations_enabled(refresh=True))
         self._build_ui()
         self.entry_cliente.textChanged.connect(self._update_title_with_client)
         self._update_title_with_client(self.entry_cliente.text())
         self._build_completer()
+        self.set_recommendations_enabled(self._recommendations_enabled)
 
         self.model.item_added.connect(self._focus_last_row)
 
 
         # --- Asistente tipo chat (acciones con confirmación) ---
-        try:
-            from ..ai.assistant import attach_assistant
-            self._assistant = attach_assistant(self)
-        except Exception:
+        if is_ai_enabled(refresh=True):
+            try:
+                from ..ai.assistant import attach_assistant
+                self._assistant = attach_assistant(self)
+            except Exception:
+                self._assistant = None
+        else:
             self._assistant = None
 
         # Suscripción a catálogo global
@@ -130,6 +137,13 @@ class SistemaCotizaciones(
             bottom = self.model.index(self.model.rowCount() - 1, self.model.columnCount() - 1)
             self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
 
+    def set_recommendations_enabled(self, enabled: bool):
+        self._recommendations_enabled = bool(enabled)
+        try:
+            self._apply_recommendations_ui_state()
+        except Exception:
+            pass
+
     def _on_catalog_updated(self, df_productos: pd.DataFrame, df_presentaciones: pd.DataFrame):
         try:
             self.productos = df_productos.to_dict("records") if df_productos is not None else []
@@ -147,7 +161,14 @@ class SistemaCotizaciones(
                 pass
 
             prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
-            pres_map = {str(p.get("CODIGO_NORM", "")).strip().upper(): p for p in (self.presentaciones or [])}
+            pres_map = {}
+            for p in (self.presentaciones or []):
+                k1 = str(p.get("CODIGO_NORM", "")).strip().upper()
+                k2 = str(p.get("CODIGO", "")).strip().upper()
+                if k1:
+                    pres_map[k1] = p
+                if k2:
+                    pres_map[k2] = p
 
             changed_any = False
             for it in (self.items or []):
@@ -189,7 +210,14 @@ class SistemaCotizaciones(
         self.entry_telefono.setText(payload.get("telefono", "") or "")
 
         prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
-        pres_map = {str(p.get("CODIGO_NORM", "")).strip().upper(): p for p in (self.presentaciones or [])}
+        pres_map = {}
+        for p in (self.presentaciones or []):
+            k1 = str(p.get("CODIGO_NORM", "")).strip().upper()
+            k2 = str(p.get("CODIGO", "")).strip().upper()
+            if k1:
+                pres_map[k1] = p
+            if k2:
+                pres_map[k2] = p
 
         def _extract_stock(prod: dict) -> float | None:
             # ✅ soporta diferentes nombres de columna según tu Excel/DB

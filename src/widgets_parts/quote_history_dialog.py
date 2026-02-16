@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import os
 import datetime
+import re
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
-    QApplication, QDialog, QInputDialog,
+    QApplication, QDialog, QInputDialog, QCheckBox, QComboBox, QFormLayout, QGroupBox,
 )
 
 from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.settings_repo import get_setting, set_setting
 from sqlModels.quotes_repo import (
     list_quotes, get_quote_header, get_quote_items, soft_delete_quote,
     update_quote_payment, update_quote_status,
@@ -27,7 +29,21 @@ from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
 
 from ..db_path import resolve_db_path
 from ..catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
-from ..config import APP_CURRENCY, APP_COUNTRY, get_currency_context, set_currency_context
+from ..config import (
+    ALLOWED_COMPANY_TYPES,
+    APP_CONFIG,
+    APP_CURRENCY,
+    APP_COUNTRY,
+    COUNTRY_CODE,
+    STORE_ID,
+    get_currency_context,
+    set_currency_context,
+    is_ai_enabled,
+    set_ai_enabled,
+    is_recommendations_enabled,
+    set_recommendations_enabled,
+)
+from ..quote_code import format_quote_code, quote_match_key
 
 from ..app_window import SistemaCotizaciones
 from ..app_window_parts.ticket_actions import generar_ticket_para_cotizacion
@@ -39,7 +55,6 @@ from .quote_status_dialog import QuoteStatusDialog
 from .status_colors import bg_for_status, best_text_color_for_bg
 
 # ✅ NUEVO: dock assistant
-from ..ai.assistant import attach_assistant
 
 log = get_logger(__name__)
 
@@ -111,6 +126,284 @@ def _is_today(value) -> bool:
         return dt.date() == datetime.datetime.now().date()
     except Exception:
         return False
+
+
+class HistoryConfigDialog(QDialog):
+    _ADMIN_PASSWORD = "Papina."
+
+    def __init__(self, history_window: "QuoteHistoryWindow"):
+        super().__init__(history_window)
+        self._history = history_window
+        self.setWindowTitle("Configuracion")
+        self.resize(520, 520)
+
+        layout = QVBoxLayout(self)
+
+        self.chk_ai = QCheckBox("Activar IA (chat y arranque de Ollama)")
+        self.chk_ai.setChecked(bool(is_ai_enabled(refresh=True)))
+        self.chk_ai.toggled.connect(self._on_ai_toggled)
+
+        self.chk_recs = QCheckBox("Activar recomendaciones")
+        self.chk_recs.setChecked(bool(is_recommendations_enabled(refresh=True)))
+        self.chk_recs.toggled.connect(self._on_recs_toggled)
+
+        self.btn_chat_style = QPushButton("Personalizar chat")
+        self.btn_chat_style.clicked.connect(self._open_chat_style)
+
+        self.btn_rates = QPushButton("Configurar tasas de cambio")
+        self.btn_rates.clicked.connect(self._open_rates)
+
+        self.btn_unlock_app_values = QPushButton("Modificar valores de la aplicación")
+        self.btn_unlock_app_values.clicked.connect(self._unlock_app_values)
+
+        self.grp_app_values = QGroupBox("Valores de la aplicacion")
+        self.grp_app_values.setVisible(False)
+        self.grp_app_values.setEnabled(False)
+
+        form = QFormLayout(self.grp_app_values)
+        self.cmb_country = QComboBox()
+        self.cmb_country.addItems(["PARAGUAY", "PERU", "VENEZUELA"])
+
+        self.cmb_listing_type = QComboBox()
+        self.cmb_listing_type.addItems(["AMBOS", "PRODUCTOS", "PRESENTACIONES"])
+
+        self.chk_allow_no_stock = QCheckBox("Permitir cotizar sin stock")
+
+        self.ed_store_id = QLineEdit()
+        self.ed_store_id.setPlaceholderText("Ej: 01")
+
+        self.cmb_company_type = QComboBox()
+        self.cmb_company_type.addItems([str(x) for x in ALLOWED_COMPANY_TYPES])
+
+        self.ed_username = QLineEdit()
+        self.ed_username.setPlaceholderText("Nombre de usuario")
+
+        form.addRow("Pais:", self.cmb_country)
+        form.addRow("Tipo de listado:", self.cmb_listing_type)
+        form.addRow("", self.chk_allow_no_stock)
+        form.addRow("Store ID:", self.ed_store_id)
+        form.addRow("Compania:", self.cmb_company_type)
+        form.addRow("Nombre de usuario:", self.ed_username)
+
+        row_actions = QHBoxLayout()
+        self.btn_save_app_values = QPushButton("Guardar valores de aplicacion")
+        self.btn_save_app_values.clicked.connect(self._save_app_values)
+        row_actions.addStretch(1)
+        row_actions.addWidget(self.btn_save_app_values)
+        form.addRow(row_actions)
+
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+
+        layout.addWidget(self.chk_ai)
+        layout.addWidget(self.chk_recs)
+        layout.addSpacing(8)
+        layout.addWidget(self.btn_chat_style)
+        layout.addWidget(self.btn_rates)
+        layout.addSpacing(12)
+        layout.addWidget(self.btn_unlock_app_values)
+        layout.addWidget(self.grp_app_values)
+        layout.addStretch(1)
+        layout.addWidget(btn_close)
+
+        self._load_app_values()
+        self._sync_controls()
+
+    def _sync_controls(self):
+        ai_on = bool(is_ai_enabled(refresh=True))
+        self.btn_chat_style.setVisible(ai_on)
+        self.btn_chat_style.setEnabled(ai_on)
+        if ai_on:
+            self.btn_chat_style.setToolTip("Personalizar apariencia del chat.")
+        else:
+            self.btn_chat_style.setToolTip("No disponible: IA desactivada.")
+
+    def _on_ai_toggled(self, checked: bool):
+        try:
+            set_ai_enabled(bool(checked))
+        except Exception as e:
+            self.chk_ai.blockSignals(True)
+            self.chk_ai.setChecked(bool(is_ai_enabled(refresh=True)))
+            self.chk_ai.blockSignals(False)
+            QMessageBox.critical(self, "Error", f"No se pudo actualizar IA:\n{e}")
+            return
+
+        try:
+            self._history.refresh_ai_controls()
+        except Exception:
+            pass
+        self._sync_controls()
+
+    def _on_recs_toggled(self, checked: bool):
+        try:
+            set_recommendations_enabled(bool(checked))
+        except Exception as e:
+            self.chk_recs.blockSignals(True)
+            self.chk_recs.setChecked(bool(is_recommendations_enabled(refresh=True)))
+            self.chk_recs.blockSignals(False)
+            QMessageBox.critical(self, "Error", f"No se pudo actualizar recomendaciones:\n{e}")
+            return
+
+        try:
+            self._history.refresh_recommendations_controls()
+        except Exception:
+            pass
+
+    def _open_chat_style(self):
+        try:
+            self._history.open_chat_personalization()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo abrir personalizacion:\n{e}")
+
+    def _open_rates(self):
+        dlg = RatesDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                if self._history.quote_events is not None:
+                    self._history.quote_events.rates_updated.emit()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _set_combo_value(combo: QComboBox, value: str) -> None:
+        val = str(value or "").strip()
+        if not val:
+            return
+        idx = combo.findText(val, Qt.MatchExactly)
+        if idx < 0:
+            idx = combo.findText(val.upper(), Qt.MatchExactly)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _load_app_values(self) -> None:
+        country = str(APP_CONFIG.get("country", "PARAGUAY")).strip().upper()
+        listing_type = str(APP_CONFIG.get("listing_type", "AMBOS")).strip().upper()
+        allow_no_stock = bool(APP_CONFIG.get("allow_no_stock", False))
+        store_id = str(APP_CONFIG.get("store_id", "")).strip()
+        company_type = str(APP_CONFIG.get("company_type", ALLOWED_COMPANY_TYPES[0])).strip().upper()
+        username = str(APP_CONFIG.get("username", "")).strip()
+
+        con = None
+        try:
+            con = connect(resolve_db_path())
+            ensure_schema(con)
+
+            country = get_setting(con, "country", country).strip().upper()
+            listing_type = get_setting(con, "listing_type", listing_type).strip().upper()
+            allow_raw = get_setting(con, "allow_no_stock", "1" if allow_no_stock else "0").strip().lower()
+            allow_no_stock = allow_raw in ("1", "true", "yes", "on", "si")
+            store_id = get_setting(con, "store_id", store_id).strip()
+            company_type = get_setting(con, "company_type", company_type).strip().upper()
+            username = get_setting(con, "username", username).strip()
+        except Exception:
+            log.exception("No se pudieron cargar los valores protegidos de configuracion.")
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        self._set_combo_value(self.cmb_country, country)
+        self._set_combo_value(self.cmb_listing_type, listing_type)
+        self.chk_allow_no_stock.setChecked(bool(allow_no_stock))
+        self.ed_store_id.setText(store_id)
+        self._set_combo_value(self.cmb_company_type, company_type)
+        self.ed_username.setText(username)
+
+    def _unlock_app_values(self) -> None:
+        text, ok = QInputDialog.getText(
+            self,
+            "Clave de configuracion",
+            "Ingrese la clave:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return
+
+        if str(text or "").strip() != self._ADMIN_PASSWORD:
+            log.warning("Intento de desbloqueo de configuracion con clave incorrecta.")
+            QMessageBox.warning(self, "Clave incorrecta", "La clave ingresada no es valida.")
+            return
+
+        self.grp_app_values.setVisible(True)
+        self.grp_app_values.setEnabled(True)
+        self.btn_unlock_app_values.setEnabled(False)
+        self.btn_unlock_app_values.setText("Valores de la aplicacion habilitados")
+        log.info("Se habilitaron los valores protegidos de configuracion.")
+
+    def _save_app_values(self) -> None:
+        allowed_countries = {"PARAGUAY", "PERU", "VENEZUELA"}
+        allowed_listing_types = {"AMBOS", "PRODUCTOS", "PRESENTACIONES"}
+        allowed_company_types = {str(x).strip().upper() for x in ALLOWED_COMPANY_TYPES}
+
+        country = str(self.cmb_country.currentText() or "").strip().upper()
+        listing_type = str(self.cmb_listing_type.currentText() or "").strip().upper()
+        allow_no_stock = bool(self.chk_allow_no_stock.isChecked())
+        store_id = str(self.ed_store_id.text() or "").strip().upper()
+        company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
+        username = str(self.ed_username.text() or "").strip()
+
+        if country not in allowed_countries:
+            QMessageBox.warning(self, "Validacion", "Pais invalido.")
+            return
+        if listing_type not in allowed_listing_types:
+            QMessageBox.warning(self, "Validacion", "Tipo de listado invalido.")
+            return
+        if company_type not in allowed_company_types:
+            QMessageBox.warning(self, "Validacion", "Compania invalida.")
+            return
+        if store_id and not re.fullmatch(r"[A-Za-z0-9]+", store_id):
+            QMessageBox.warning(
+                self,
+                "Validacion",
+                "Store ID invalido. Use solo letras y numeros.",
+            )
+            return
+
+        con = None
+        try:
+            con = connect(resolve_db_path())
+            ensure_schema(con)
+            with tx(con):
+                set_setting(con, "country", country)
+                set_setting(con, "listing_type", listing_type)
+                set_setting(con, "allow_no_stock", "1" if allow_no_stock else "0")
+                set_setting(con, "store_id", store_id)
+                set_setting(con, "company_type", company_type)
+                set_setting(con, "username", username)
+        except Exception as e:
+            log.exception("No se pudieron guardar los valores protegidos de configuracion.")
+            QMessageBox.critical(self, "Error", f"No se pudieron guardar los cambios:\n{e}")
+            return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        APP_CONFIG["country"] = country
+        APP_CONFIG["listing_type"] = listing_type
+        APP_CONFIG["allow_no_stock"] = allow_no_stock
+        APP_CONFIG["store_id"] = store_id
+        APP_CONFIG["company_type"] = company_type
+        APP_CONFIG["username"] = username
+
+        log.info(
+            "Configuracion protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s",
+            country,
+            listing_type,
+            allow_no_stock,
+            store_id,
+            company_type,
+            username,
+        )
+        QMessageBox.information(
+            self,
+            "Configuracion guardada",
+            "Los cambios fueron guardados.\nReinicie la aplicacion para aplicar todos los cambios globales.",
+        )
 
 
 class QuotesTableModel(QAbstractTableModel):
@@ -275,7 +568,7 @@ class QuotesTableModel(QAbstractTableModel):
         if c == self._idx_no():
             qn = r.get("quote_no")
             try:
-                return (False, int(str(qn).strip()))
+                return (False, int(quote_match_key(qn)), key_text(qn))
             except Exception:
                 return (qn is None, key_text(qn))
 
@@ -341,12 +634,9 @@ class QuoteHistoryWindow(QMainWindow):
         self.quote_events = quote_events
 
         # ✅ Asistente dock (reemplaza ChatQuoteDialog)
-        self.assistant = attach_assistant(
-            self,
-            catalog_manager=self.catalog_manager,
-            quote_events=self.quote_events,
-            app_icon=self.windowIcon(),
-        )
+        self.assistant = None
+        if is_ai_enabled(refresh=True):
+            self._attach_assistant()
 
         show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
         self.model = QuotesTableModel(show_payment=show_payment)
@@ -477,6 +767,7 @@ class QuoteHistoryWindow(QMainWindow):
         main.addLayout(actions)
 
         self._apply_catalog_gate()
+        self.refresh_recommendations_controls()
         self._reload_first_page()
 
     # -----------------------------
@@ -513,6 +804,12 @@ class QuoteHistoryWindow(QMainWindow):
             except Exception:
                 pass
 
+            try:
+                if hasattr(win, "set_recommendations_enabled"):
+                    win.set_recommendations_enabled(bool(is_recommendations_enabled(refresh=True)))
+            except Exception:
+                pass
+
             self._open_windows.append(win)
             self._prune_open_windows()
         except Exception:
@@ -540,6 +837,98 @@ class QuoteHistoryWindow(QMainWindow):
         self._prune_open_windows()
         return len(self._open_windows or []) == 0
 
+    def _attach_assistant(self):
+        if self.assistant is not None:
+            return
+        try:
+            from ..ai.assistant import attach_assistant
+            self.assistant = attach_assistant(
+                self,
+                catalog_manager=self.catalog_manager,
+                quote_events=self.quote_events,
+                app_icon=self.windowIcon(),
+            )
+        except Exception:
+            self.assistant = None
+
+    def _detach_assistant(self):
+        ctl = self.assistant
+        if ctl is None:
+            return
+        try:
+            if hasattr(ctl, "uninstall"):
+                ctl.uninstall()
+            else:
+                dock = getattr(ctl, "dock", None)
+                if dock is not None:
+                    try:
+                        dock.hide()
+                    except Exception:
+                        pass
+                    try:
+                        self.removeDockWidget(dock)
+                    except Exception:
+                        pass
+                    try:
+                        dock.setParent(None)
+                        dock.deleteLater()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self.assistant = None
+
+    def refresh_ai_controls(self):
+        ai_on = bool(is_ai_enabled(refresh=True))
+        if ai_on:
+            self._attach_assistant()
+        else:
+            self._detach_assistant()
+        self._apply_catalog_gate()
+
+    def refresh_recommendations_controls(self):
+        enabled = bool(is_recommendations_enabled(refresh=True))
+        wins = list(self._alive_quote_windows())
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SistemaCotizaciones) and w not in wins:
+                    wins.append(w)
+        except Exception:
+            pass
+
+        for w in wins:
+            try:
+                if hasattr(w, "set_recommendations_enabled"):
+                    w.set_recommendations_enabled(enabled)
+            except Exception:
+                pass
+
+    def open_chat_personalization(self):
+        if not is_ai_enabled(refresh=True):
+            QMessageBox.information(self, "IA desactivada", "Activa la IA para personalizar el chat.")
+            return
+
+        self.refresh_ai_controls()
+        dock = None
+        try:
+            if self.assistant is not None:
+                dock = getattr(self.assistant, "dock", None)
+        except Exception:
+            dock = None
+
+        if dock is None:
+            QMessageBox.information(
+                self,
+                "Chat no disponible",
+                "No encontre el panel del asistente.\n\nAbre el chat (Ctrl+K) para inicializarlo y vuelve a intentar.",
+            )
+            return
+
+        try:
+            dock.open_personalization_dialog()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo abrir la personalizacion:\n{e}")
+
     # -----------------------------
 
     def _on_quote_saved(self):
@@ -557,13 +946,23 @@ class QuoteHistoryWindow(QMainWindow):
 
     def _apply_catalog_gate(self):
         ok = self._has_products()
+        ai_on = bool(is_ai_enabled(refresh=True))
+        chat_ok = ok and ai_on and (self.assistant is not None)
         self.btn_new.setEnabled(ok)
         self.btn_dup.setEnabled(ok)
-        self.btn_chat.setEnabled(ok)
+        self.btn_chat.setVisible(ai_on)
+        self.btn_chat.setEnabled(chat_ok)
         tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
         self.btn_new.setToolTip("" if ok else tip)
         self.btn_dup.setToolTip("" if ok else tip)
-        self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra." if ok else tip)
+        if not ai_on:
+            self.btn_chat.setToolTip("Asistente desactivado por configuración (enable_ai=0).")
+        elif not ok:
+            self.btn_chat.setToolTip(tip)
+        elif self.assistant is None:
+            self.btn_chat.setToolTip("No se pudo iniciar el asistente.")
+        else:
+            self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra.")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -719,6 +1118,10 @@ class QuoteHistoryWindow(QMainWindow):
         if not self._has_products():
             QMessageBox.warning(self, "Sin productos", "Usa ☰ Menú → Actualizar productos.")
             return
+        self.refresh_ai_controls()
+        if (not is_ai_enabled(refresh=True)) or (self.assistant is None):
+            QMessageBox.information(self, "Chat desactivado", "El asistente está desactivado en configuración.")
+            return
         try:
             self.assistant.toggle()
         except Exception:
@@ -837,6 +1240,12 @@ class QuoteHistoryWindow(QMainWindow):
             app_icon=self.windowIcon(),
             parent=self,
         )
+
+    def _open_config_dialog(self):
+        dlg = HistoryConfigDialog(self)
+        dlg.exec()
+        self.refresh_ai_controls()
+        self.refresh_recommendations_controls()
 
     def _open_pdf(self):
         qid = self._selected_quote_id()
@@ -980,12 +1389,19 @@ class QuoteHistoryWindow(QMainWindow):
             _items_base, items_shown = get_quote_items(con, qid)
             con.close()
 
-            pdf_path = header.get("pdf_path", "")
+            pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
             cliente = header.get("cliente", "")
+            quote_code = format_quote_code(
+                country_code=header.get("country_code") or COUNTRY_CODE,
+                store_id=STORE_ID,
+                quote_no=header.get("quote_no"),
+                width=7,
+            )
 
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=pdf_path,
                 items_pdf=items_shown,
+                quote_code=quote_code,
                 cliente_nombre=cliente,
                 printer_name="TICKERA",
                 width=48,
@@ -1017,10 +1433,27 @@ class QuoteHistoryWindow(QMainWindow):
             _items_base, items_shown = get_quote_items(con, qid)
             con.close()
 
-            out_path = resolve_pdf_path_portable(header.get("pdf_path"))
-            if not out_path:
+            old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
+            if not old_out_path:
                 QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
                 return
+
+            quote_code = format_quote_code(
+                country_code=header.get("country_code") or COUNTRY_CODE,
+                store_id=STORE_ID,
+                quote_no=header.get("quote_no"),
+                width=7,
+            )
+
+            old_base = os.path.splitext(os.path.basename(old_out_path))[0]
+            if "_" in old_base:
+                suffix = old_base.split("_", 1)[1].strip()
+            else:
+                cli_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(header.get("cliente") or "").strip()).strip("_")
+                suffix = cli_slug or "cliente"
+
+            new_filename = f"C-{quote_code}_{suffix}.pdf"
+            new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
 
             metodo_pago = (header.get("metodo_pago") or "").strip()
             if APP_COUNTRY == "PERU":
@@ -1044,9 +1477,32 @@ class QuoteHistoryWindow(QMainWindow):
                 "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
             }
 
-            generar_pdf(datos, fixed_quote_no=str(header.get("quote_no", "")).zfill(7), out_path=out_path)
+            generar_pdf(datos, fixed_quote_no=quote_code, out_path=new_out_path)
 
-            QMessageBox.information(self, "PDF regenerado", f"PDF actualizado:\n{out_path}")
+            con = connect(self._db_path)
+            ensure_schema(con)
+            with tx(con):
+                con.execute(
+                    "UPDATE quotes SET quote_no = ?, pdf_path = ? WHERE id = ?",
+                    (quote_code, os.path.basename(new_out_path), int(qid)),
+                )
+            con.close()
+
+            if os.path.abspath(old_out_path) != os.path.abspath(new_out_path):
+                try:
+                    if os.path.exists(old_out_path):
+                        os.remove(old_out_path)
+                except Exception:
+                    pass
+
+            self._reload_current_page()
+            self._select_row_by_quote_id(qid)
+
+            QMessageBox.information(
+                self,
+                "PDF regenerado",
+                f"PDF actualizado:\n{new_out_path}\n\nCódigo: {quote_code}",
+            )
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
         except Exception as e:
             log.exception("Error regenerando PDF")

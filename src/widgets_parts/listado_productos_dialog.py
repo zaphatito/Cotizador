@@ -33,8 +33,7 @@ class ListadoProductosDialog(QDialog):
 
     IMPORTANTE:
       - Los productos cuyo id empieza con "PC" y categoría "OTROS"
-        se consideran presentaciones → solo aparecen en la pestaña
-        "Presentaciones", NO en "Productos".
+        no se muestran en la pestaña de Presentaciones.
       - Si NOT ALLOW_NO_STOCK: no se listan items con stock <= 0
     """
 
@@ -88,11 +87,6 @@ class ListadoProductosDialog(QDialog):
             self.tabs.addTab(self.tab_prod, "Productos")
 
             for p in productos or []:
-                pid = str(p.get("id", "")).upper()
-                cat = (p.get("categoria", "") or "").upper()
-                if pid.startswith("PC") and cat == "OTROS":
-                    continue
-
                 stock = float(nz(p.get("cantidad_disponible"), 0.0))
 
                 # ✅ NO mostrar sin stock si está deshabilitado
@@ -153,6 +147,8 @@ class ListadoProductosDialog(QDialog):
                 codigo = str(codigo).strip()
                 nombre = str(nombre).strip()
                 categoria = str(categoria).strip() or "PRESENTACION"
+                if codigo.upper().startswith("PC"):
+                    continue
 
                 if not codigo and not nombre:
                     continue
@@ -186,32 +182,6 @@ class ListadoProductosDialog(QDialog):
                         "genero": genero,
                         "precio": float(precio),
                         "stock": stock,
-                        "tipo": "Presentación",
-                    }
-                )
-
-            # PCs (presentaciones desde productos con id PC* y cat OTROS)
-            pcs = [
-                p
-                for p in (productos or [])
-                if str(p.get("id", "")).upper().startswith("PC")
-                and (p.get("categoria", "").upper() == "OTROS")
-            ]
-            for pc in pcs:
-                stock_to_show = float(nz(pc.get("cantidad_disponible"), 0.0))
-
-                # ✅ NO mostrar sin stock si está deshabilitado
-                if (not ALLOW_NO_STOCK) and stock_to_show <= 0.0:
-                    continue
-
-                self._rows_pres.append(
-                    {
-                        "codigo": pc.get("id", ""),
-                        "nombre": f"Presentación (PC) - {pc.get('nombre','')}",
-                        "categoria": "PRESENTACION",
-                        "genero": pc.get("genero", ""),
-                        "precio": float(nz(pc.get("precio_unitario", pc.get("precio_venta")), 0.0)),
-                        "stock": stock_to_show,
                         "tipo": "Presentación",
                     }
                 )

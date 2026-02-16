@@ -96,10 +96,27 @@ class UiMixin:
         text = (self.entry_producto.text() or "").strip()
         if not text:
             return
-        cod = text.split(" - ")[0].strip()
+        cod = text
+        for sep in (" - ", " — ", " – ", " â€” ", " â€“ "):
+            if sep in cod:
+                cod = cod.split(sep, 1)[0].strip()
+                break
         if not cod:
             return
-        self._agregar_por_codigo(cod)
+        ok = self._agregar_por_codigo(cod, silent=True)
+        if not ok:
+            try:
+                idx = getattr(self, "_ai_index", None)
+                if idx is not None:
+                    rows = idx.search_products(cod, limit=1) or []
+                    if rows:
+                        alt = str(rows[0].get("codigo") or rows[0].get("id") or "").strip()
+                        if alt:
+                            ok = self._agregar_por_codigo(alt, silent=True)
+            except Exception:
+                pass
+        if not ok:
+            self._agregar_por_codigo(cod, silent=False)
         try:
             self.entry_producto.clear()
         except Exception:
@@ -119,6 +136,10 @@ class UiMixin:
 
             dbp = resolve_db_path()
             self._ai_index = LocalSearchIndex(dbp)
+            try:
+                self._ai_index.prewarm_async()
+            except Exception:
+                pass
             self._rec_engine = QuoteRecommender(dbp)
 
             self._ai_prod = SmartCompleter(
@@ -332,7 +353,41 @@ class UiMixin:
             mp.setdefault(code, set()).add(round(p, 6))
         return mp
 
+    def _recommendations_active(self) -> bool:
+        return bool(getattr(self, "_recommendations_enabled", True))
+
+    def _apply_recommendations_ui_state(self):
+        enabled = self._recommendations_active()
+
+        btn = getattr(self, "btn_autocompletar", None)
+        if btn is not None:
+            btn.setVisible(enabled)
+            btn.setEnabled(enabled)
+
+        if not enabled:
+            try:
+                if getattr(self, "_rec_prev_timer", None) is not None:
+                    self._rec_prev_timer.stop()
+            except Exception:
+                pass
+
+            self._tab_rec_sig = None
+            self._tab_recs = []
+            self._tab_rec_i = 0
+
+            try:
+                if getattr(self, "model", None) is not None and hasattr(self.model, "clear_recommendations_preview"):
+                    self.model.clear_recommendations_preview()
+            except Exception:
+                pass
+            return
+
+        self._schedule_refresh_recs_preview()
+
     def _get_recommendations(self, *, limit: int = 10):
+        if not self._recommendations_active():
+            return []
+
         eng = getattr(self, "_rec_engine", None)
         if eng is None:
             return []
@@ -540,6 +595,9 @@ class UiMixin:
     # ✅ CLICK en placeholders (doble clic / Enter)
     # =============================
     def _try_add_preview_from_row(self, row: int) -> bool:
+        if not self._recommendations_active():
+            return False
+
         try:
             model = getattr(self, "model", None)
             if model is None:
@@ -634,6 +692,9 @@ class UiMixin:
             pass
 
     def _tab_autocomplete_next(self) -> bool:
+        if not self._recommendations_active():
+            return False
+
         try:
             seeds = tuple([str(it.get("codigo") or "").strip().upper() for it in (self.items or []) if str(it.get("codigo") or "").strip()])
             trip = self._client_triplet_for_recs()
@@ -672,6 +733,9 @@ class UiMixin:
         return False
 
     def _on_autocomplete_clicked(self):
+        if not self._recommendations_active():
+            return
+
         recs = self._get_recommendations(limit=12)
         if not recs:
             try:
@@ -708,6 +772,14 @@ class UiMixin:
             return
 
     def _schedule_refresh_recs_preview(self):
+        if not self._recommendations_active():
+            try:
+                if getattr(self, "model", None) is not None and hasattr(self.model, "clear_recommendations_preview"):
+                    self.model.clear_recommendations_preview()
+            except Exception:
+                pass
+            return
+
         try:
             if getattr(self, "_rec_prev_timer", None) is None:
                 self._rec_prev_timer = QTimer(self)
@@ -786,6 +858,8 @@ class UiMixin:
                 key = ev.key()
 
                 if key == Qt.Key_F9:
+                    if not self._recommendations_active():
+                        return False
                     if not self._tab_autocomplete_next():
                         try:
                             Toast.notify(self, "No hay recomendaciones con suficiente confianza (≥20%).", duration_ms=2500, fade_ms=800)
@@ -796,6 +870,8 @@ class UiMixin:
                 if key in (Qt.Key_Return, Qt.Key_Enter):
                     txt = (self.entry_producto.text() or "").strip()
                     if not txt:
+                        if not self._recommendations_active():
+                            return False
                         if self._ai_product_popup_visible():
                             return False
                         if not self._tab_autocomplete_next():
@@ -936,6 +1012,7 @@ class UiMixin:
         self._apply_btn_responsive(self.btn_autocompletar, 125, 36)
         self.btn_autocompletar.setToolTip("Agrega productos recomendados por historial (F9 o Enter vacío agrega 1 a 1).")
         self.btn_autocompletar.clicked.connect(self._on_autocomplete_clicked)
+        self._apply_recommendations_ui_state()
 
         hbus.addWidget(lbl_bus)
         hbus.addWidget(self.entry_producto)

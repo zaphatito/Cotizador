@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 
 from .paths import set_win_app_id, load_app_icon, ensure_data_seed_if_empty, DATA_DIR
 from .logging_setup import get_logger
-from .config import COUNTRY_CODE, APP_CONFIG
+from .config import COUNTRY_CODE, APP_CONFIG, ENABLE_AI
 
 from .db_path import resolve_db_path
 from .catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
@@ -265,14 +265,16 @@ def run_app():
     # - Mantén el diálogo abierto en el camino "normal" para mostrar logs si toca descargar.
     # - En FAILED, igual intentamos levantar server pero sin bloquear UI con el dialog.
     try:
-        
-        app_root = _app_root()
+        if ENABLE_AI:
+            app_root = _app_root()
 
-        if res.get("status") != "FAILED_RETRY_LATER":
-            dlg.handle_event("status", {"text": "Inicializando IA offline (Ollama)…"})
-            ensure_ollama_on_startup(app_root=app_root, ui=dlg.handle_event, model="qwen2.5:14b-instruct")
+            if res.get("status") != "FAILED_RETRY_LATER":
+                dlg.handle_event("status", {"text": "Inicializando IA offline (Ollama)…"})
+                ensure_ollama_on_startup(app_root=app_root, ui=dlg.handle_event, model="qwen2.5:14b-instruct")
+            else:
+                ensure_ollama_on_startup(app_root=app_root, ui=None, model="qwen2.5:14b-instruct")
         else:
-            ensure_ollama_on_startup(app_root=app_root, ui=None, model="qwen2.5:14b-instruct")
+            log.info("IA desactivada por configuracion, no se inicia Ollama al arrancar.")
     except Exception:
         log.exception("Ollama: no se pudo iniciar/asegurar (se usará fallback).")
 

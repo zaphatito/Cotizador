@@ -53,6 +53,108 @@ def _normalize_tier_token(tier: str) -> str:
 
 
 class AddItemsMixin:
+    def _presentation_base_codes(self, pres: dict) -> set[str]:
+        raw = str(
+            pres.get("CODIGOS_PRODUCTO")
+            or pres.get("codigos_producto")
+            or ""
+        ).strip()
+        if not raw:
+            return set()
+        out = set()
+        for tok in raw.split(","):
+            t = str(tok or "").strip().upper()
+            if t:
+                out.add(t)
+        return out
+
+    def _find_presentacion_combo_match(self, cod_u: str):
+        """
+        Busca si `cod_u` viene como codigo combinado:
+          <codigo_base><codigo_presentacion>
+        Ejemplo: CC0370100
+        """
+        code = (cod_u or "").strip().upper()
+        if not code:
+            return None
+
+        prod_map = {
+            str(p.get("id", "")).strip().upper(): p
+            for p in (self.productos or [])
+            if str(p.get("id", "")).strip()
+        }
+
+        for pres in (self.presentaciones or []):
+            pres_codes = []
+            for k in ("CODIGO", "CODIGO_NORM", "codigo", "codigo_norm"):
+                v = str(pres.get(k) or "").strip().upper()
+                if v:
+                    pres_codes.append(v)
+
+            # Probar sufijo mas largo primero.
+            for pcode in sorted(set(pres_codes), key=len, reverse=True):
+                if not code.endswith(pcode):
+                    continue
+
+                base_code = code[: -len(pcode)]
+                if not base_code:
+                    continue
+
+                base = prod_map.get(base_code)
+                if not base:
+                    continue
+
+                base_codes_rel = self._presentation_base_codes(pres)
+                dep = str(pres.get("DEPARTAMENTO") or pres.get("departamento") or "").strip().upper()
+                gen = str(pres.get("GENERO") or pres.get("genero") or "").strip().lower()
+                base_dep = str(base.get("categoria") or "").strip().upper()
+                base_gen = str(base.get("genero") or "").strip().lower()
+                essence_cats = {c.upper() for c in CATS}
+                dep_is_presentation = dep in {"", "PRESENTACION", "PRESENTACIONES"}
+
+                if hasattr(self, "_is_generic_category_row") and self._is_generic_category_row(base):
+                    continue
+
+                gen_match = (not gen) or (gen == base_gen)
+                if dep_is_presentation and gen_match and (base_dep in essence_cats):
+                    return pres, base
+
+                if base_codes_rel and base_code in base_codes_rel and gen_match:
+                    return pres, base
+
+                dep_match = (not dep) or (dep == base_dep)
+                if dep_match and gen_match:
+                    return pres, base
+
+                # Fallback tolerante: cuando no hay relacion cargada en Hoja 3,
+                # permitir combinacion para bases de esencia.
+                if (not base_codes_rel) and (base_dep in essence_cats):
+                    return pres, base
+
+        return None
+
+    def _try_add_presentacion_by_combo_code(self, cod_u: str, *, silent: bool = False) -> bool:
+        match = self._find_presentacion_combo_match(cod_u)
+        if not match:
+            return False
+
+        if not listing_allows_presentations():
+            if not silent:
+                QMessageBox.warning(
+                    self,
+                    "Restringido por configuración",
+                    "El tipo de listado actual no permite Presentaciones.",
+                )
+            return False
+
+        pres, base = match
+        if hasattr(self, "_agregar_presentacion_con_base"):
+            return bool(self._agregar_presentacion_con_base(pres, base, silent=silent))
+
+        # Fallback (no debería ocurrir): abre selector normal.
+        self._selector_presentacion(pres)
+        return True
+
     def agregar_producto_personalizado(self):
         dlg = CustomProductDialog(self, app_icon=self._app_icon)
         if dlg.exec() != QDialog.Accepted or not dlg.resultado:
@@ -93,7 +195,85 @@ class AddItemsMixin:
         if not cod_u:
             return False
 
-        # 1) Presentación tipo PC…
+        # 1) Código combinado base+presentación (ej: CC0370100)
+        if self._try_add_presentacion_by_combo_code(cod_u, silent=silent):
+            return True
+
+        # 2) Presentación de Hoja 2
+        # `PC*` se reserva para productos.
+        pres = None
+        if not cod_u.startswith("PC"):
+            pres = next(
+                (
+                    p
+                    for p in self.presentaciones
+                    if str(p.get("CODIGO", "")).upper() == cod_u
+                    or str(p.get("CODIGO_NORM", "")).upper() == cod_u
+                ),
+                None,
+            )
+        if pres:
+            if not listing_allows_presentations():
+                if not silent:
+                    QMessageBox.warning(
+                        self,
+                        "Restringido por configuración",
+                        "El tipo de listado actual no permite Presentaciones.",
+                    )
+                return False
+            self._selector_presentacion(pres)
+            return True
+
+        # 3) Producto de catálogo (incluye códigos PC* si existen como producto)
+        prod = next(
+            (p for p in self.productos if str(p.get("id", "")).upper() == cod_u),
+            None,
+        )
+        if prod:
+            if not listing_allows_products():
+                if not silent:
+                    QMessageBox.warning(
+                        self,
+                        "Restringido por configuración",
+                        "El tipo de listado actual no permite Productos.",
+                    )
+                return False
+
+            if float(nz(prod.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
+                if not silent:
+                    QMessageBox.warning(
+                        self, "Sin stock", "❌ Este producto no tiene stock disponible."
+                    )
+                return False
+
+            cat = (prod.get("categoria") or "").upper()
+
+            qty_default = 0.001 if (APP_COUNTRY == "PERU" and cat in CATS) else 1.0
+            unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
+
+            factor = factor_total_por_categoria(cat)
+            subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
+
+            item = {
+                "_prod": prod,
+                "codigo": prod["id"],
+                "producto": prod["nombre"],
+                "categoria": cat,
+                "cantidad": qty_default,
+                "ml": prod.get("ml", ""),
+                "precio": float(unit_price),
+                "subtotal_base": subtotal_base,
+                "total": subtotal_base,
+                "observacion": "",
+                "stock_disponible": float(nz(prod.get("cantidad_disponible"), 0.0)),
+                "precio_override": None,
+                "precio_tier": "UNITARIO" if cat == "BOTELLAS" else None,
+                "factor_total": factor,
+            }
+            self.model.add_item(item)
+            return True
+
+        # 4) Legacy PC como presentación (solo si no existe como producto normal)
         if cod_u.startswith("PC"):
             if not listing_allows_presentations():
                 if not silent:
@@ -137,79 +317,9 @@ class AddItemsMixin:
                 self._selector_pc(pc)
                 return True
 
-        # 2) Presentación de Hoja 2
-        pres = next(
-            (
-                p
-                for p in self.presentaciones
-                if str(p.get("CODIGO", "")).upper() == cod_u
-            ),
-            None,
-        )
-        if pres:
-            if not listing_allows_presentations():
-                if not silent:
-                    QMessageBox.warning(
-                        self,
-                        "Restringido por configuración",
-                        "El tipo de listado actual no permite Presentaciones.",
-                    )
-                return False
-            self._selector_presentacion(pres)
-            return True
-
-        # 3) Producto de catálogo
-        prod = next(
-            (p for p in self.productos if str(p.get("id", "")).upper() == cod_u),
-            None,
-        )
-        if not prod:
-            if not silent:
-                QMessageBox.warning(self, "Advertencia", "❌ Producto no encontrado")
-            return False
-
-        if not listing_allows_products():
-            if not silent:
-                QMessageBox.warning(
-                    self,
-                    "Restringido por configuración",
-                    "El tipo de listado actual no permite Productos.",
-                )
-            return False
-
-        if float(nz(prod.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
-            if not silent:
-                QMessageBox.warning(
-                    self, "Sin stock", "❌ Este producto no tiene stock disponible."
-                )
-            return False
-
-        cat = (prod.get("categoria") or "").upper()
-
-        qty_default = 0.001 if (APP_COUNTRY == "PERU" and cat in CATS) else 1.0
-        unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
-
-        factor = factor_total_por_categoria(cat)
-        subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
-
-        item = {
-            "_prod": prod,
-            "codigo": prod["id"],
-            "producto": prod["nombre"],
-            "categoria": cat,
-            "cantidad": qty_default,
-            "ml": prod.get("ml", ""),
-            "precio": float(unit_price),
-            "subtotal_base": subtotal_base,
-            "total": subtotal_base,
-            "observacion": "",
-            "stock_disponible": float(nz(prod.get("cantidad_disponible"), 0.0)),
-            "precio_override": None,
-            "precio_tier": "UNITARIO" if cat == "BOTELLAS" else None,
-            "factor_total": factor,
-        }
-        self.model.add_item(item)
-        return True
+        if not silent:
+            QMessageBox.warning(self, "Advertencia", "❌ Producto no encontrado")
+        return False
 
     def agregar_recomendado(
         self,

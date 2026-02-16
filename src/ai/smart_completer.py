@@ -168,6 +168,11 @@ class SmartCompleter(QObject):
                         self._move_sel(1 if key == Qt.Key_Down else -1)
                         return True
                     if key in (Qt.Key_Return, Qt.Key_Enter):
+                        if self.kind == "product":
+                            typed_code = self._typed_code()
+                            if typed_code:
+                                if self._pick_by_code(typed_code):
+                                    return True
                         self._pick_current()
                         return True
                     if key == Qt.Key_Escape:
@@ -213,12 +218,12 @@ class SmartCompleter(QObject):
             for r in rows or []:
                 codigo = str(r.get("codigo") or r.get("id") or "").strip()
                 nombre = str(r.get("nombre") or "").strip()
-                cat = str(r.get("categoria") or "")
-                gen = str(r.get("genero") or "")
+                cat = str(r.get("categoria") or "").strip()
+                gen = str(r.get("genero") or "").strip()
                 ml = str(r.get("ml") or "")
-                # ✅ siempre mostrar nombre si existe
-                title = f"{codigo} — {nombre}".strip(" —") if nombre else codigo
-                subtitle = " | ".join([x for x in [cat, gen, ml] if x]).strip()
+                # Formato fijo solicitado: codigo - nombre - categoria - genero
+                title = f"{codigo} - {nombre} - {cat} - {gen}".strip()
+                subtitle = ml.strip()
                 items.append(SuggestItem(title=title, subtitle=subtitle, payload=dict(r)))
         else:
             for r in rows or []:
@@ -256,6 +261,30 @@ class SmartCompleter(QObject):
         row = cur.row() if cur.isValid() else 0
         row = max(0, min(self._model.rowCount() - 1, row + int(delta)))
         self._view.setCurrentIndex(self._model.index(row, 0))
+
+    def _payload_code(self, payload: Dict[str, Any]) -> str:
+        return str(payload.get("codigo") or payload.get("id") or "").strip().upper()
+
+    def _typed_code(self) -> str:
+        text = str(self.line.text() or "").strip()
+        if not text:
+            return ""
+        for sep in (" - ", " — ", " – ", " â€” ", " â€“ "):
+            if sep in text:
+                text = text.split(sep, 1)[0].strip()
+                break
+        return text.upper()
+
+    def _pick_by_code(self, code_u: str) -> bool:
+        if not code_u:
+            return False
+        for row, it in enumerate(self._model.items):
+            if self._payload_code(it.payload) == code_u:
+                idx = self._model.index(row, 0)
+                self._view.setCurrentIndex(idx)
+                self._pick_index(idx)
+                return True
+        return False
 
     def _pick_index(self, idx: QModelIndex):
         it = self._model.get(idx.row())

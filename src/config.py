@@ -20,7 +20,12 @@ from sqlModels.settings_repo import (
 DEFAULT_CONFIG_STR: dict[str, str] = {
     "country": "PARAGUAY",
     "listing_type": "AMBOS",
+    "company_type": "LA CASA DEL PERFUME",
+    "store_id": "",
+    "username": "",
     "allow_no_stock": "0",
+    "enable_ai": "0",
+    "enable_recommendations": "1",
     "update_mode": "ASK",
     "update_check_on_startup": "1",
     "update_manifest_url": "",
@@ -31,6 +36,11 @@ DEFAULT_CONFIG_STR: dict[str, str] = {
 
 # Categorías granel
 CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
+
+ALLOWED_COMPANY_TYPES: tuple[str, str] = (
+    "LA CASA DEL PERFUME",
+    "EF PERFUMES",
+)
 
 
 def _is_frozen() -> bool:
@@ -152,6 +162,12 @@ def _load_seed_overrides_from_json() -> dict[str, str]:
 
     def b01(x) -> str:
         try:
+            if isinstance(x, str):
+                s = x.strip().lower()
+                if s in ("1", "true", "yes", "on", "si"):
+                    return "1"
+                if s in ("0", "false", "no", "off", ""):
+                    return "0"
             return "1" if bool(x) else "0"
         except Exception:
             return "0"
@@ -162,8 +178,26 @@ def _load_seed_overrides_from_json() -> dict[str, str]:
         out["country"] = str(raw["country"]).strip().upper()
     if "listing_type" in raw:
         out["listing_type"] = str(raw["listing_type"]).strip().upper()
+    if "company_type" in raw:
+        out["company_type"] = str(raw["company_type"]).strip().upper()
+    elif "company" in raw:
+        out["company_type"] = str(raw["company"]).strip().upper()
+    if "store_id" in raw:
+        out["store_id"] = str(raw["store_id"]).strip()
+    if "username" in raw:
+        out["username"] = str(raw["username"]).strip()
+    elif "user_name" in raw:
+        out["username"] = str(raw["user_name"]).strip()
     if "allow_no_stock" in raw:
         out["allow_no_stock"] = b01(raw["allow_no_stock"])
+    if "enable_ai" in raw:
+        out["enable_ai"] = b01(raw["enable_ai"])
+    elif "ai_enabled" in raw:
+        out["enable_ai"] = b01(raw["ai_enabled"])
+    if "enable_recommendations" in raw:
+        out["enable_recommendations"] = b01(raw["enable_recommendations"])
+    elif "recommendations_enabled" in raw:
+        out["enable_recommendations"] = b01(raw["recommendations_enabled"])
 
     if "update_mode" in raw:
         out["update_mode"] = str(raw["update_mode"]).strip().upper()
@@ -242,7 +276,16 @@ def _load_db_config() -> Dict[str, Any]:
     # leer settings
     country = get_setting(con, "country", DEFAULT_CONFIG_STR["country"]).strip().upper()
     listing_type = get_setting(con, "listing_type", DEFAULT_CONFIG_STR["listing_type"]).strip().upper()
+    company_type = get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]).strip().upper()
+    store_id = get_setting(con, "store_id", DEFAULT_CONFIG_STR["store_id"]).strip()
+    username = get_setting(con, "username", DEFAULT_CONFIG_STR["username"]).strip()
     allow_no_stock = get_setting(con, "allow_no_stock", DEFAULT_CONFIG_STR["allow_no_stock"]).strip()
+    enable_ai = get_setting(con, "enable_ai", DEFAULT_CONFIG_STR["enable_ai"]).strip()
+    enable_recs = get_setting(
+        con,
+        "enable_recommendations",
+        DEFAULT_CONFIG_STR["enable_recommendations"],
+    ).strip()
 
     update_mode = get_setting(con, "update_mode", DEFAULT_CONFIG_STR["update_mode"]).strip().upper()
     update_check = get_setting(con, "update_check_on_startup", DEFAULT_CONFIG_STR["update_check_on_startup"]).strip()
@@ -257,7 +300,12 @@ def _load_db_config() -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "country": country if country in ("PARAGUAY", "PERU", "VENEZUELA") else "PARAGUAY",
         "listing_type": listing_type if listing_type in ("PRODUCTOS", "PRESENTACIONES", "AMBOS") else "AMBOS",
+        "company_type": company_type if company_type in ALLOWED_COMPANY_TYPES else DEFAULT_CONFIG_STR["company_type"],
+        "store_id": store_id,
+        "username": username,
         "allow_no_stock": (allow_no_stock == "1"),
+        "enable_ai": (enable_ai != "0"),
+        "enable_recommendations": (enable_recs != "0"),
 
         "update_mode": update_mode if update_mode in ("ASK", "SILENT", "OFF") else "ASK",
         "update_check_on_startup": (update_check != "0"),
@@ -274,7 +322,100 @@ APP_CONFIG = _load_db_config()
 
 APP_COUNTRY: str = APP_CONFIG["country"]
 APP_LISTING_TYPE: str = APP_CONFIG["listing_type"]
+APP_COMPANY_TYPE: str = APP_CONFIG["company_type"]
+STORE_ID: str = APP_CONFIG["store_id"]
+APP_USERNAME: str = APP_CONFIG["username"]
 ALLOW_NO_STOCK: bool = bool(APP_CONFIG["allow_no_stock"])
+ENABLE_AI: bool = bool(APP_CONFIG["enable_ai"])
+ENABLE_RECOMMENDATIONS: bool = bool(APP_CONFIG["enable_recommendations"])
+
+
+def is_ai_enabled(*, refresh: bool = True) -> bool:
+    """
+    Estado actual del kill switch IA.
+    Si refresh=True, relee de DB para reflejar cambios en caliente.
+    """
+    global ENABLE_AI
+    if refresh:
+        try:
+            db_path = _resolve_db_path_for_config()
+            con = connect(db_path)
+            ensure_schema(con)
+            try:
+                v = get_setting(con, "enable_ai", DEFAULT_CONFIG_STR["enable_ai"]).strip()
+            finally:
+                con.close()
+            ENABLE_AI = (v != "0")
+            APP_CONFIG["enable_ai"] = ENABLE_AI
+        except Exception:
+            pass
+    return bool(APP_CONFIG.get("enable_ai", ENABLE_AI))
+
+
+def set_ai_enabled(enabled: bool) -> bool:
+    """
+    Persiste enable_ai en DB y sincroniza cache en memoria.
+    """
+    global ENABLE_AI
+    v = "1" if bool(enabled) else "0"
+    db_path = _resolve_db_path_for_config()
+    con = connect(db_path)
+    try:
+        ensure_schema(con)
+        with tx(con):
+            set_setting(con, "enable_ai", v)
+    finally:
+        con.close()
+
+    ENABLE_AI = (v == "1")
+    APP_CONFIG["enable_ai"] = ENABLE_AI
+    return ENABLE_AI
+
+
+def is_recommendations_enabled(*, refresh: bool = True) -> bool:
+    """
+    Estado actual del switch de recomendaciones.
+    Si refresh=True, relee DB para reflejar cambios en caliente.
+    """
+    global ENABLE_RECOMMENDATIONS
+    if refresh:
+        try:
+            db_path = _resolve_db_path_for_config()
+            con = connect(db_path)
+            ensure_schema(con)
+            try:
+                v = get_setting(
+                    con,
+                    "enable_recommendations",
+                    DEFAULT_CONFIG_STR["enable_recommendations"],
+                ).strip()
+            finally:
+                con.close()
+            ENABLE_RECOMMENDATIONS = (v != "0")
+            APP_CONFIG["enable_recommendations"] = ENABLE_RECOMMENDATIONS
+        except Exception:
+            pass
+    return bool(APP_CONFIG.get("enable_recommendations", ENABLE_RECOMMENDATIONS))
+
+
+def set_recommendations_enabled(enabled: bool) -> bool:
+    """
+    Persiste enable_recommendations en DB y sincroniza cache en memoria.
+    """
+    global ENABLE_RECOMMENDATIONS
+    v = "1" if bool(enabled) else "0"
+    db_path = _resolve_db_path_for_config()
+    con = connect(db_path)
+    try:
+        ensure_schema(con)
+        with tx(con):
+            set_setting(con, "enable_recommendations", v)
+    finally:
+        con.close()
+
+    ENABLE_RECOMMENDATIONS = (v == "1")
+    APP_CONFIG["enable_recommendations"] = ENABLE_RECOMMENDATIONS
+    return ENABLE_RECOMMENDATIONS
 
 
 # -----------------------------
@@ -434,7 +575,10 @@ CONFIG_PATH = ""
 
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",
-    "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "ALLOW_NO_STOCK",
+    "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "APP_COMPANY_TYPE", "STORE_ID",
+    "APP_USERNAME",
+    "ALLOW_NO_STOCK", "ENABLE_AI", "ENABLE_RECOMMENDATIONS", "ALLOWED_COMPANY_TYPES",
+    "is_ai_enabled", "set_ai_enabled", "is_recommendations_enabled", "set_recommendations_enabled",
     "APP_CURRENCY", "SECONDARY_CURRENCY", "SECONDARY_CURRENCIES", "COUNTRY_CODE",
     "CATS",
     "currency_for_country", "secondary_currency_for_country", "secondary_currencies_for_country",

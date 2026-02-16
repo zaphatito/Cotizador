@@ -8,8 +8,24 @@ from ..config import listing_allows_products, listing_allows_presentations, ALLO
 from ..utils import nz
 
 
-def build_completer_strings(productos, botellas_pc):
+def build_completer_strings(productos, botellas_pc, presentaciones=None):
     sugs = []
+    seen = set()
+    prod_map = {
+        str(p.get("id", "")).strip().upper(): p
+        for p in (productos or [])
+        if str(p.get("id", "")).strip()
+    }
+
+    def _add_sug(s: str):
+        t = str(s or "").strip()
+        if not t:
+            return
+        key = t.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        sugs.append(t)
 
     if listing_allows_products():
         for p in productos or []:
@@ -18,15 +34,57 @@ def build_completer_strings(productos, botellas_pc):
 
             cat = p.get("categoria", "")
             gen = p.get("genero", "")
-            sugs.append(
-                f"{p['id']} - {p['nombre']} - {cat}" + (f" - {gen}" if gen else "")
-            )
+            _add_sug(f"{p['id']} - {p['nombre']} - {cat}" + (f" - {gen}" if gen else ""))
 
     if listing_allows_presentations():
-        for pc in botellas_pc or []:
-            if (not ALLOW_NO_STOCK) and float(nz(pc.get("cantidad_disponible"), 0.0)) <= 0.0:
+        for pr in presentaciones or []:
+            stock = float(
+                nz(
+                    pr.get("STOCK_DISPONIBLE")
+                    or pr.get("stock_disponible")
+                    or pr.get("cantidad_disponible")
+                    or 0.0,
+                    0.0,
+                )
+            )
+            if (not ALLOW_NO_STOCK) and stock <= 0.0:
                 continue
-            sugs.append(f"{pc.get('id')} - Presentación (PC) - {pc.get('nombre', '')}")
+
+            code = str(pr.get("CODIGO") or pr.get("codigo") or pr.get("CODIGO_NORM") or "").strip().upper()
+            if not code:
+                continue
+            if code.startswith("PC"):
+                continue
+
+            name = str(pr.get("NOMBRE") or pr.get("nombre") or "").strip()
+            dep = str(pr.get("DEPARTAMENTO") or pr.get("departamento") or "").strip().upper()
+            gen = str(pr.get("GENERO") or pr.get("genero") or "").strip()
+
+            _add_sug(f"{code} - {name} - PRESENTACION - {dep}" + (f" - {gen}" if gen else ""))
+
+            rel_codes = str(pr.get("CODIGOS_PRODUCTO") or pr.get("codigos_producto") or "").strip()
+            if not rel_codes:
+                continue
+
+            for tok in rel_codes.split(","):
+                base_code = str(tok or "").strip().upper()
+                if not base_code:
+                    continue
+
+                base = prod_map.get(base_code)
+                if not base:
+                    continue
+
+                base_stock = float(nz(base.get("cantidad_disponible"), 0.0))
+                if (not ALLOW_NO_STOCK) and base_stock <= 0.0:
+                    continue
+
+                base_name = str(base.get("nombre") or "").strip()
+                combo_name = " ".join([x for x in [base_name, name] if x]).strip() or name or code
+                combo_code = f"{base_code}{code}"
+                _add_sug(
+                    f"{combo_code} - {combo_name} - PRESENTACION - {dep}" + (f" - {gen}" if gen else "")
+                )
 
     return sugs
 
@@ -43,18 +101,16 @@ class CompleterMixin:
 
     def _on_ai_client_picked(self, payload: dict):
         """
-        Rellena cliente / DNI / teléfono desde el payload.
+        Rellena cliente / DNI / telefono desde el payload.
         Evita popups duplicados cerrando todos primero.
         """
         try:
-            # ✅ cierra todos los popups de cliente (por si 2 quedaron abiertos)
             self._hide_all_client_popups()
 
             cli = str(payload.get("cliente") or "").strip()
             doc = str(payload.get("cedula") or "").strip()
             tel = str(payload.get("telefono") or "").strip()
 
-            # setText() ya NO abrirá popups porque SmartCompleter usa textEdited
             if cli:
                 self.entry_cliente.setText(cli)
             if doc:
@@ -62,7 +118,6 @@ class CompleterMixin:
             if tel:
                 self.entry_telefono.setText(tel)
 
-            # mover foco según el campo donde estabas
             w = QApplication.focusWidget()
             if w is getattr(self, "entry_cliente", None):
                 self._go_doc()
@@ -83,7 +138,7 @@ class CompleterMixin:
             return
 
         self._sug_model = QStringListModel(
-            build_completer_strings(self.productos, self._botellas_pc)
+            build_completer_strings(self.productos, self._botellas_pc, self.presentaciones)
         )
         self._completer = QCompleter(self._sug_model, self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)

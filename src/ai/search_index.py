@@ -1,10 +1,13 @@
 # src/ai/search_index.py
 from __future__ import annotations
 
+import json
+import os
 import re
 import sqlite3
 import threading
 import unicodedata
+import zlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +16,8 @@ from rapidfuzz import fuzz, process
 
 _FTS_PRODUCTS = "ai_products_fts"
 _FTS_CLIENTS = "ai_clients_fts"
+_SEARCH_CACHE_TABLE = "ai_search_cache"
+_CACHE_KEY_FUZZY_PRODUCTS = "fuzzy_products_v2"
 
 
 def _strip_accents(s: str) -> str:
@@ -67,6 +72,16 @@ _DIGIT_TO_WORDS: Dict[str, List[str]] = {
     "20": ["twenty", "veinte"],
 }
 
+_TOKEN_EQUIV: Dict[str, List[str]] = {
+    "millon": ["million"],
+    "millones": ["millions"],
+    "million": ["millon"],
+    "millions": ["millones"],
+    "un": ["one", "uno"],
+    "uno": ["one", "un"],
+    "one": ["uno", "un"],
+}
+
 
 def _words_to_digits(s: str) -> str:
     toks = s.split()
@@ -90,6 +105,26 @@ def _digits_to_words_variants(s: str) -> List[str]:
             t2[i] = w
             variants.append(" ".join(t2).strip())
     return variants[:8]
+
+
+def _token_equiv_variants(s: str) -> List[str]:
+    toks = (s or "").split()
+    if not toks:
+        return []
+
+    out: List[str] = []
+    seen = set()
+    for i, t in enumerate(toks):
+        alts = _TOKEN_EQUIV.get(t, [])
+        for alt in alts:
+            t2 = toks[:]
+            t2[i] = alt
+            v = " ".join(t2).strip()
+            if not v or v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+    return out[:12]
 
 
 def _query_variants(q: str) -> List[str]:
@@ -127,7 +162,16 @@ def _query_variants(q: str) -> List[str]:
         add(_split_alpha_digit(v))
         add(_split_alpha_digit(re.sub(r"\s+", "", v)))
 
-    return out[:18]
+    semantic_seeds: List[str] = [base, wd]
+    semantic_seeds.extend(_digits_to_words_variants(base))
+    for seed in semantic_seeds:
+        for v in _token_equiv_variants(seed):
+            add(v)
+            add(re.sub(r"\s+", "", v))
+            add(_split_alpha_digit(v))
+            add(_split_alpha_digit(re.sub(r"\s+", "", v)))
+
+    return out[:28]
 
 
 def _fts_match_query(q: str) -> str:
@@ -191,6 +235,15 @@ def ensure_ai_schema(con: sqlite3.Connection) -> bool:
         )
         """
     )
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_SEARCH_CACHE_TABLE} (
+            key TEXT PRIMARY KEY,
+            payload BLOB NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     return True
 
 
@@ -223,6 +276,10 @@ def _expand_name_for_index(nombre: str) -> str:
     add(_split_alpha_digit(re.sub(r"\s+", "", wd)))
 
     for v in _digits_to_words_variants(base):
+        add(v)
+        add(re.sub(r"\s+", "", v))
+
+    for v in _token_equiv_variants(base):
         add(v)
         add(re.sub(r"\s+", "", v))
 
@@ -321,9 +378,16 @@ def _search_products_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Di
     rows = con.execute(
         f"""
         SELECT
-            codigo, nombre, categoria, genero, ml, fuente,
+            f.codigo AS codigo,
+            COALESCE(p.nombre, f.nombre) AS nombre,
+            COALESCE(p.categoria, f.categoria) AS categoria,
+            COALESCE(p.genero, f.genero) AS genero,
+            COALESCE(p.ml, f.ml) AS ml,
+            COALESCE(p.fuente, f.fuente) AS fuente,
             bm25({_FTS_PRODUCTS}) AS score
-        FROM {_FTS_PRODUCTS}
+        FROM {_FTS_PRODUCTS} AS f
+        LEFT JOIN products_current AS p
+            ON UPPER(COALESCE(p.id, '')) = UPPER(COALESCE(f.codigo, ''))
         WHERE {_FTS_PRODUCTS} MATCH ?
         ORDER BY score
         LIMIT ?
@@ -430,14 +494,29 @@ def _search_clients_like(con: sqlite3.Connection, q: str, limit: int) -> List[Di
 class _FuzzyCache:
     products: List[Tuple[str, str]]  # (codigo, texto_expandido)
     clients: List[Tuple[str, str, str]]  # (cliente, cedula, telefono)
+    combos: List[Dict[str, Any]]  # rows sinteticas de codigo combinado
+    presentations: List[Dict[str, Any]]  # rows de presentaciones (codigo directo)
+    product_codes: set[str]
+    choices: Dict[str, str]
+    choices_text: Dict[str, str]
+    combo_map: Dict[str, Dict[str, Any]]
+    pres_map: Dict[str, Dict[str, Any]]
+    pref_rows_all: List[Dict[str, Any]]
+    pref_rows_by_1: Dict[str, List[Dict[str, Any]]]
+    pref_rows_by_2: Dict[str, List[Dict[str, Any]]]
+
+
+_GLOBAL_FUZZY_CACHE: Dict[str, _FuzzyCache] = {}
+_GLOBAL_FUZZY_CACHE_LOCK = threading.Lock()
 
 
 class LocalSearchIndex:
     def __init__(self, db_path: str):
-        self.db_path = db_path
+        self.db_path = os.path.abspath(str(db_path))
         self._lock = threading.Lock()
         self._fts_available: Optional[bool] = None
         self._fuzzy: Optional[_FuzzyCache] = None
+        self._prewarm_started = False
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)
@@ -448,47 +527,174 @@ class LocalSearchIndex:
         con.execute("PRAGMA busy_timeout = 5000")
         return con
 
+    @staticmethod
+    def _finalize_fuzzy_cache(
+        *,
+        products: List[Tuple[str, str]],
+        clients: List[Tuple[str, str, str]],
+        combos: List[Dict[str, Any]],
+        presentations: List[Dict[str, Any]],
+    ) -> _FuzzyCache:
+        cache = _FuzzyCache(
+            products=products,
+            clients=clients,
+            combos=combos,
+            presentations=presentations,
+            product_codes={str(codigo) for (codigo, _txt) in products},
+            choices={},
+            choices_text={},
+            combo_map={},
+            pres_map={},
+            pref_rows_all=[],
+            pref_rows_by_1={},
+            pref_rows_by_2={},
+        )
+        cache.choices = {codigo: texto for (codigo, texto) in products}
+        cache.choices_text = dict(cache.choices)
+
+        for c in combos:
+            code = str(c.get("codigo") or "").strip()
+            txt = str(c.get("_text") or "").strip()
+            if not code:
+                continue
+            cache.combo_map[code] = c
+            if code not in cache.choices and txt:
+                cache.choices[code] = txt
+
+        for p in presentations:
+            code = str(p.get("codigo") or "").strip()
+            txt = str(p.get("_text") or "").strip()
+            if not code:
+                continue
+            cache.pres_map[code] = p
+            if code not in cache.choices_text and txt:
+                cache.choices_text[code] = txt
+            if code not in cache.choices and txt:
+                cache.choices[code] = txt
+
+        cache.pref_rows_all = list(combos or []) + list(presentations or [])
+        for row in cache.pref_rows_all:
+            code = str(row.get("codigo") or "").strip().upper()
+            if not code:
+                continue
+            k1 = code[:1]
+            k2 = code[:2]
+            cache.pref_rows_by_1.setdefault(k1, []).append(row)
+            if len(k2) == 2:
+                cache.pref_rows_by_2.setdefault(k2, []).append(row)
+
+        return cache
+
+    def _load_persisted_products_cache(self, con: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+        try:
+            row = con.execute(
+                f"SELECT payload FROM {_SEARCH_CACHE_TABLE} WHERE key = ? LIMIT 1",
+                (_CACHE_KEY_FUZZY_PRODUCTS,),
+            ).fetchone()
+            if not row:
+                return None
+            payload = row["payload"]
+            if payload is None:
+                return None
+            if isinstance(payload, memoryview):
+                payload = payload.tobytes()
+            if not isinstance(payload, (bytes, bytearray)):
+                return None
+            raw = zlib.decompress(bytes(payload)).decode("utf-8", errors="strict")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return None
+            return data
+        except Exception:
+            return None
+
+    def _save_persisted_products_cache(
+        self,
+        con: sqlite3.Connection,
+        *,
+        combos: List[Dict[str, Any]],
+        presentations: List[Dict[str, Any]],
+    ) -> None:
+        try:
+            data = {
+                "combos": combos or [],
+                "presentations": presentations or [],
+            }
+            raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            blob = zlib.compress(raw, level=6)
+            con.execute(
+                f"""
+                INSERT INTO {_SEARCH_CACHE_TABLE}(key, payload, updated_at)
+                VALUES(?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (_CACHE_KEY_FUZZY_PRODUCTS, sqlite3.Binary(blob)),
+            )
+        except Exception:
+            return
+
     def ensure_and_rebuild(self) -> None:
         with self._lock:
             con = self._connect()
             try:
                 self._fts_available = ensure_ai_schema(con)
                 rebuild_all(con)
+                try:
+                    con.execute(
+                        f"DELETE FROM {_SEARCH_CACHE_TABLE} WHERE key = ?",
+                        (_CACHE_KEY_FUZZY_PRODUCTS,),
+                    )
+                except Exception:
+                    pass
                 con.commit()
             finally:
                 con.close()
             self._fuzzy = None
+            self._prewarm_started = False
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                _GLOBAL_FUZZY_CACHE.pop(self.db_path, None)
+
+        # Regenera cache persistente fuera del lock.
+        try:
+            self.prewarm()
+        except Exception:
+            pass
+
+    def prewarm(self) -> None:
+        try:
+            if self._fts_available is None:
+                con = self._connect()
+                try:
+                    self._fts_available = ensure_ai_schema(con)
+                finally:
+                    con.close()
+            self._ensure_fuzzy_cache()
+        except Exception:
+            return
+
+    def prewarm_async(self) -> None:
+        with self._lock:
+            if self._prewarm_started:
+                return
+            self._prewarm_started = True
+
+        t = threading.Thread(target=self.prewarm, daemon=True)
+        t.start()
 
     def _ensure_fuzzy_cache(self) -> _FuzzyCache:
         with self._lock:
             if self._fuzzy is not None:
                 return self._fuzzy
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                global_cached = _GLOBAL_FUZZY_CACHE.get(self.db_path)
+            if global_cached is not None:
+                self._fuzzy = global_cached
+                return self._fuzzy
 
             con = self._connect()
             try:
-                prows = con.execute(
-                    """
-                    SELECT id, COALESCE(nombre,''), COALESCE(categoria,''), COALESCE(genero,''), COALESCE(ml,'')
-                    FROM products_current
-                    """
-                ).fetchall()
-
-                products: List[Tuple[str, str]] = []
-                for r in prows:
-                    codigo = str(r["id"] or "")
-                    nombre = str(r[1] or "")
-                    categoria = str(r[2] or "")
-                    genero = str(r[3] or "")
-                    ml = str(r[4] or "")
-
-                    base = _norm_query(" ".join([codigo, nombre, categoria, genero, ml]).strip())
-                    ns = re.sub(r"\s+", "", base)
-                    split1 = _split_alpha_digit(base)
-                    split2 = _split_alpha_digit(ns)
-                    wd = _words_to_digits(base)
-                    txt = " ".join([base, ns, split1, split2, wd, re.sub(r"\s+", "", wd)]).strip()
-                    products.append((codigo, txt))
-
                 crows = con.execute(
                     """
                     SELECT cliente, cedula, telefono
@@ -504,7 +710,318 @@ class LocalSearchIndex:
                 for r in crows:
                     clients.append((str(r["cliente"] or ""), str(r["cedula"] or ""), str(r["telefono"] or "")))
 
-                self._fuzzy = _FuzzyCache(products=products, clients=clients)
+                essence_cats = {"ESENCIA", "ESENCIAS", "AROMATERAPIA"}
+                prows = con.execute(
+                    """
+                    SELECT
+                        UPPER(COALESCE(id, '')) AS codigo,
+                        COALESCE(nombre, '') AS nombre,
+                        UPPER(COALESCE(categoria, '')) AS categoria,
+                        COALESCE(genero, '') AS genero,
+                        COALESCE(ml, '') AS ml,
+                        COALESCE(fuente, '') AS fuente
+                    FROM products_current
+                    """
+                ).fetchall()
+
+                products: List[Tuple[str, str]] = []
+                product_meta: List[Dict[str, Any]] = []
+                products_by_cat: Dict[str, List[Dict[str, Any]]] = {}
+                products_by_cat_no_gen: Dict[str, List[Dict[str, Any]]] = {}
+                products_by_cat_gen: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+                essence_products: List[Dict[str, Any]] = []
+                essence_products_no_gen: List[Dict[str, Any]] = []
+                essence_products_by_gen: Dict[str, List[Dict[str, Any]]] = {}
+                for r in prows:
+                    codigo = str(r["codigo"] or "")
+                    nombre = str(r["nombre"] or "")
+                    categoria = str(r["categoria"] or "")
+                    genero = str(r["genero"] or "")
+                    ml = str(r["ml"] or "")
+                    fuente = str(r["fuente"] or "")
+
+                    base = _norm_query(" ".join([codigo, nombre, categoria, genero, ml]).strip())
+                    ns = re.sub(r"\s+", "", base)
+                    split1 = _split_alpha_digit(base)
+                    split2 = _split_alpha_digit(ns)
+                    wd = _words_to_digits(base)
+                    txt = " ".join([base, ns, split1, split2, wd, re.sub(r"\s+", "", wd)]).strip()
+                    products.append((codigo, txt))
+                    cat_u = str(categoria or "").strip().upper()
+                    gen_l = str(genero or "").strip().lower()
+                    pm = {
+                        "codigo": codigo,
+                        "nombre": nombre,
+                        "categoria": categoria,
+                        "genero": genero,
+                        "fuente": fuente,
+                        "_cat_u": cat_u,
+                        "_gen_l": gen_l,
+                    }
+                    product_meta.append(pm)
+
+                    if cat_u:
+                        products_by_cat.setdefault(cat_u, []).append(pm)
+                        if gen_l:
+                            products_by_cat_gen.setdefault((cat_u, gen_l), []).append(pm)
+                        else:
+                            products_by_cat_no_gen.setdefault(cat_u, []).append(pm)
+
+                    if cat_u in essence_cats:
+                        essence_products.append(pm)
+                        if gen_l:
+                            essence_products_by_gen.setdefault(gen_l, []).append(pm)
+                        else:
+                            essence_products_no_gen.append(pm)
+
+                persisted = self._load_persisted_products_cache(con)
+                if persisted:
+                    combos_raw = persisted.get("combos") or []
+                    pres_raw = persisted.get("presentations") or []
+
+                    combos: List[Dict[str, Any]] = []
+                    for item in combos_raw:
+                        if isinstance(item, dict):
+                            combos.append(dict(item))
+
+                    presentations: List[Dict[str, Any]] = []
+                    for item in pres_raw:
+                        if isinstance(item, dict):
+                            presentations.append(dict(item))
+
+                    if products or combos or presentations:
+                        self._fuzzy = self._finalize_fuzzy_cache(
+                            products=products,
+                            clients=clients,
+                            combos=combos,
+                            presentations=presentations,
+                        )
+                        with _GLOBAL_FUZZY_CACHE_LOCK:
+                            _GLOBAL_FUZZY_CACHE[self.db_path] = self._fuzzy
+                        return self._fuzzy
+
+                combo_rows = con.execute(
+                    """
+                    SELECT DISTINCT
+                        UPPER(COALESCE(pp.cod_producto, '')) AS base_codigo,
+                        UPPER(COALESCE(pr.codigo_norm, pr.codigo, pp.cod_presentacion, '')) AS pres_codigo,
+                        COALESCE(p.nombre, '') AS base_nombre,
+                        COALESCE(pr.nombre, '') AS pres_nombre,
+                        COALESCE(p.categoria, '') AS base_categoria,
+                        COALESCE(NULLIF(pr.genero, ''), pp.genero, p.genero, '') AS genero,
+                        COALESCE(pr.departamento, '') AS departamento,
+                        COALESCE(pr.fuente, p.fuente, '') AS fuente
+                    FROM presentacion_prod_current pp
+                    JOIN products_current p
+                        ON UPPER(p.id) = UPPER(pp.cod_producto)
+                    LEFT JOIN presentations_current pr
+                        ON UPPER(pr.codigo_norm) = UPPER(pp.cod_presentacion)
+                        OR UPPER(pr.codigo) = UPPER(pp.cod_presentacion)
+                    WHERE TRIM(COALESCE(pp.cod_producto, '')) <> ''
+                      AND TRIM(COALESCE(pp.cod_presentacion, '')) <> ''
+                    """
+                ).fetchall()
+
+                combos: List[Dict[str, Any]] = []
+                seen_combo = set()
+                for r in combo_rows:
+                    base_code = str(r["base_codigo"] or "").strip().upper()
+                    pres_code = str(r["pres_codigo"] or "").strip().upper()
+                    if not base_code or not pres_code:
+                        continue
+
+                    combo_code = f"{base_code}{pres_code}"
+                    if combo_code in seen_combo:
+                        continue
+                    seen_combo.add(combo_code)
+
+                    base_name = str(r["base_nombre"] or "").strip()
+                    pres_name = str(r["pres_nombre"] or "").strip()
+                    depto = str(r["departamento"] or "").strip().upper()
+                    genero = str(r["genero"] or "").strip()
+                    fuente = str(r["fuente"] or "").strip()
+                    nombre = " ".join([x for x in [base_name, pres_name] if x]).strip() or combo_code
+
+                    text = _norm_query(
+                        " ".join(
+                            [
+                                combo_code,
+                                base_code,
+                                pres_code,
+                                nombre,
+                                base_name,
+                                pres_name,
+                                depto,
+                                genero,
+                            ]
+                        ).strip()
+                    )
+                    text_ns = re.sub(r"\s+", "", text)
+
+                    combos.append(
+                        {
+                            "codigo": combo_code,
+                            "nombre": nombre,
+                            "categoria": "PRESENTACION",
+                            "genero": genero,
+                            "ml": "",
+                            "fuente": fuente,
+                            "_text": text,
+                            "_text_ns": text_ns,
+                        }
+                    )
+
+                pres_rows = con.execute(
+                    """
+                    SELECT
+                        UPPER(COALESCE(codigo_norm, '')) AS codigo_norm,
+                        UPPER(COALESCE(codigo, '')) AS codigo,
+                        COALESCE(nombre, '') AS nombre,
+                        COALESCE(departamento, '') AS departamento,
+                        COALESCE(genero, '') AS genero,
+                        COALESCE(fuente, '') AS fuente
+                    FROM presentations_current
+                    WHERE TRIM(COALESCE(codigo_norm, codigo, '')) <> ''
+                    """
+                ).fetchall()
+
+                presentations: List[Dict[str, Any]] = []
+                seen_pres = set()
+                for r in pres_rows:
+                    nombre = str(r["nombre"] or "").strip()
+                    depto = str(r["departamento"] or "").strip().upper()
+                    genero = str(r["genero"] or "").strip()
+                    genero_l = genero.lower()
+                    fuente = str(r["fuente"] or "").strip()
+
+                    codes = []
+                    c1 = str(r["codigo_norm"] or "").strip().upper()
+                    c2 = str(r["codigo"] or "").strip().upper()
+                    if c1:
+                        codes.append(c1)
+                    if c2 and c2 != c1:
+                        codes.append(c2)
+
+                    for code in codes:
+                        if code in seen_pres:
+                            continue
+                        seen_pres.add(code)
+
+                        text = _norm_query(
+                            " ".join(
+                                [
+                                    code,
+                                    nombre,
+                                    depto,
+                                    genero,
+                                    "presentacion",
+                                ]
+                            ).strip()
+                        )
+                        text_ns = re.sub(r"\s+", "", text)
+
+                        presentations.append(
+                            {
+                                "codigo": code,
+                                "nombre": nombre or code,
+                                "categoria": "PRESENTACION",
+                                "genero": genero,
+                                "ml": "",
+                                "fuente": fuente,
+                                "_text": text,
+                                "_text_ns": text_ns,
+                            }
+                        )
+
+                    # Combos sintéticos: base(esencia)+presentación cuando
+                    # el departamento de presentación no discrimina base.
+                    dep_is_presentation = depto in {"", "PRESENTACION", "PRESENTACIONES"}
+                    if dep_is_presentation:
+                        candidates: List[Dict[str, Any]] = (
+                            essence_products
+                            if not genero_l
+                            else (essence_products_by_gen.get(genero_l, []) + essence_products_no_gen)
+                        )
+                    else:
+                        candidates = (
+                            products_by_cat.get(depto, [])
+                            if not genero_l
+                            else (products_by_cat_gen.get((depto, genero_l), []) + products_by_cat_no_gen.get(depto, []))
+                        )
+
+                    for pm in candidates:
+                        base_code = str(pm.get("codigo") or "").strip().upper()
+                        base_name = str(pm.get("nombre") or "").strip()
+                        base_cat = str(pm.get("_cat_u") or "").strip().upper()
+                        base_gen = str(pm.get("_gen_l") or "").strip().lower()
+                        if not base_code:
+                            continue
+
+                        if dep_is_presentation:
+                            if base_cat not in essence_cats:
+                                continue
+                        else:
+                            if base_cat != depto:
+                                continue
+
+                        if genero and base_gen and base_gen != genero_l:
+                            continue
+
+                        for pres_code in codes:
+                            combo_code = f"{base_code}{pres_code}"
+                            if combo_code in seen_combo:
+                                continue
+                            seen_combo.add(combo_code)
+
+                            combo_name = " ".join(
+                                [x for x in [base_name, (nombre or pres_code)] if x]
+                            ).strip() or combo_code
+                            combo_src = str(pm.get("fuente") or "").strip() or fuente
+
+                            combo_text = _norm_query(
+                                " ".join(
+                                    [
+                                        combo_code,
+                                        base_code,
+                                        pres_code,
+                                        combo_name,
+                                        base_name,
+                                        nombre,
+                                        depto,
+                                        genero,
+                                    ]
+                                ).strip()
+                            )
+                            combo_text_ns = re.sub(r"\s+", "", combo_text)
+
+                            combos.append(
+                                {
+                                    "codigo": combo_code,
+                                    "nombre": combo_name,
+                                    "categoria": "PRESENTACION",
+                                    "genero": genero or str(pm.get("genero") or ""),
+                                    "ml": "",
+                                    "fuente": combo_src,
+                                    "_text": combo_text,
+                                    "_text_ns": combo_text_ns,
+                                }
+                            )
+
+                self._fuzzy = self._finalize_fuzzy_cache(
+                    products=products,
+                    clients=clients,
+                    combos=combos,
+                    presentations=presentations,
+                )
+                self._save_persisted_products_cache(
+                    con,
+                    combos=combos,
+                    presentations=presentations,
+                )
+                con.commit()
+                with _GLOBAL_FUZZY_CACHE_LOCK:
+                    _GLOBAL_FUZZY_CACHE[self.db_path] = self._fuzzy
+
                 return self._fuzzy
             finally:
                 con.close()
@@ -516,6 +1033,7 @@ class LocalSearchIndex:
 
         short = (len(qn) < 2)
         variants = [qn] if short else _query_variants(qn)
+        pre_out: List[Dict[str, Any]] = []
 
         con = self._connect()
         try:
@@ -525,8 +1043,13 @@ class LocalSearchIndex:
             seen = set()
             out: List[Dict[str, Any]] = []
 
+            cache = self._ensure_fuzzy_cache()
+            qn_ns = re.sub(r"\s+", "", qn)
+
             if self._fts_available:
                 for qv in variants:
+                    if len(out) >= (limit * 2):
+                        break
                     rows = _search_products_fts(con, qv, max(limit * 3, 25))
                     for r in rows or []:
                         code = str(r.get("codigo") or "").strip()
@@ -534,10 +1057,12 @@ class LocalSearchIndex:
                             continue
                         seen.add(code)
                         out.append(r)
-                        if len(out) >= limit:
-                            return out[:limit]
+                        if len(out) >= (limit * 2):
+                            break
 
             for qv in variants:
+                if len(out) >= (limit * 2):
+                    break
                 rows = _search_products_like(con, qv, max(limit * 3, 25))
                 for r in rows or []:
                     code = str(r.get("codigo") or "").strip()
@@ -545,28 +1070,105 @@ class LocalSearchIndex:
                         continue
                     seen.add(code)
                     out.append(r)
-                    if len(out) >= limit:
-                        return out[:limit]
+                    if len(out) >= (limit * 2):
+                        break
+
+            def _score_cached_row(row: Dict[str, Any]) -> int:
+                code = str(row.get("codigo") or "").strip().lower()
+                text = str(row.get("_text") or "")
+                text_ns = str(row.get("_text_ns") or "")
+                if not code:
+                    return 0
+                if qn_ns and code == qn_ns:
+                    return 300
+                if qn_ns and code.startswith(qn_ns):
+                    return 240
+                if qn_ns and qn_ns in code:
+                    return 190
+                if qn and qn in text:
+                    return 150
+                if qn_ns and qn_ns in text_ns:
+                    return 120
+                return 0
+
+            pref_scored: List[Tuple[int, Dict[str, Any]]] = []
+            run_pref_scan = (" " not in qn) or any(ch.isdigit() for ch in qn_ns)
+            if run_pref_scan:
+                rows_pref = cache.pref_rows_all
+                qcode = str(qn_ns or "").strip().upper()
+                if len(qcode) >= 2:
+                    rows_pref = cache.pref_rows_by_2.get(qcode[:2], rows_pref)
+                elif len(qcode) == 1:
+                    rows_pref = cache.pref_rows_by_1.get(qcode[:1], rows_pref)
+
+                for row in (rows_pref or []):
+                    s = _score_cached_row(row)
+                    if s > 0:
+                        pref_scored.append((s, row))
+
+            pref_scored.sort(key=lambda x: x[0], reverse=True)
+            for _score, row in pref_scored:
+                code = str(row.get("codigo") or "").strip()
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                out.append(
+                    {
+                        "codigo": code,
+                        "nombre": row.get("nombre", ""),
+                        "categoria": row.get("categoria", "PRESENTACION"),
+                        "genero": row.get("genero", ""),
+                        "ml": row.get("ml", ""),
+                        "fuente": row.get("fuente", ""),
+                    }
+                )
+                if len(out) >= (limit * 2):
+                    break
+
+            if out:
+                pre_out = out[:limit]
+                # Para búsquedas tipo código, el merge final ya devolvería esto
+                # cuando está completo; evitar fuzzy aquí no altera resultados.
+                if (" " not in qn) and (len(pre_out) >= limit):
+                    return pre_out
+                if (" " in qn) and (len(pre_out) >= limit):
+                    return pre_out
 
             if short:
-                return out[:limit]
+                return pre_out
 
         finally:
             con.close()
 
         cache = self._ensure_fuzzy_cache()
-        choices: Dict[str, str] = {codigo: texto for (codigo, texto) in cache.products}
+        # Para texto libre (con espacios), excluir combos del fuzzy pesado.
+        # Los combos se mantienen en búsquedas de código.
+        has_digits = any(ch.isdigit() for ch in qn_ns)
+        choices = cache.choices if (has_digits or (" " not in qn)) else cache.choices_text
+        combo_map = cache.combo_map
+        pres_map = cache.pres_map
 
         best: Dict[str, int] = {}
         for qv in variants:
-            hits = process.extract(qv, choices, scorer=fuzz.WRatio, limit=max(limit * 10, 120))
+            hits = process.extract(
+                qv,
+                choices,
+                scorer=fuzz.WRatio,
+                limit=max(limit * 6, 60),
+                score_cutoff=45,
+            )
             for _val, score, key in hits:
                 k = str(key)
                 s = int(score or 0)
                 if s > best.get(k, 0):
                     best[k] = s
 
-        scored = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        product_codes = cache.product_codes
+        scored = sorted(
+            best.items(),
+            key=lambda kv: (1 if str(kv[0]) in product_codes else 0, kv[1]),
+            reverse=True,
+        )
         picked_codes: List[str] = []
         res: List[Dict[str, Any]] = []
         for codigo, score in scored:
@@ -602,10 +1204,60 @@ class LocalSearchIndex:
                         extra = mp.get(code)
                         if extra:
                             r.update({k: v for k, v in extra.items() if k != "codigo"})
+                        elif code in combo_map:
+                            c = combo_map[code]
+                            r.update(
+                                {
+                                    "nombre": c.get("nombre", ""),
+                                    "categoria": c.get("categoria", "PRESENTACION"),
+                                    "genero": c.get("genero", ""),
+                                    "ml": c.get("ml", ""),
+                                    "fuente": c.get("fuente", ""),
+                                }
+                            )
+                        elif code in pres_map:
+                            p = pres_map[code]
+                            r.update(
+                                {
+                                    "nombre": p.get("nombre", ""),
+                                    "categoria": p.get("categoria", "PRESENTACION"),
+                                    "genero": p.get("genero", ""),
+                                    "ml": p.get("ml", ""),
+                                    "fuente": p.get("fuente", ""),
+                                }
+                            )
                 finally:
                     con2.close()
             except Exception:
                 pass
+
+        if pre_out:
+            merged: List[Dict[str, Any]] = []
+            seen_codes = set()
+
+            def _push(rows: List[Dict[str, Any]]) -> None:
+                for row in rows or []:
+                    code = str(row.get("codigo") or "").strip()
+                    if not code or code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    merged.append(row)
+                    if len(merged) >= limit:
+                        break
+
+            if (" " in qn) and res:
+                head = max(1, min(len(pre_out), limit // 2))
+                _push(pre_out[:head])
+                if len(merged) < limit:
+                    _push(res)
+                if len(merged) < limit:
+                    _push(pre_out[head:])
+            else:
+                _push(pre_out)
+                if len(merged) < limit:
+                    _push(res)
+
+            return merged[:limit]
 
         return res[:limit]
 

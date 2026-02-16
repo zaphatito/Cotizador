@@ -1,24 +1,12 @@
-# src/presentations.py
 import os
 import re
 import unicodedata
 import pandas as pd
+
 from .utils import nz
 
-def pick_sheet_name(xls: pd.ExcelFile, desired_index: int, name_candidates: list[str]) -> str:
-    sheets = xls.sheet_names
-    low = {s.lower(): s for s in sheets}
-    for cand in name_candidates:
-        key = cand.lower()
-        if key in low:
-            return low[key]
-    # match tolerante a espacios
-    for s in sheets:
-        if any(c.lower().replace(" ", "") in s.lower().replace(" ", "") for c in name_candidates):
-            return s
-    if len(sheets) > desired_index:
-        return sheets[desired_index]
-    raise RuntimeError(f"Se esperaba la hoja {desired_index+1} pero solo se encontraron: {sheets}")
+_HEADER_TRY_ORDER = [4, 0, 1, 2, 3, 5]
+
 
 def _norm_txt(s: str) -> str:
     if s is None:
@@ -27,199 +15,288 @@ def _norm_txt(s: str) -> str:
     t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
     return t.strip().lower()
 
+
+def pick_sheet_name(xls: pd.ExcelFile, desired_index: int, name_candidates: list[str]) -> str:
+    sheets = list(xls.sheet_names or [])
+    low = {str(s).strip().lower(): str(s) for s in sheets}
+
+    for cand in name_candidates:
+        c = str(cand).strip().lower()
+        if c in low:
+            return low[c]
+
+    compact = [str(c).lower().replace(" ", "") for c in name_candidates]
+    for s in sheets:
+        ns = str(s).lower().replace(" ", "")
+        if any(c in ns for c in compact):
+            return str(s)
+
+    if len(sheets) > desired_index:
+        return str(sheets[desired_index])
+
+    raise RuntimeError(f"Se esperaba la hoja {desired_index + 1} pero solo se encontraron: {sheets}")
+
+
+def _find_col(cols_lower: dict[str, str], *cands: str) -> str | None:
+    for cnd in cands:
+        k = _norm_txt(cnd)
+        if k in cols_lower:
+            return cols_lower[k]
+
+    for key, orig in cols_lower.items():
+        for cnd in cands:
+            if _norm_txt(cnd) in key:
+                return orig
+
+    return None
+
+
+def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, required_tokens: list[str]) -> pd.DataFrame:
+    best_df = None
+    best_score = -1
+
+    for h in _HEADER_TRY_ORDER:
+        try:
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=h)
+        except Exception:
+            continue
+
+        if df is None or df.empty:
+            continue
+
+        df = df.dropna(how="all")
+        cols_lower = {_norm_txt(c): c for c in df.columns}
+
+        score = 0
+        for tok in required_tokens:
+            nt = _norm_txt(tok)
+            if any(nt in c for c in cols_lower.keys()):
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_df = df
+
+        if score >= max(1, len(required_tokens) // 2):
+            return df
+
+    if best_df is not None:
+        return best_df
+
+    return pd.DataFrame()
+
+
 def _norm_codigo_val(v) -> str:
     """
-    Normaliza el código de presentación:
-
-    - Si viene como 3.0 -> "0003"
-    - Si viene como 3    -> "0003"
-    - Si viene como 100  -> "0100"
-    - Si ya viene como "0003" o "0100" se respeta.
-    - Sólo se aplica a códigos puramente numéricos.
+    Normaliza codigo preservando ceros a la izquierda.
+    Numericos se rellenan a 4 digitos para mantener formato de presentacion.
     """
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
+
     s = str(v).strip()
     if not s:
         return ""
-    # quitar .0 si viene de float
+
     m = re.fullmatch(r"(\d+)\.0+", s)
     if m:
         s = m.group(1)
-    # si es todo dígitos, rellenar a 4
-    if s.isdigit():
-        if len(s) <= 4:
-            s = s.zfill(4)
-    return s
+
+    if s.isdigit() and len(s) <= 4:
+        s = s.zfill(4)
+
+    return s.upper()
+
 
 def read_sheet2_presentations(path_xlsx: str) -> pd.DataFrame:
     """
-    Lee Hoja 2 (o equivalente) y produce columnas estandarizadas:
-    codigo, nombre, departamento, genero, p_venta
-    - p_venta prioriza: Precio Máximo > Precio Presentación > Precio Venta > "Precio"
+    Hoja 2 (Presentaciones):
+    Codigo, Departamento, Genero, Nombre, Descripcion,
+    Precio Maximo, Precio Minimo, Precio Oferta
     """
     xls = pd.ExcelFile(path_xlsx, engine="openpyxl")
     sheet2 = pick_sheet_name(
-        xls, desired_index=1,
-        name_candidates=["Hoja 2", "Hoja2", "Productos", "Productos Base",
-                         "Presentaciones", "Sheet2", "Sheet 2"]
+        xls,
+        desired_index=1,
+        name_candidates=[
+            "Presentaciones",
+            "Presentaciones Prod",
+            "Hoja 2",
+            "Hoja2",
+            "Sheet2",
+            "Sheet 2",
+        ],
     )
-    df = pd.read_excel(xls, sheet_name=sheet2, header=4)
+
+    df = _read_sheet_with_header_fallback(
+        xls,
+        sheet2,
+        required_tokens=["codigo", "departamento", "genero", "precio maximo"],
+    )
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Renombrar columnas de texto (excepto precio; ese lo resolvemos por prioridad explícita)
-    rename_fixed = {}
-    for c in df.columns:
-        cl = _norm_txt(c)
-        if cl == "codigo":
-            rename_fixed[c] = "codigo"
-        elif cl == "nombre":
-            rename_fixed[c] = "nombre"
-        elif "departamento" in cl or "categoria" in cl:
-            rename_fixed[c] = "departamento"
-        elif "genero" in cl or "género" in str(c).lower():
-            rename_fixed[c] = "genero"
-    df = df.rename(columns=rename_fixed)
-    df = df.loc[:, ~df.columns.duplicated(keep="first")]
+    cols_lower = {_norm_txt(c): c for c in df.columns}
 
-    # Resolver columna de precio con prioridad
-    norm_map = {_norm_txt(c): c for c in df.columns}
-    price_priority = [
-        "precio maximo", "precio máximo",
-        "precio presentacion", "precio presentación",
-        "precio venta", "p. venta", "p venta",
-        "precio",
-    ]
-    price_col = None
-    for key in price_priority:
-        nk = _norm_txt(key)
-        candidates = [nk, nk.replace(" ", ""), nk.replace(".", ""),
-                      nk.replace(" ", "").replace(".", "")]
-        found = None
-        for cand in candidates:
-            # búsqueda por inclusión (ej: "precio maximo" dentro de
-            # "precio maximo s/ igv")
-            for norm_name, orig in norm_map.items():
-                if cand in norm_name.replace(" ", ""):
-                    found = orig
-                    break
-            if found:
-                break
-        if found:
-            price_col = found
-            break
+    col_codigo = _find_col(cols_lower, "codigo", "código", "cod")
+    col_depto = _find_col(cols_lower, "departamento", "categoria", "categoría")
+    col_genero = _find_col(cols_lower, "genero", "género")
+    col_nombre = _find_col(cols_lower, "nombre")
+    col_desc = _find_col(cols_lower, "descripcion", "descripción", "detalle")
 
-    # Helper para extraer series robustamente
-    def _ser(colname: str) -> pd.Series:
-        if colname not in df.columns:
-            return pd.Series([None] * len(df), index=df.index)
-        s = df[colname]
-        if isinstance(s, pd.DataFrame):
-            s = s.iloc[:, 0]
-        return s
+    col_p_max = _find_col(cols_lower, "precio maximo", "precio máximo")
+    col_p_min = _find_col(cols_lower, "precio minimo", "precio mínimo")
+    col_p_oferta = _find_col(cols_lower, "precio oferta", "oferta")
 
-    # CODIGO: usar normalización especial para preservar ceros a la izquierda
-    raw_cod = _ser("codigo")
-    cod = raw_cod.map(_norm_codigo_val)
+    out_rows: list[dict] = []
+    for _, row in df.iterrows():
+        codigo = _norm_codigo_val(row.get(col_codigo, "") if col_codigo else "")
+        nombre = str(row.get(col_nombre, "") if col_nombre else "").strip()
+        departamento = str(row.get(col_depto, "") if col_depto else "").strip()
+        genero = str(row.get(col_genero, "") if col_genero else "").strip()
+        descripcion = str(row.get(col_desc, "") if col_desc else "").strip()
 
-    nom = _ser("nombre").astype(str).str.strip()
-    dep = _ser("departamento").astype(str).str.strip()
-    gen = _ser("genero").astype(str).str.strip()
+        if not codigo and not nombre:
+            continue
 
-    if price_col and price_col in df.columns:
-        pventa_src = _ser(price_col)
-    else:
-        # Si no hay ninguna, generamos 0.0
-        pventa_src = pd.Series([0] * len(df), index=df.index)
+        p_max = pd.to_numeric(row.get(col_p_max, 0) if col_p_max else 0, errors="coerce")
+        p_min = pd.to_numeric(row.get(col_p_min, 0) if col_p_min else 0, errors="coerce")
+        p_oferta = pd.to_numeric(row.get(col_p_oferta, 0) if col_p_oferta else 0, errors="coerce")
 
-    pventa_txt = (
-        pventa_src.astype(str)
-        .str.strip()
-        .str.replace(",", "", regex=False)
-        .str.replace(" ", "", regex=False)
-    )
-    pventa_num = pd.to_numeric(pventa_txt, errors="coerce").fillna(0.0)
-
-    out = pd.DataFrame({
-        "codigo": cod,
-        "nombre": nom,
-        "departamento": dep,
-        "genero": gen,
-        "p_venta": pventa_num,
-    })
-
-    # Normalizar pseudo-nulos
-    for col in ["codigo", "nombre", "departamento", "genero"]:
-        out[col] = (
-            out[col]
-            .replace({"None": "", "none": "", "nan": "", "NaN": "", "NAN": ""})
-            .fillna("")
-            .astype(str)
-            .str.strip()
+        out_rows.append(
+            {
+                "codigo": codigo,
+                "departamento": departamento,
+                "genero": genero,
+                "nombre": nombre,
+                "descripcion": descripcion,
+                "p_max": float(p_max) if pd.notna(p_max) else 0.0,
+                "p_min": float(p_min) if pd.notna(p_min) else 0.0,
+                "p_oferta": float(p_oferta) if pd.notna(p_oferta) else 0.0,
+            }
         )
 
-    # Eliminar filas totalmente vacías (sin código, nombre, depto ni género)
-    mask_all_empty = out[["codigo", "nombre", "departamento", "genero"]].apply(
-        lambda s: s.str.len() == 0
-    ).all(axis=1)
-    out = out.loc[~mask_all_empty].reset_index(drop=True)
+    out = pd.DataFrame(out_rows)
+    if out.empty:
+        return out
+
+    for col in ["codigo", "departamento", "genero", "nombre", "descripcion"]:
+        out[col] = out[col].fillna("").astype(str).str.strip()
+
+    for col in ["p_max", "p_min", "p_oferta"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+
     return out
+
+
+def read_sheet3_presentacion_prod(path_xlsx: str) -> pd.DataFrame:
+    """
+    Hoja 3 (PresentacionesProd):
+    Cod Producto, Cod Presentacion, Departamento, Genero, Cantidad
+    """
+    xls = pd.ExcelFile(path_xlsx, engine="openpyxl")
+    sheet3 = pick_sheet_name(
+        xls,
+        desired_index=2,
+        name_candidates=[
+            "PresentacionesProd",
+            "Presentaciones Prod",
+            "PresentacionProd",
+            "Hoja 3",
+            "Hoja3",
+            "Sheet3",
+            "Sheet 3",
+        ],
+    )
+
+    df = _read_sheet_with_header_fallback(
+        xls,
+        sheet3,
+        required_tokens=["cod producto", "cod presentacion", "cantidad"],
+    )
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    cols_lower = {_norm_txt(c): c for c in df.columns}
+
+    col_cod_prod = _find_col(cols_lower, "cod producto", "codigo producto", "producto", "cod_prod")
+    col_cod_pres = _find_col(cols_lower, "cod presentacion", "codigo presentacion", "presentacion", "cod_pres")
+    col_depto = _find_col(cols_lower, "departamento", "categoria", "categoría")
+    col_genero = _find_col(cols_lower, "genero", "género")
+    col_cantidad = _find_col(cols_lower, "cantidad", "cant")
+
+    out_rows: list[dict] = []
+    for _, row in df.iterrows():
+        cod_prod = str(row.get(col_cod_prod, "") if col_cod_prod else "").strip().upper()
+        cod_pres = _norm_codigo_val(row.get(col_cod_pres, "") if col_cod_pres else "")
+        departamento = str(row.get(col_depto, "") if col_depto else "").strip()
+        genero = str(row.get(col_genero, "") if col_genero else "").strip()
+        cant = pd.to_numeric(row.get(col_cantidad, 0) if col_cantidad else 0, errors="coerce")
+
+        if not cod_prod and not cod_pres:
+            continue
+
+        out_rows.append(
+            {
+                "cod_producto": cod_prod,
+                "cod_presentacion": cod_pres,
+                "departamento": departamento,
+                "genero": genero,
+                "cantidad": float(cant) if pd.notna(cant) else 0.0,
+            }
+        )
+
+    out = pd.DataFrame(out_rows)
+    if out.empty:
+        return out
+
+    for col in ["cod_producto", "cod_presentacion", "departamento", "genero"]:
+        out[col] = out[col].fillna("").astype(str).str.strip()
+
+    out["cantidad"] = pd.to_numeric(out["cantidad"], errors="coerce").fillna(0.0)
+    return out
+
 
 def norm_pres_code(c: str) -> tuple[str, bool, bool]:
     """
-    Devuelve (codigo_normalizado, requiere_botella, ignorar)
-
-    Regla actual (según lo que comentaste):
-      - Códigos que vienen de la hoja de presentaciones (0003, 0100, etc.)
-        NO requieren botella → queremos vender la base sola.
-      - Los PC... salen del inventario de productos (no pasan por aquí).
-
-    - 'PZA' se ignora
-    - 'E100' -> ('0100', requiere_botella=False)
-    - 'C240' -> ('C240', requiere_botella=False)
-    - 'XXX' numérico de 3-4 dígitos -> requiere_botella=False
+    Mantiene firma por compatibilidad con el resto del sistema.
+    Regla nueva: no se marca requiere_botella desde Excel.
     """
     if not c:
         return "", False, False
-    cu = c.strip().upper()
 
+    cu = str(c).strip().upper()
     if cu == "PZA":
         return cu, False, True
 
-    # Presentaciones especiales, también sin botella
-    if cu == "E100":
-        return "0100", False, False
-    if cu == "C240":
-        return "C240", False, False
+    return _norm_codigo_val(cu), False, False
 
-    # Códigos numéricos de 3–4 dígitos: base sin botella
-    if re.fullmatch(r"[0-9]{3,4}", cu):
-        return cu, False, False
-
-    # Cualquier otra cosa: la dejamos como está y no requiere botella
-    return cu, False, False
 
 def extract_ml_from_text(text: str) -> int:
     if not text:
         return 0
+
     m = re.search(r"(\d{2,4})\s*ml", str(text), re.I)
     if m:
         try:
             return int(m.group(1))
         except Exception:
             return 0
+
     m2 = re.search(r"(\d{2,4})", str(text))
     if m2:
         try:
             return int(m2.group(1))
         except Exception:
             return 0
+
     return 0
+
 
 def ml_from_pres_code_norm(code: str) -> int:
     if not code:
         return 0
+
     s = str(code).strip().upper()
     m = re.fullmatch(r"0*([0-9]{2,4})", s)
     if m:
@@ -227,19 +304,24 @@ def ml_from_pres_code_norm(code: str) -> int:
             return int(m.group(1))
         except Exception:
             return 0
+
     m2 = re.search(r"([0-9]{2,4})", s)
     if m2:
         try:
-            return int(m.group(1))
+            return int(m2.group(1))
         except Exception:
             return 0
+
     return 0
+
 
 def cargar_presentaciones(path_xlsx: str) -> pd.DataFrame:
     if not os.path.exists(path_xlsx):
-        raise FileNotFoundError(f"No se encontró el archivo: {path_xlsx}")
+        raise FileNotFoundError(f"No se encontro el archivo: {path_xlsx}")
+
     df2 = read_sheet2_presentations(path_xlsx)
     out = []
+
     for _, r in df2.iterrows():
         cod = str(r.get("codigo") or "").strip()
         if not cod:
@@ -249,26 +331,61 @@ def cargar_presentaciones(path_xlsx: str) -> pd.DataFrame:
         if ignorar:
             continue
 
-        out.append({
-            "CODIGO": cod,                    # como viene en la hoja (ya normalizado a 4 dígitos)
-            "CODIGO_NORM": cod_norm,          # mismo código, upper y sin rarezas
-            "NOMBRE": str(r.get("nombre") or "").strip() or cod_norm,
-            "DEPARTAMENTO": str(r.get("departamento") or "").upper(),
-            "GENERO": str(r.get("genero") or ""),
-            "PRECIO_PRESENT": nz(r.get("p_venta"), 0.0),  # precio SOLO de la presentación
-            "REQUIERE_BOTELLA": bool(req_bot),           # ahora False para 0003, 0100, etc.
-        })
+        p_max = nz(r.get("p_max"), 0.0)
+        p_min = nz(r.get("p_min"), 0.0)
+        p_oferta = nz(r.get("p_oferta"), 0.0)
+
+        out.append(
+            {
+                "CODIGO": cod_norm,
+                "CODIGO_NORM": cod_norm,
+                "NOMBRE": str(r.get("nombre") or "").strip() or cod_norm,
+                "DESCRIPCION": str(r.get("descripcion") or "").strip(),
+                "DEPARTAMENTO": str(r.get("departamento") or "").strip().upper(),
+                "GENERO": str(r.get("genero") or "").strip(),
+                "P_MAX": float(p_max),
+                "P_MIN": float(p_min),
+                "P_OFERTA": float(p_oferta),
+                "PRECIO_PRESENT": float(p_max),
+                "REQUIERE_BOTELLA": bool(req_bot),
+            }
+        )
+
     return pd.DataFrame(out)
 
+
+def cargar_presentaciones_prod(path_xlsx: str) -> pd.DataFrame:
+    if not os.path.exists(path_xlsx):
+        raise FileNotFoundError(f"No se encontro el archivo: {path_xlsx}")
+
+    df3 = read_sheet3_presentacion_prod(path_xlsx)
+    out = []
+
+    for _, r in df3.iterrows():
+        cod_prod = str(r.get("cod_producto") or "").strip().upper()
+        cod_pres = _norm_codigo_val(r.get("cod_presentacion"))
+        if not cod_prod or not cod_pres:
+            continue
+
+        out.append(
+            {
+                "COD_PRODUCTO": cod_prod,
+                "COD_PRESENTACION": cod_pres,
+                "DEPARTAMENTO": str(r.get("departamento") or "").strip().upper(),
+                "GENERO": str(r.get("genero") or "").strip(),
+                "CANTIDAD": float(nz(r.get("cantidad"), 0.0)),
+            }
+        )
+
+    return pd.DataFrame(out)
+
+
 def map_pc_to_bottle_code(pc_id: str) -> str | None:
-    """
-    PCs siguen viniendo del inventario de productos.
-    Esta función sólo mapea 'PCxxxx' -> 'Cxxxx' (o lógica similar
-    que uses después), para los combos que sí incluyen botella.
-    """
     if not pc_id:
         return None
+
     s = str(pc_id).strip().upper()
     if not s.startswith("PC") or len(s) < 3:
         return None
+
     return s[1:]

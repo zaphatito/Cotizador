@@ -2,65 +2,415 @@
 from __future__ import annotations
 
 import sqlite3
+
 import pandas as pd
+
 from .utils import now_iso
 
-def upsert_presentations_snapshot(con: sqlite3.Connection, import_id: int, df: pd.DataFrame) -> None:
+
+def _to_text(v) -> str:
+    return str(v or "").strip()
+
+
+def _to_float(v, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return float(default)
+        if isinstance(v, str):
+            s = v.strip().replace(",", "")
+            if not s:
+                return float(default)
+            return float(s)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def upsert_presentations_snapshot(
+    con: sqlite3.Connection,
+    import_id: int,
+    df: pd.DataFrame,
+    *,
+    replace_current: bool = False,
+) -> None:
     """
-    Espera tu df de cargar_presentaciones() con columnas:
-      CODIGO, CODIGO_NORM, NOMBRE, DEPARTAMENTO, GENERO, PRECIO_PRESENT, REQUIERE_BOTELLA
+    Espera columnas (estructura excel parseada):
+      CODIGO, CODIGO_NORM, NOMBRE, DESCRIPCION,
+      DEPARTAMENTO, GENERO, P_MAX, P_MIN, P_OFERTA
+
+    Compat:
+      PRECIO_PRESENT, REQUIERE_BOTELLA
     """
     if df is None or df.empty:
         return
 
     now = now_iso()
-    rows_hist = []
-    rows_cur = []
+
+    rows_raw_hist: list[tuple] = []
+    rows_raw_cur: list[tuple] = []
+
+    rows_hist: list[tuple] = []
+    rows_cur: list[tuple] = []
 
     for _, r in df.iterrows():
-        codigo_norm = str(r.get("CODIGO_NORM") or "").strip().upper()
+        codigo_norm = _to_text(r.get("CODIGO_NORM") or r.get("codigo_norm") or r.get("CODIGO") or r.get("codigo")).upper()
         if not codigo_norm:
             continue
 
-        codigo = str(r.get("CODIGO") or "").strip().upper()
-        nombre = str(r.get("NOMBRE") or "")
-        depto = str(r.get("DEPARTAMENTO") or "")
-        genero = str(r.get("GENERO") or "")
-        precio = float(r.get("PRECIO_PRESENT") or 0.0)
+        codigo = _to_text(r.get("CODIGO") or r.get("codigo") or codigo_norm).upper()
+        nombre = _to_text(r.get("NOMBRE") or r.get("nombre"))
+        descripcion = _to_text(r.get("DESCRIPCION") or r.get("descripcion"))
+        depto = _to_text(r.get("DEPARTAMENTO") or r.get("departamento")).upper()
+        genero = _to_text(r.get("GENERO") or r.get("genero")).lower()
+
+        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("precio_present"), 0.0)
+        p_min = _to_float(r.get("P_MIN"), 0.0)
+        p_oferta = _to_float(r.get("P_OFERTA"), 0.0)
+
+        precio_present = _to_float(r.get("PRECIO_PRESENT"), p_max)
+        if precio_present <= 0:
+            precio_present = p_max
+
         req = 1 if bool(r.get("REQUIERE_BOTELLA")) else 0
+        fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
 
-        rows_hist.append((import_id, codigo_norm, codigo, nombre, depto, genero, precio, req))
-        rows_cur.append((codigo_norm, codigo, nombre, depto, genero, precio, req, now))
-
-    con.executemany(
-        """
-        INSERT OR REPLACE INTO presentations_hist(
-            import_id, codigo_norm, codigo, nombre, departamento, genero,
-            precio_present, requiere_botella
+        rows_raw_hist.append(
+            (
+                int(import_id),
+                codigo_norm,
+                codigo,
+                nombre,
+                descripcion,
+                depto,
+                genero,
+                float(p_max),
+                float(p_min),
+                float(p_oferta),
+                fuente,
+            )
         )
-        VALUES(?,?,?,?,?,?,?,?)
-        """,
-        rows_hist,
-    )
-
-    con.executemany(
-        """
-        INSERT INTO presentations_current(
-            codigo_norm, codigo, nombre, departamento, genero,
-            precio_present, requiere_botella, updated_at
+        rows_raw_cur.append(
+            (
+                codigo_norm,
+                codigo,
+                nombre,
+                descripcion,
+                depto,
+                genero,
+                float(p_max),
+                float(p_min),
+                float(p_oferta),
+                fuente,
+                now,
+            )
         )
-        VALUES(?,?,?,?,?,?,?,?)
-        ON CONFLICT(codigo_norm) DO UPDATE SET
-            codigo=excluded.codigo,
-            nombre=excluded.nombre,
-            departamento=excluded.departamento,
-            genero=excluded.genero,
-            precio_present=excluded.precio_present,
-            requiere_botella=excluded.requiere_botella,
-            updated_at=excluded.updated_at
-        """,
-        rows_cur,
-    )
+
+        rows_hist.append(
+            (
+                int(import_id),
+                codigo_norm,
+                codigo,
+                nombre,
+                descripcion,
+                depto,
+                genero,
+                float(p_max),
+                float(p_min),
+                float(p_oferta),
+                float(precio_present),
+                int(req),
+                0.0,
+                "",
+                fuente,
+            )
+        )
+        rows_cur.append(
+            (
+                codigo_norm,
+                codigo,
+                nombre,
+                descripcion,
+                depto,
+                genero,
+                float(p_max),
+                float(p_min),
+                float(p_oferta),
+                float(precio_present),
+                int(req),
+                0.0,
+                "",
+                fuente,
+                now,
+            )
+        )
+
+    if replace_current:
+        con.execute("DELETE FROM presentacion_current")
+        con.execute("DELETE FROM presentations_current")
+
+    if rows_raw_hist:
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO presentacion_hist(
+                import_id, codigo_norm, codigo, nombre, descripcion,
+                departamento, genero, p_max, p_min, p_oferta, fuente
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            rows_raw_hist,
+        )
+
+    if rows_raw_cur:
+        con.executemany(
+            """
+            INSERT INTO presentacion_current(
+                codigo_norm, codigo, nombre, descripcion,
+                departamento, genero, p_max, p_min, p_oferta,
+                fuente, updated_at
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(codigo_norm, departamento, genero) DO UPDATE SET
+                codigo=excluded.codigo,
+                nombre=excluded.nombre,
+                descripcion=excluded.descripcion,
+                departamento=excluded.departamento,
+                genero=excluded.genero,
+                p_max=excluded.p_max,
+                p_min=excluded.p_min,
+                p_oferta=excluded.p_oferta,
+                fuente=excluded.fuente,
+                updated_at=excluded.updated_at
+            """,
+            rows_raw_cur,
+        )
+
+    if rows_hist:
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO presentations_hist(
+                import_id, codigo_norm, codigo, nombre, descripcion,
+                departamento, genero,
+                p_max, p_min, p_oferta,
+                precio_present, requiere_botella,
+                stock_disponible, codigos_producto,
+                fuente
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            rows_hist,
+        )
+
+    if rows_cur:
+        con.executemany(
+            """
+            INSERT INTO presentations_current(
+                codigo_norm, codigo, nombre, descripcion,
+                departamento, genero,
+                p_max, p_min, p_oferta,
+                precio_present, requiere_botella,
+                stock_disponible, codigos_producto,
+                fuente, updated_at
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(codigo_norm, departamento, genero) DO UPDATE SET
+                codigo=excluded.codigo,
+                nombre=excluded.nombre,
+                descripcion=excluded.descripcion,
+                departamento=excluded.departamento,
+                genero=excluded.genero,
+                p_max=excluded.p_max,
+                p_min=excluded.p_min,
+                p_oferta=excluded.p_oferta,
+                precio_present=excluded.precio_present,
+                requiere_botella=excluded.requiere_botella,
+                stock_disponible=excluded.stock_disponible,
+                codigos_producto=excluded.codigos_producto,
+                fuente=excluded.fuente,
+                updated_at=excluded.updated_at
+            """,
+            rows_cur,
+        )
+
+
+def upsert_presentacion_prod_snapshot(
+    con: sqlite3.Connection,
+    import_id: int,
+    df: pd.DataFrame,
+    *,
+    replace_current: bool = False,
+) -> None:
+    """
+    Espera columnas:
+      COD_PRODUCTO, COD_PRESENTACION, DEPARTAMENTO, GENERO, CANTIDAD
+    """
+    if df is None or df.empty:
+        return
+
+    now = now_iso()
+
+    rows_hist: list[tuple] = []
+    rows_cur: list[tuple] = []
+
+    for _, r in df.iterrows():
+        cod_producto = _to_text(r.get("COD_PRODUCTO") or r.get("cod_producto")).upper()
+        cod_presentacion = _to_text(r.get("COD_PRESENTACION") or r.get("cod_presentacion")).upper()
+        if not cod_producto or not cod_presentacion:
+            continue
+
+        depto = _to_text(r.get("DEPARTAMENTO") or r.get("departamento")).upper()
+        genero = _to_text(r.get("GENERO") or r.get("genero")).lower()
+        cantidad = _to_float(r.get("CANTIDAD") if "CANTIDAD" in r else r.get("cantidad"), 0.0)
+        fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
+
+        rows_hist.append(
+            (
+                int(import_id),
+                cod_producto,
+                cod_presentacion,
+                depto,
+                genero,
+                float(cantidad),
+                fuente,
+            )
+        )
+        rows_cur.append(
+            (
+                cod_producto,
+                cod_presentacion,
+                depto,
+                genero,
+                float(cantidad),
+                fuente,
+                now,
+            )
+        )
+
+    if replace_current:
+        con.execute("DELETE FROM presentacion_prod_current")
+
+    if rows_hist:
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO presentacion_prod_hist(
+                import_id, cod_producto, cod_presentacion,
+                departamento, genero, cantidad, fuente
+            )
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            rows_hist,
+        )
+
+    if rows_cur:
+        con.executemany(
+            """
+            INSERT INTO presentacion_prod_current(
+                cod_producto, cod_presentacion,
+                departamento, genero, cantidad,
+                fuente, updated_at
+            )
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(cod_producto, cod_presentacion, departamento, genero) DO UPDATE SET
+                cantidad=excluded.cantidad,
+                fuente=excluded.fuente,
+                updated_at=excluded.updated_at
+            """,
+            rows_cur,
+        )
+
+
+def rebuild_presentations_rollup(con: sqlite3.Connection) -> None:
+    """
+    Calcula stock_disponible y codigos_producto para presentations_current
+    usando presentacion_prod_current + products_current.
+    """
+    pres_rows = con.execute(
+        """
+        SELECT
+            codigo_norm,
+            COALESCE(codigo, '') AS codigo,
+            UPPER(COALESCE(departamento, '')) AS departamento,
+            LOWER(COALESCE(genero, '')) AS genero
+        FROM presentations_current
+        """
+    ).fetchall()
+
+    updates: list[tuple] = []
+
+    for p in pres_rows:
+        codigo_norm = _to_text(p["codigo_norm"]).upper()
+        codigo = _to_text(p["codigo"]).upper()
+        depto = _to_text(p["departamento"]).upper()
+        genero = _to_text(p["genero"]).lower()
+
+        rels = con.execute(
+            """
+            SELECT
+                cod_producto,
+                COALESCE(cantidad, 0) AS cantidad,
+                UPPER(COALESCE(departamento, '')) AS departamento,
+                LOWER(COALESCE(genero, '')) AS genero
+            FROM presentacion_prod_current
+            WHERE UPPER(cod_presentacion) = ? OR UPPER(cod_presentacion) = ?
+            """,
+            (codigo_norm, codigo),
+        ).fetchall()
+
+        if not rels:
+            updates.append((0.0, "", codigo_norm, depto, genero))
+            continue
+
+        ratios: list[float] = []
+        codigos_producto: list[str] = []
+
+        for r in rels:
+            rel_dep = _to_text(r["departamento"]).upper()
+            rel_gen = _to_text(r["genero"]).lower()
+            if depto and rel_dep and rel_dep != depto:
+                continue
+            if genero and rel_gen and rel_gen != genero:
+                continue
+
+            cod_prod = _to_text(r["cod_producto"]).upper()
+            if not cod_prod:
+                continue
+
+            need_qty = _to_float(r["cantidad"], 0.0)
+            if need_qty <= 0:
+                continue
+
+            srow = con.execute(
+                """
+                SELECT COALESCE(cantidad_disponible, 0) AS s
+                FROM products_current
+                WHERE UPPER(id) = ?
+                LIMIT 1
+                """,
+                (cod_prod,),
+            ).fetchone()
+
+            stock_prod = _to_float(srow["s"], 0.0) if srow else 0.0
+            ratios.append(stock_prod / need_qty)
+            codigos_producto.append(cod_prod)
+
+        stock_disponible = min(ratios) if ratios else 0.0
+        stock_disponible = round(max(0.0, float(stock_disponible)), 6)
+
+        codigos_csv = ",".join(sorted(set(codigos_producto)))
+        updates.append((stock_disponible, codigos_csv, codigo_norm, depto, genero))
+
+    if updates:
+        con.executemany(
+            """
+            UPDATE presentations_current
+            SET stock_disponible = ?,
+                codigos_producto = ?
+            WHERE codigo_norm = ?
+              AND UPPER(COALESCE(departamento, '')) = ?
+              AND LOWER(COALESCE(genero, '')) = ?
+            """,
+            updates,
+        )
+
 
 def load_presentations_current(con: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM presentations_current", con)

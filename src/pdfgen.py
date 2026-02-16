@@ -5,8 +5,9 @@ from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE
+from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE, STORE_ID
 from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, resolve_font_asset, DATA_DIR
+from .quote_code import format_quote_code
 from .utils  import fmt_money_pdf, nz
 from .pricing import cantidad_para_mostrar
 
@@ -168,9 +169,10 @@ def _register_lufga_if_available() -> tuple[str, str]:
         pass
     return "Helvetica", "Helvetica-Bold"
 
-def _next_quote_number(prefix: str) -> str:
+def _next_quote_number(country_code: str, store_id: str) -> str:
     os.makedirs(DATA_DIR, exist_ok=True)
-    seq_file = os.path.join(DATA_DIR, f"seq_{prefix}.txt")
+    cc = (country_code or "PY").strip().upper()
+    seq_file = os.path.join(DATA_DIR, f"seq_{cc}.txt")
     n = 0
     try:
         if os.path.exists(seq_file):
@@ -184,7 +186,7 @@ def _next_quote_number(prefix: str) -> str:
             fh.write(str(n))
     except Exception:
         pass
-    return f"{prefix}-{n:07d}"
+    return format_quote_code(country_code=cc, store_id=store_id, quote_no=n, width=7)
 
 def _draw_totals_bg_block(c: canvas.Canvas, W, H, L: dict):
     bg = L.get("TOTALS_BG", None)
@@ -299,14 +301,16 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
     cliente_raw  = (datos.get("cliente","") or "").strip()
     cliente_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", cliente_raw).strip("_")
     if fixed_quote_no:
-        nro_cot2 = str(fixed_quote_no).strip()
-        nro_cot = f"{cc}-{nro_cot2}"
+        quote_code = format_quote_code(
+            country_code=cc,
+            store_id=STORE_ID,
+            quote_no=fixed_quote_no,
+            width=7,
+        )
     else:
-        nro_cot = _next_quote_number(cc)
-        nro_cot2 = nro_cot.rsplit("-", 1)[1]
-
+        quote_code = _next_quote_number(cc, STORE_ID)
     if not out_path:
-        out_path = os.path.join(COTIZACIONES_DIR, f"C-{nro_cot}_{cliente_slug}.pdf")
+        out_path = os.path.join(COTIZACIONES_DIR, f"C-{quote_code}_{cliente_slug}.pdf")
     if out_path:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     c = canvas.Canvas(out_path, pagesize=A4)
@@ -342,8 +346,8 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
         if L["QUOTE_SHOW"]:
             c.setFillColor(TEXT_COLOR)
-            c.setFont(FONT_BOLD, 20)
-            c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{nro_cot2}")
+            c.setFont(FONT_BOLD, 14)
+            c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{quote_code}")
 
         c.setFont(FONT_BOLD, 10)
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))

@@ -205,6 +205,34 @@ begin
   if B then Result := 'true' else Result := 'false';
 end;
 
+function NormalizeCompanyType(const S: string): string;
+var U: string;
+begin
+  U := UpperCase(Trim(S));
+  if U = 'EF PERFUMES' then
+    Result := 'EF PERFUMES'
+  else
+    Result := 'LA CASA DEL PERFUME';
+end;
+
+function JsonEscape(const S: string): string;
+var
+  i: Integer;
+  c: Char;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    c := S[i];
+    case c of
+      '\': Result := Result + '\\';
+      '"': Result := Result + '\"';
+    else
+      Result := Result + c;
+    end;
+  end;
+end;
+
 function SanitizeFilePart(const S: string): string;
 var i: Integer; c: Char;
 begin
@@ -222,7 +250,7 @@ end;
 
 var
   HaveOldConfig: Boolean;
-  OldCountry, OldListing: string;
+  OldCountry, OldListing, OldCompanyType, OldStoreId: string;
   OldAllow: Boolean;
   PrevDir: string;
   PrevVersion: string;
@@ -233,6 +261,12 @@ var
 
   ListadoPage: TWizardPage;
   cbListado: TNewComboBox;
+
+  EmpresaPage: TWizardPage;
+  cbEmpresa: TNewComboBox;
+
+  TiendaPage: TWizardPage;
+  txtStoreId: TNewEdit;
 
   StockPage: TWizardPage;
   chkNoStock: TNewCheckBox;
@@ -384,7 +418,7 @@ var
   PrevCfg, J: string;
   BackupDir, Tag, FullPath, MiniPath, LastPath: string;
   AllowStr: string;
-  C, L: string;
+  C, L, CT, SID: string;
   A: Boolean;
 begin
   if (not IsReinstall) or (PrevDir = '') then Exit;
@@ -408,10 +442,24 @@ begin
   SaveStringToFile(LastPath, J, False);
 
   C := OldCountry; L := OldListing; A := OldAllow;
+  CT := OldCompanyType; SID := OldStoreId;
 
   if C = '' then JsonExtractStr(J, 'country', C);
   if L = '' then JsonExtractStr(J, 'listing_type', L);
+  if CT = '' then JsonExtractStr(J, 'company_type', CT);
+  if SID = '' then JsonExtractStr(J, 'store_id', SID);
   if not JsonExtractBool(J, 'allow_no_stock', A) then A := False;
+
+  C := UpperCase(Trim(C));
+  if (C <> 'PERU') and (C <> 'VENEZUELA') then
+    C := 'PARAGUAY';
+
+  L := UpperCase(Trim(L));
+  if (L <> 'PRODUCTOS') and (L <> 'PRESENTACIONES') and (L <> 'AMBOS') then
+    L := 'AMBOS';
+
+  CT := NormalizeCompanyType(CT);
+  SID := Trim(SID);
 
   AllowStr := BoolToJson(A);
 
@@ -419,8 +467,10 @@ begin
   SaveStringToFile(
     MiniPath,
     '{' + #13#10 +
-    '  "country": "' + UpperCase(C) + '",' + #13#10 +
-    '  "listing_type": "' + UpperCase(L) + '",' + #13#10 +
+    '  "country": "' + JsonEscape(C) + '",' + #13#10 +
+    '  "listing_type": "' + JsonEscape(L) + '",' + #13#10 +
+    '  "company_type": "' + JsonEscape(CT) + '",' + #13#10 +
+    '  "store_id": "' + JsonEscape(SID) + '",' + #13#10 +
     '  "allow_no_stock": ' + AllowStr + #13#10 +
     '}',
     False
@@ -433,6 +483,8 @@ begin
   HaveOldConfig := False;
   OldCountry := '';
   OldListing := '';
+  OldCompanyType := '';
+  OldStoreId := '';
   OldAllow := False;
   PrevDir := '';
   PrevVersion := '';
@@ -449,7 +501,11 @@ begin
     begin
       if JsonExtractStr(J, 'country', OldCountry) then ;
       if JsonExtractStr(J, 'listing_type', OldListing) then ;
+      if JsonExtractStr(J, 'company_type', OldCompanyType) then ;
+      if JsonExtractStr(J, 'store_id', OldStoreId) then ;
       if not JsonExtractBool(J, 'allow_no_stock', OldAllow) then OldAllow := False;
+      OldCompanyType := NormalizeCompanyType(OldCompanyType);
+      OldStoreId := Trim(OldStoreId);
       HaveOldConfig := (Length(OldCountry) > 0) and (Length(OldListing) > 0);
     end;
   end;
@@ -534,8 +590,35 @@ begin
   cbListado.Items.Add('Ambos');
   cbListado.ItemIndex := 2;
 
-  StockPage := CreateCustomPage(
+  EmpresaPage := CreateCustomPage(
     ListadoPage.ID,
+    'Tipo de empresa',
+    'Elija el tipo de empresa.'
+  );
+  cbEmpresa := TNewComboBox.Create(EmpresaPage.Surface);
+  cbEmpresa.Parent := EmpresaPage.Surface;
+  cbEmpresa.Left := ScaleX(0);
+  cbEmpresa.Top := ScaleY(8);
+  cbEmpresa.Width := EmpresaPage.SurfaceWidth;
+  cbEmpresa.Style := csDropDownList;
+  cbEmpresa.Items.Add('LA CASA DEL PERFUME');
+  cbEmpresa.Items.Add('EF PERFUMES');
+  cbEmpresa.ItemIndex := 0;
+
+  TiendaPage := CreateCustomPage(
+    EmpresaPage.ID,
+    'ID de tienda',
+    'Ingrese el ID de tienda que usará este equipo.'
+  );
+  txtStoreId := TNewEdit.Create(TiendaPage.Surface);
+  txtStoreId.Parent := TiendaPage.Surface;
+  txtStoreId.Left := ScaleX(0);
+  txtStoreId.Top := ScaleY(8);
+  txtStoreId.Width := TiendaPage.SurfaceWidth;
+  txtStoreId.Text := '';
+
+  StockPage := CreateCustomPage(
+    TiendaPage.ID,
     'Permitir sin stock',
     'Puede permitir listar y cotizar productos/presentaciones sin stock disponible.'
   );
@@ -550,7 +633,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  PaisSel, ListadoSelUpper, AllowStr: string;
+  PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, AllowStr: string;
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
 begin
   try
@@ -571,6 +654,8 @@ begin
       begin
         PaisSel := UpperCase(OldCountry);
         ListadoSelUpper := UpperCase(OldListing);
+        CompanySel := NormalizeCompanyType(OldCompanyType);
+        StoreIdSel := Trim(OldStoreId);
         AllowStr := BoolToJson(OldAllow);
       end
       else
@@ -591,15 +676,35 @@ begin
             ListadoSelUpper := 'AMBOS';
           end;
 
+          case cbEmpresa.ItemIndex of
+            1: CompanySel := 'EF PERFUMES';
+          else
+            CompanySel := 'LA CASA DEL PERFUME';
+          end;
+
+          StoreIdSel := Trim(txtStoreId.Text);
           AllowStr := BoolToJson(chkNoStock.Checked);
         end
         else
         begin
           PaisSel := 'PARAGUAY';
           ListadoSelUpper := 'AMBOS';
+          CompanySel := 'LA CASA DEL PERFUME';
+          StoreIdSel := '';
           AllowStr := 'false';
         end;
       end;
+
+      PaisSel := UpperCase(Trim(PaisSel));
+      if (PaisSel <> 'PERU') and (PaisSel <> 'VENEZUELA') then
+        PaisSel := 'PARAGUAY';
+
+      ListadoSelUpper := UpperCase(Trim(ListadoSelUpper));
+      if (ListadoSelUpper <> 'PRODUCTOS') and (ListadoSelUpper <> 'PRESENTACIONES') and (ListadoSelUpper <> 'AMBOS') then
+        ListadoSelUpper := 'AMBOS';
+
+      CompanySel := NormalizeCompanyType(CompanySel);
+      StoreIdSel := Trim(StoreIdSel);
 
       ConfigFolder := ExpandConstant('{app}\config');
       ForceDir(ConfigFolder);
@@ -607,8 +712,10 @@ begin
       FJson := ConfigFolder + '\config.json';
       ConfJson :=
         '{' + #13#10 +
-        '  "country": "' + PaisSel + '",' + #13#10 +
-        '  "listing_type": "' + ListadoSelUpper + '",' + #13#10 +
+        '  "country": "' + JsonEscape(PaisSel) + '",' + #13#10 +
+        '  "listing_type": "' + JsonEscape(ListadoSelUpper) + '",' + #13#10 +
+        '  "company_type": "' + JsonEscape(CompanySel) + '",' + #13#10 +
+        '  "store_id": "' + JsonEscape(StoreIdSel) + '",' + #13#10 +
         '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
         '  "update_mode": "SILENT",' + #13#10 +
         '  "update_check_on_startup": true,' + #13#10 +

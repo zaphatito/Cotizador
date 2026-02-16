@@ -1,7 +1,11 @@
 {
   "country": "PARAGUAY",
   "listing_type": "AMBOS",
+  "company_type": "LA CASA DEL PERFUME",
+  "store_id": "",
+  "username": "",
   "allow_no_stock": false,
+  "enable_ai": false,
   "update_mode": "ASK",
   "update_check_on_startup": true,
   "update_manifest_url": "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json",

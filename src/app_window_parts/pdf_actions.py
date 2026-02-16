@@ -10,9 +10,10 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl, QTimer
 
 from ..paths import COTIZACIONES_DIR, resolve_country_asset
-from ..config import APP_COUNTRY, COUNTRY_CODE, convert_from_base, get_currency_context
+from ..config import APP_COUNTRY, COUNTRY_CODE, STORE_ID, convert_from_base, get_currency_context
 from ..utils import nz
 from ..pdfgen import generar_pdf
+from ..quote_code import format_quote_code
 from ..logging_setup import get_logger
 from ..widgets import show_preview_dialog, ListadoProductosDialog
 
@@ -197,8 +198,14 @@ class PdfActionsMixin:
 
             with tx(con):
                 quote_no = next_quote_no(con, COUNTRY_CODE, width=7)
+                quote_code = format_quote_code(
+                    country_code=COUNTRY_CODE,
+                    store_id=STORE_ID,
+                    quote_no=quote_no,
+                    width=7,
+                )
 
-            ruta = generar_pdf(datos, fixed_quote_no=quote_no)
+            ruta = generar_pdf(datos, fixed_quote_no=quote_code)
             log.info("PDF generado en %s", ruta)
             pdf_store = os.path.basename(ruta)
             try:
@@ -206,7 +213,7 @@ class PdfActionsMixin:
                     insert_quote(
                         con,
                         country_code=COUNTRY_CODE,
-                        quote_no=str(quote_no).zfill(7),
+                        quote_no=quote_code,
                         created_at=created_at,
                         cliente=c,
                         cedula=ci,
@@ -243,6 +250,7 @@ class PdfActionsMixin:
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=ruta,
                 items_pdf=datos["items"],
+                quote_code=quote_code,
                 cliente_nombre=c,
                 printer_name="TICKERA",
                 width=48,
