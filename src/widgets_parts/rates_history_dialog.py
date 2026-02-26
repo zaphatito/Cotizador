@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_CURRENCY, get_secondary_currencies
 from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
+from .excel_table_behavior import ExcelTableController
 
 from sqlModels.db import connect, ensure_schema
 
@@ -202,6 +203,21 @@ class RatesHistoryDialog(QDialog):
         self.table.setModel(self.model)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.setSelectionBehavior(QTableView.SelectItems)
+        self.table.setSelectionMode(QTableView.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self._excel_table = ExcelTableController(
+            self.table,
+            allow_copy=True,
+            allow_paste=False,
+            allow_cut=False,
+            clear_on_delete=False,
+            move_on_enter=True,
+            move_on_tab=True,
+            skip_enter_preview_rows=False,
+        )
 
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -212,6 +228,7 @@ class RatesHistoryDialog(QDialog):
         # Botones
         bottom = QHBoxLayout()
         self.btn_close = QPushButton("Cerrar")
+        self.btn_close.setProperty("variant", "primary")
         self.btn_close.clicked.connect(self.accept)
         bottom.addStretch(1)
         bottom.addWidget(self.btn_close)

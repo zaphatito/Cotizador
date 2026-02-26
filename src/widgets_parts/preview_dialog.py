@@ -74,6 +74,9 @@ def show_preview_dialog(
     tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
     tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
     tbl.setSelectionMode(QAbstractItemView.NoSelection)
+    tbl.setAlternatingRowColors(True)
+    tbl.setShowGrid(False)
+    tbl.verticalHeader().setVisible(False)
 
     subtotal_bruto_base = 0.0
     descuento_total_base = 0.0
@@ -170,6 +173,7 @@ def show_preview_dialog(
     )
 
     btn = QPushButton("Cerrar")
+    btn.setProperty("variant", "primary")
     btn.clicked.connect(dlg.accept)
     v.addWidget(btn)
     dlg.exec()

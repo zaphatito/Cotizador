@@ -7,6 +7,9 @@ from PySide6.QtWidgets import QMainWindow
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt
 
+from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.settings_repo import get_setting, set_setting
+
 from ..config import (
     APP_CURRENCY,
     SECONDARY_CURRENCY,
@@ -16,6 +19,8 @@ from ..config import (
     is_recommendations_enabled,
 )
 from ..logging_setup import get_logger
+from ..db_path import resolve_db_path
+from ..utils import nz
 
 from .ui import UiMixin
 from .currency import CurrencyMixin
@@ -38,6 +43,9 @@ class SistemaCotizaciones(
     PdfActionsMixin,
     QMainWindow,
 ):
+    _DEFAULT_SIZE = (980, 640)
+    _WIN_KEY_PREFIX = "ui_window_quote"
+
     def __init__(
         self,
         df_productos: pd.DataFrame,
@@ -48,9 +56,12 @@ class SistemaCotizaciones(
     ):
         super().__init__()
         self.setWindowTitle("Cotizador")
-        self.resize(980, 640)
+        self.resize(*self._DEFAULT_SIZE)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
+
+        self._db_path = resolve_db_path()
+        self._window_state_restored = False
 
         self._catalog_manager = catalog_manager
         self._quote_events = quote_events
@@ -90,6 +101,7 @@ class SistemaCotizaciones(
         self._use_ai_completer = True
         self._recommendations_enabled = bool(is_recommendations_enabled(refresh=True))
         self._build_ui()
+        self._restore_window_state()
         self.entry_cliente.textChanged.connect(self._update_title_with_client)
         self._update_title_with_client(self.entry_cliente.text())
         self._build_completer()
@@ -206,7 +218,23 @@ class SistemaCotizaciones(
         self.limpiar_formulario()
 
         self.entry_cliente.setText(payload.get("cliente", "") or "")
-        self.entry_cedula.setText(payload.get("cedula", "") or "")
+        doc_value = str(payload.get("cedula", "") or "").strip()
+        doc_type_value = str(payload.get("tipo_documento", "") or "").strip().upper()
+        if not doc_type_value and "-" in doc_value:
+            pref, body = doc_value.split("-", 1)
+            pref = str(pref or "").strip().upper()
+            body = str(body or "").strip()
+            if pref and body:
+                doc_type_value = pref
+                doc_value = body
+        elif doc_type_value and doc_value.upper().startswith(f"{doc_type_value}-"):
+            doc_value = doc_value[len(doc_type_value) + 1 :].strip()
+        try:
+            if hasattr(self, "_set_selected_doc_type"):
+                self._set_selected_doc_type(doc_type_value)
+        except Exception:
+            pass
+        self.entry_cedula.setText(doc_value)
         self.entry_telefono.setText(payload.get("telefono", "") or "")
 
         prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
@@ -218,6 +246,69 @@ class SistemaCotizaciones(
                 pres_map[k1] = p
             if k2:
                 pres_map[k2] = p
+
+        def _build_fallback_prod_for_item(it_row: dict) -> dict:
+            """
+            Si un item historico ya no matchea catalogo vigente, construir un _prod
+            minimo para evitar que futuras recalculaciones dejen el precio en 0.
+            """
+            cat_u = str(it_row.get("categoria") or "").strip().upper()
+            base_price = float(nz(it_row.get("precio"), 0.0))
+            try:
+                pid = int(nz(it_row.get("id_precioventa"), 1) or 1)
+            except Exception:
+                pid = 1
+            if pid not in (1, 2, 3):
+                pid = 1
+            if base_price <= 0:
+                return {}
+            return {
+                "categoria": cat_u,
+                "p_max": float(base_price),
+                "p_min": float(base_price),
+                "p_oferta": float(base_price),
+                "precio_venta": int(pid),
+            }
+
+        def _build_presentation_combo_prod(codigo_combo: str, it_row: dict) -> dict:
+            """
+            Reconstruye _prod para codigos combinados de presentacion (ej: DD0040100)
+            usando la presentacion/base actuales.
+            """
+            if not hasattr(self, "_find_presentacion_combo_match"):
+                return {}
+            try:
+                match = self._find_presentacion_combo_match(str(codigo_combo or "").strip().upper())
+            except Exception:
+                match = None
+            if not match:
+                return {}
+            try:
+                pres, _base = match
+            except Exception:
+                return {}
+
+            p_max = float(nz(pres.get("P_MAX", pres.get("p_max", 0.0)), 0.0))
+            p_oferta = float(nz(pres.get("P_OFERTA", pres.get("p_oferta", 0.0)), 0.0))
+            p_min = float(nz(pres.get("P_MIN", pres.get("p_min", 0.0)), 0.0))
+
+            if p_max <= 0:
+                p_max = p_oferta if p_oferta > 0 else p_min
+            if p_oferta <= 0:
+                p_oferta = p_max if p_max > 0 else p_min
+            if p_min <= 0:
+                p_min = p_oferta if p_oferta > 0 else p_max
+
+            if p_max <= 0 and p_oferta <= 0 and p_min <= 0:
+                return _build_fallback_prod_for_item(it_row)
+
+            return {
+                "categoria": "PRESENTACION",
+                "p_max": float(p_max),
+                "p_oferta": float(p_oferta if p_oferta > 0 else p_max),
+                "p_min": float(p_min if p_min > 0 else (p_oferta if p_oferta > 0 else p_max)),
+                "precio_venta": 1,
+            }
 
         def _extract_stock(prod: dict) -> float | None:
             # ✅ soporta diferentes nombres de columna según tu Excel/DB
@@ -243,10 +334,15 @@ class SistemaCotizaciones(
 
         for it in (payload.get("items_base") or []):
             codigo = str(it.get("codigo") or "").strip()
+            cat_u_in = str(it.get("categoria") or "").strip().upper()
 
             prod = prod_map.get(codigo)
             if prod is None:
                 prod = pres_map.get(codigo.upper())
+            if prod is None and cat_u_in == "PRESENTACION":
+                prod = _build_presentation_combo_prod(codigo, it)
+            if prod is None:
+                prod = _build_fallback_prod_for_item(it)
 
             item = dict(it)
             item["_prod"] = prod or {}
@@ -274,3 +370,101 @@ class SistemaCotizaciones(
             item.setdefault("descuento_monto", 0.0)
 
             self.model.add_item(item)
+
+            # Al abrir desde histórico, no-servicios deben tomar el precio
+            # según id_precioventa (p_max/p_min/p_oferta) del quote_item.
+            try:
+                loaded = self.items[-1] if self.items else None
+                cat_u = str((loaded or {}).get("categoria") or "").upper()
+                has_prod = bool((loaded or {}).get("_prod"))
+                if loaded is not None and has_prod and cat_u != "SERVICIO":
+                    self.model._recalc_price_for_qty(loaded)
+                    row = len(self.items) - 1
+                    top = self.model.index(row, 0)
+                    bottom = self.model.index(row, self.model.columnCount() - 1)
+                    self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+            except Exception:
+                pass
+
+    @staticmethod
+    def _parse_int(value, default: int = 0) -> int:
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _parse_bool(value) -> bool:
+        s = str(value or "").strip().lower()
+        return s in ("1", "true", "yes", "on", "si")
+
+    def _restore_window_state(self):
+        con = None
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            p = self._WIN_KEY_PREFIX
+            w = self._parse_int(get_setting(con, f"{p}_w", "0"), 0)
+            h = self._parse_int(get_setting(con, f"{p}_h", "0"), 0)
+            x = self._parse_int(get_setting(con, f"{p}_x", "-1"), -1)
+            y = self._parse_int(get_setting(con, f"{p}_y", "-1"), -1)
+            is_max = self._parse_bool(get_setting(con, f"{p}_max", "0"))
+        except Exception:
+            return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        if w > 100 and h > 100:
+            self.resize(w, h)
+            self._window_state_restored = True
+        if x >= 0 and y >= 0:
+            self.move(x, y)
+            self._window_state_restored = True
+        if is_max:
+            self.showMaximized()
+            self._window_state_restored = True
+
+    def _save_window_state(self):
+        try:
+            geo = self.normalGeometry() if self.isMaximized() else self.geometry()
+            w = int(geo.width())
+            h = int(geo.height())
+            x = int(geo.x())
+            y = int(geo.y())
+            is_max = bool(self.isMaximized())
+        except Exception:
+            return
+
+        if w <= 100 or h <= 100:
+            return
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            ensure_schema(con)
+            p = self._WIN_KEY_PREFIX
+            with tx(con):
+                set_setting(con, f"{p}_w", str(w))
+                set_setting(con, f"{p}_h", str(h))
+                set_setting(con, f"{p}_x", str(x))
+                set_setting(con, f"{p}_y", str(y))
+                set_setting(con, f"{p}_max", "1" if is_max else "0")
+        except Exception:
+            pass
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+    def closeEvent(self, event):
+        try:
+            self._save_window_state()
+        except Exception:
+            pass
+        super().closeEvent(event)

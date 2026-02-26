@@ -113,7 +113,7 @@ def parse_report_query(text: str) -> ReportSpec:
         spec.kind = "sales_by_payment"
         return spec
 
-    if re.search(r"\b(estado|pagad|pendient|por\s+pagar|anulad)\b", ql):
+    if re.search(r"\b(estado|pagad|pendient|por\s+pagar|reenviado(?:s)?|anulad)\b", ql):
         spec.kind = "sales_by_status"
         return spec
 
@@ -272,12 +272,13 @@ def _sales_by_status(con, params_common: dict) -> str:
 def _top_clients(con, params_common: dict, *, limit: int = 20) -> str:
     where, params = _base_where(params_common)
     sql = f"""
-    SELECT q.cliente AS cliente,
+    SELECT COALESCE(NULLIF(trim(c.nombre), ''), '(sin cliente)') AS cliente,
            COUNT(*) AS n,
            SUM(q.total_neto_shown) AS total
     FROM quotes q
+    LEFT JOIN clients c ON c.id = q.id_cliente
     WHERE {where}
-    GROUP BY q.cliente
+    GROUP BY COALESCE(NULLIF(trim(c.nombre), ''), '(sin cliente)')
     ORDER BY total DESC
     LIMIT ?
     """

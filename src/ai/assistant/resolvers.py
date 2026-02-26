@@ -22,11 +22,19 @@ def resolve_client_from_history(db_path: str, query: str) -> Optional[tuple[str,
         like = f"%{q}%"
         rows = con.execute(
             """
-            SELECT cliente, cedula, telefono
-            FROM quotes
-            WHERE deleted_at IS NULL
-              AND (cliente LIKE ? OR cedula LIKE ? OR telefono LIKE ?)
-            ORDER BY created_at DESC
+            SELECT
+                COALESCE(c.nombre, '') AS cliente,
+                COALESCE(c.documento, '') AS cedula,
+                COALESCE(c.telefono, '') AS telefono
+            FROM quotes q
+            LEFT JOIN clients c ON c.id = q.id_cliente
+            WHERE q.deleted_at IS NULL
+              AND (
+                COALESCE(c.nombre, '') LIKE ?
+                OR COALESCE(c.documento, '') LIKE ?
+                OR COALESCE(c.telefono, '') LIKE ?
+              )
+            ORDER BY q.created_at DESC
             LIMIT 20
             """,
             (like, like, like),

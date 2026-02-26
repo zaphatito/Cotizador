@@ -346,7 +346,6 @@ def cargar_presentaciones(path_xlsx: str) -> pd.DataFrame:
                 "P_MAX": float(p_max),
                 "P_MIN": float(p_min),
                 "P_OFERTA": float(p_oferta),
-                "PRECIO_PRESENT": float(p_max),
                 "REQUIERE_BOTELLA": bool(req_bot),
             }
         )

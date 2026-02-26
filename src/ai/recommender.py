@@ -159,9 +159,9 @@ class QuoteRecommender:
             # Cliente completo: TODO el historial
             if client_triplet and all(client_triplet):
                 c, d, t = client_triplet
-                where.append("LOWER(TRIM(q.cliente))=LOWER(TRIM(?))")
-                where.append("LOWER(TRIM(q.cedula))=LOWER(TRIM(?))")
-                where.append("LOWER(TRIM(q.telefono))=LOWER(TRIM(?))")
+                where.append("LOWER(TRIM(COALESCE((SELECT nombre FROM clients cl WHERE cl.id = q.id_cliente), '')))=LOWER(TRIM(?))")
+                where.append("LOWER(TRIM(COALESCE((SELECT documento FROM clients cl WHERE cl.id = q.id_cliente), '')))=LOWER(TRIM(?))")
+                where.append("LOWER(TRIM(COALESCE((SELECT telefono FROM clients cl WHERE cl.id = q.id_cliente), '')))=LOWER(TRIM(?))")
                 params.extend([c, d, t])
                 scope_label = "del cliente"
             else:

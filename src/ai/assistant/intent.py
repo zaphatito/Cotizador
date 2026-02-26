@@ -35,7 +35,7 @@ def route_intent(text: str) -> str:
     # listar cotizaciones
     if re.search(r"\b(muestra|mu[eé]strame|lista|listar|ver|dame|ens[eé]ñame)\b", t) and re.search(r"\b(cotiza|cotizaci)\b", t):
         return "list_quotes"
-    if re.search(r"\b(cotiza|cotizaci)\b", t) and re.search(r"\b(por\s*pagar|pendient|pagad|anulad|sin\s*estado)\b", t):
+    if re.search(r"\b(cotiza|cotizaci)\b", t) and re.search(r"\b(por\s*pagar|pendient|pagad|reenviado(?:s)?|anulad|sin\s*estado)\b", t):
         return "list_quotes"
 
     # crear cotización
@@ -50,7 +50,7 @@ def route_intent(text: str) -> str:
 def pick_status_from_text(text: str) -> Optional[str]:
     """
     Devuelve:
-      - "POR_PAGAR"/"PENDIENTE"/"PAGADO"/"NO_APLICA" si lo detecta
+      - "POR_PAGAR"/"PENDIENTE"/"PAGADO"/"NO_APLICA"/"REENVIADO" si lo detecta
       - "" si el usuario pide explícitamente "sin estado"
       - None si NO se menciona estado
     """
@@ -67,6 +67,8 @@ def pick_status_from_text(text: str) -> Optional[str]:
         return "PENDIENTE"
     if "pagado" in t or "pagada" in t or "pagadas" in t or "pagados" in t:
         return "PAGADO"
+    if "reenviado" in t or "reenviados" in t:
+        return "REENVIADO"
     if "no aplica" in t:
         return "NO_APLICA"
 

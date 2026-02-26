@@ -118,7 +118,7 @@ def show_discount_dialog_for_item(
 
     dlg = QDialog(parent)
     dlg.setWindowTitle("Editar descuento")
-    dlg.resize(420, 260)
+    dlg.setMinimumWidth(400)
     if not app_icon.isNull():
         dlg.setWindowIcon(app_icon)
 
@@ -273,6 +273,9 @@ def show_discount_dialog_for_item(
     _update_preview_live()
 
     bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    ok_btn = bb.button(QDialogButtonBox.Ok)
+    if ok_btn is not None:
+        ok_btn.setProperty("variant", "primary")
     v.addWidget(bb)
 
     payload: dict = {}
@@ -312,6 +315,8 @@ def show_discount_dialog_for_item(
 
     bb.accepted.connect(on_accept)
     bb.rejected.connect(dlg.reject)
+
+    dlg.adjustSize()
 
     if dlg.exec() != QDialog.Accepted:
         return None

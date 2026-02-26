@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 29
 
 DDL = [
     # =========================
@@ -84,14 +84,7 @@ DDL = [
         p_max REAL NOT NULL DEFAULT 0,
         p_min REAL NOT NULL DEFAULT 0,
         p_oferta REAL NOT NULL DEFAULT 0,
-
-        precio_unitario REAL NOT NULL DEFAULT 0,
-        precio_unidad REAL NOT NULL DEFAULT 0,
-        precio_base_50g REAL NOT NULL DEFAULT 0,
-
-        precio_oferta_base REAL NOT NULL DEFAULT 0,
-        precio_minimo_base REAL NOT NULL DEFAULT 0,
-        precio_venta REAL NOT NULL DEFAULT 0,
+        precio_venta INTEGER NOT NULL DEFAULT 1,
 
         fuente TEXT,
         updated_at TEXT NOT NULL
@@ -114,14 +107,7 @@ DDL = [
         p_max REAL NOT NULL DEFAULT 0,
         p_min REAL NOT NULL DEFAULT 0,
         p_oferta REAL NOT NULL DEFAULT 0,
-
-        precio_unitario REAL NOT NULL DEFAULT 0,
-        precio_unidad REAL NOT NULL DEFAULT 0,
-        precio_base_50g REAL NOT NULL DEFAULT 0,
-
-        precio_oferta_base REAL NOT NULL DEFAULT 0,
-        precio_minimo_base REAL NOT NULL DEFAULT 0,
-        precio_venta REAL NOT NULL DEFAULT 0,
+        precio_venta INTEGER NOT NULL DEFAULT 1,
 
         fuente TEXT,
 
@@ -186,7 +172,6 @@ DDL = [
         p_max REAL NOT NULL DEFAULT 0,
         p_min REAL NOT NULL DEFAULT 0,
         p_oferta REAL NOT NULL DEFAULT 0,
-        precio_present REAL NOT NULL DEFAULT 0,
         requiere_botella INTEGER NOT NULL DEFAULT 0,
         stock_disponible REAL NOT NULL DEFAULT 0,
         codigos_producto TEXT NOT NULL DEFAULT '',
@@ -208,7 +193,6 @@ DDL = [
         p_max REAL NOT NULL DEFAULT 0,
         p_min REAL NOT NULL DEFAULT 0,
         p_oferta REAL NOT NULL DEFAULT 0,
-        precio_present REAL NOT NULL DEFAULT 0,
         requiere_botella INTEGER NOT NULL DEFAULT 0,
         stock_disponible REAL NOT NULL DEFAULT 0,
         codigos_producto TEXT NOT NULL DEFAULT '',
@@ -302,6 +286,60 @@ DDL = [
     """,
 
     # =========================
+    # Clients (maestro de clientes)
+    # =========================
+    """
+    CREATE TABLE IF NOT EXISTS clients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        country_code TEXT NOT NULL DEFAULT '',
+        tipo_documento TEXT NOT NULL DEFAULT '',
+        documento TEXT NOT NULL DEFAULT '',
+        documento_norm TEXT NOT NULL DEFAULT '',
+        nombre TEXT NOT NULL DEFAULT '',
+        telefono TEXT NOT NULL DEFAULT '',
+        source_quote_id INTEGER,
+        source_created_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        deleted_at TEXT
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_tipo_doc_norm
+    ON clients(tipo_documento, documento_norm)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_clients_nombre
+    ON clients(nombre)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_clients_country
+    ON clients(country_code)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_clients_deleted
+    ON clients(deleted_at)
+    """,
+
+    # =========================
+    # Quote statuses (catalogo de estados)
+    # =========================
+    """
+    CREATE TABLE IF NOT EXISTS quote_statuses (
+        code TEXT PRIMARY KEY,
+        label TEXT NOT NULL DEFAULT '',
+        color_hex TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_quote_statuses_sort
+    ON quote_statuses(sort_order, code)
+    """,
+
+    # =========================
     # Quotes (historico)
     # =========================
     """
@@ -311,10 +349,7 @@ DDL = [
         country_code TEXT NOT NULL,
         quote_no TEXT NOT NULL,
         created_at TEXT NOT NULL,
-
-        cliente TEXT NOT NULL,
-        cedula TEXT NOT NULL,
-        telefono TEXT NOT NULL,
+        id_cliente INTEGER,
 
         metodo_pago TEXT NOT NULL DEFAULT '',
         estado TEXT NOT NULL DEFAULT '',
@@ -331,13 +366,21 @@ DDL = [
         total_neto_shown REAL NOT NULL DEFAULT 0,
 
         pdf_path TEXT NOT NULL,
+        api_sent_at TEXT,
+        api_error_at TEXT,
+        api_error_message TEXT,
 
-        deleted_at TEXT
+        deleted_at TEXT,
+
+        FOREIGN KEY (id_cliente) REFERENCES clients(id) ON DELETE SET NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_quotes_created ON quotes(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_deleted ON quotes(deleted_at)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_estado ON quotes(estado)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_id_cliente ON quotes(id_cliente)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_api_sent_at ON quotes(api_sent_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_api_error_at ON quotes(api_error_at)",
 
     """
     CREATE TABLE IF NOT EXISTS quote_items (
@@ -347,6 +390,7 @@ DDL = [
         codigo TEXT,
         producto TEXT,
         categoria TEXT,
+        tipo_prod TEXT NOT NULL DEFAULT 'prod',
         fragancia TEXT,
         observacion TEXT,
 
@@ -361,6 +405,7 @@ DDL = [
         total_base REAL NOT NULL DEFAULT 0,
         precio_override_base REAL,
         precio_tier TEXT,
+        id_precioventa INTEGER NOT NULL DEFAULT 1,
 
         -- Shown
         precio_shown REAL NOT NULL DEFAULT 0,

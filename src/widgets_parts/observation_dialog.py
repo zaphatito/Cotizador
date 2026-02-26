@@ -22,7 +22,7 @@ def show_observation_dialog(
     """Devuelve el nuevo texto o None si se cancela."""
     dlg = QDialog(parent)
     dlg.setWindowTitle("Editar Observación")
-    dlg.resize(320, 120)
+    dlg.setMinimumWidth(300)
     if not app_icon.isNull():
         dlg.setWindowIcon(app_icon)
 
@@ -32,6 +32,7 @@ def show_observation_dialog(
     entry.setText(initial_text or "")
     v.addWidget(entry)
     btn = QPushButton("Guardar")
+    btn.setProperty("variant", "primary")
     v.addWidget(btn)
 
     result: dict[str, Optional[str]] = {"text": None}
@@ -41,6 +42,7 @@ def show_observation_dialog(
         dlg.accept()
 
     btn.clicked.connect(_save)
+    dlg.adjustSize()
 
     if dlg.exec() != QDialog.Accepted:
         return None

@@ -18,7 +18,7 @@ from .reports import report_text_from_db
 
 
 YES_WORDS = {
-    "si", "sí", "claro", "dale", "ok", "okay", "confirmo", "confirmar", "hazlo", "seguro", "deuna", "de una", "listo"
+    "si", "sÃ­", "claro", "dale", "ok", "okay", "confirmo", "confirmar", "hazlo", "seguro", "deuna", "de una", "listo"
 }
 NO_WORDS = {"no", "cancela", "cancelar", "mejor no", "detente", "stop"}
 
@@ -54,13 +54,13 @@ def _first_nonzero(prod: dict, keys: list[str]) -> Optional[float]:
 def product_prices_text(window, args: dict) -> str:
     code = _upper_code((args or {}).get("code") or (args or {}).get("query"))
     if not code:
-        return "Dime el código. Ej: **precios del CH1104**."
+        return "Dime el cÃ³digo. Ej: **precios del CH1104**."
 
-    # usa tu resolver “oficial” (df/list) para obtener fila
+    # usa tu resolver â€œoficialâ€ (df/list) para obtener fila
     r_pr, r_p = _find_row_any(window, code)
     row = r_pr or r_p
     if not isinstance(row, dict):
-        return f"No encontré el producto **{code}** en el catálogo cargado."
+        return f"No encontrÃ© el producto **{code}** en el catÃ¡logo cargado."
 
     # nombre
     nombre = ""
@@ -70,71 +70,50 @@ def product_prices_text(window, args: dict) -> str:
             nombre = str(v).strip()
             break
 
-    # ✅ tus columnas EXACTAS
-    unitario = _first_nonzero(row, ["precio_unidad", "precio_unitario", "precio_venta"])
-    oferta = _first_nonzero(
-        row,
-        [
-            "precio_oferta",
-            "precio_oferta_base",
-            "oferta",
-            ">12 unidades",
-            "precio_12",
-            "precio_12_unidades",
-            "mayor_12",
-            "mayor12",
-            "docena",
-            "precio_mayorista",
-        ],
-    )
-    minimo = _first_nonzero(
-        row,
-        [
-            "precio_minimo",
-            "precio_minimo_base",
-            "minimo",
-            ">100 unidades",
-            "precio_100",
-            "precio_100_unidades",
-            "mayor_100",
-            "ciento",
-        ],
-    )
-    base_val = _first_nonzero(
-        row,
-        ["precio_unitario", "precio_unidad", "precio_base_50g", "precio_venta"],
-    )
+    p_max = _first_nonzero(row, ["p_max", "P_MAX"])
+    p_oferta = _first_nonzero(row, ["p_oferta", "P_OFERTA"])
+    p_min = _first_nonzero(row, ["p_min", "P_MIN"])
 
-    # opcional: “máximo” usando tu lógica estricta (si aplica en tu sistema)
-    pmax = float(lookup_price_for_code_and_mode_strict(window, code, "max") or 0.0)
-    maximo = pmax if pmax > 0 else None
+    default_id_raw = _get_ci(row, "precio_venta")
+    try:
+        default_id = int(default_id_raw)
+    except Exception:
+        default_id = 1
+    if default_id not in (1, 2, 3):
+        default_id = 1
 
-    if unitario is None and oferta is None and minimo is None and base_val is None and maximo is None:
-        return f"No encontré precios cargados para **{code}**."
+    if default_id == 2:
+        base_val = p_min or p_max or p_oferta
+    elif default_id == 3:
+        base_val = p_oferta or p_max or p_min
+    else:
+        base_val = p_max or p_oferta or p_min
+
+    if p_max is None and p_oferta is None and p_min is None and base_val is None:
+        return f"No encontrÃ© precios cargados para **{code}**."
 
     def fmt(x: Optional[float]) -> str:
         if x is None:
-            return "—"
+            return "â€”"
         s = f"{float(x):,.4f}"
         return s.rstrip("0").rstrip(".")
 
     title = f"Precios de **{code}**"
     if nombre:
-        title += f" — {nombre}"
+        title += f" â€” {nombre}"
 
     lines = [title]
-    lines.append(f"• Unitario: {fmt(unitario)}")
-    lines.append(f"• Oferta (>12): {fmt(oferta)}")
-    lines.append(f"• Mínimo (>100): {fmt(minimo)}")
-    lines.append(f"• Base: {fmt(base_val)}")
-    lines.append(f"• Máximo: {fmt(maximo)}")
+    lines.append(f"â€¢ P. MÃ¡x: {fmt(p_max)}")
+    lines.append(f"â€¢ P. Oferta: {fmt(p_oferta)}")
+    lines.append(f"â€¢ P. MÃ­n: {fmt(p_min)}")
+    lines.append(f"â€¢ Precio por defecto (id={default_id}): {fmt(base_val)}")
 
     return "\n".join(lines)
 
 
 def _tokenize_simple(text: str) -> list[str]:
     t = _clean_spaces((text or "").lower())
-    t = re.sub(r"[^0-9a-záéíóúñü]+", " ", t, flags=re.I)
+    t = re.sub(r"[^0-9a-zÃ¡Ã©Ã­Ã³ÃºÃ±Ã¼]+", " ", t, flags=re.I)
     t = _clean_spaces(t)
     return t.split() if t else []
 
@@ -255,7 +234,7 @@ def _normalize_doc_only_number(doc_raw: str) -> str:
     out = []
     for p in parts:
         p2 = re.sub(
-            r"^(dni/ruc|dni|ruc|cedula|c[eé]dula|rif|pasaporte|passport|doc(?:umento)?|nit|ci)\b\s*[:=]?\s*",
+            r"^(dni/ruc|dni|ruc|cedula|c[eÃ©]dula|rif|pasaporte|passport|doc(?:umento)?|nit|ci)\b\s*[:=]?\s*",
             "",
             p,
             flags=re.I,
@@ -424,11 +403,11 @@ def _normalize_price_mode(pmode_raw: Any) -> str:
     pm = str(pmode_raw or "").strip().lower()
     if not pm:
         return ""
-    if pm in ("oferta", "promo", "promoción", "promocion", "sale", "offer"):
+    if pm in ("oferta", "promo", "promociÃ³n", "promocion", "sale", "offer"):
         return "oferta"
-    if pm in ("min", "mín", "mínimo", "minimo", "minimum"):
+    if pm in ("min", "mÃ­n", "mÃ­nimo", "minimo", "minimum"):
         return "min"
-    if pm in ("max", "máx", "máximo", "maximo", "maximum"):
+    if pm in ("max", "mÃ¡x", "mÃ¡ximo", "maximo", "maximum"):
         return "max"
     if pm in ("base", "normal", "lista", "unitario", "unit"):
         return "base"
@@ -442,9 +421,9 @@ def _price_mode_label(pmode: str) -> str:
     if pm == "oferta":
         return "oferta"
     if pm == "min":
-        return "mínimo"
+        return "mÃ­nimo"
     if pm == "max":
-        return "máximo"
+        return "mÃ¡ximo"
     if pm == "base":
         return "base"
     return (pmode or "").strip()
@@ -452,7 +431,7 @@ def _price_mode_label(pmode: str) -> str:
 
 def _looks_like_sku(q: str) -> bool:
     """
-    Detecta códigos tipo: CH1104, cc001, PC123, DD001, etc.
+    Detecta cÃ³digos tipo: CH1104, cc001, PC123, DD001, etc.
     (sin espacios)
     """
     s = (q or "").strip()
@@ -462,27 +441,36 @@ def _looks_like_sku(q: str) -> bool:
 
 
 def lookup_base_price_for_code(window, code: str) -> float:
-    cols_base = [
-        # estilo Excel
-        "UNITARIO", "P_UNITARIO", "PRECIO_UNITARIO", "PRECIO", "PRECIO_BASE", "PRECIO_VENTA", "PVP", "P_VENTA",
-        "precio", "precio_base", "precio_venta", "pvp", "p_venta", "price", "base_price",
-        "PRICE", "BASE_PRICE",
-        # estilo SQLite products_current
-        "precio_unitario", "PRECIO_UNITARIO",
-        "precio_unidad", "PRECIO_UNIDAD",
-        "precio_base_50g", "PRECIO_BASE_50G",
-        "precio_venta", "PRECIO_VENTA",
-    ]
+    def _default_price_id(row: dict) -> int:
+        v = _get_ci(row, "precio_venta")
+        try:
+            pid = int(v)
+        except Exception:
+            pid = 1
+        if pid not in (1, 2, 3):
+            pid = 1
+        return pid
 
     r_pr, r_p = _find_row_any(window, code)
 
     for r in (r_pr, r_p):
         if not r:
             continue
-        for c in cols_base:
-            v = _to_float(r.get(c), 0.0)
-            if v > 0:
-                return float(v)
+        p_max = _to_float(_get_ci(r, "p_max"), 0.0)
+        p_min = _to_float(_get_ci(r, "p_min"), 0.0)
+        p_oferta = _to_float(_get_ci(r, "p_oferta"), 0.0)
+
+        pid = _default_price_id(r)
+        if pid == 2 and p_min > 0:
+            return float(p_min)
+        if pid == 3 and p_oferta > 0:
+            return float(p_oferta)
+        if p_max > 0:
+            return float(p_max)
+        if p_oferta > 0:
+            return float(p_oferta)
+        if p_min > 0:
+            return float(p_min)
 
     return 0.0
 
@@ -490,8 +478,8 @@ def lookup_base_price_for_code(window, code: str) -> float:
 def _lookup_price_from_row(row: dict, cols: list[str]) -> float:
     """
     IMPORTANTE: usar _get_ci para soportar:
-      - mayúsculas/minúsculas
-      - columnas con espacios o símbolos (ej: '>12 unidades')
+      - mayÃºsculas/minÃºsculas
+      - columnas con espacios o sÃ­mbolos (ej: '>12 unidades')
     """
     for c in cols:
         v = _get_ci(row, c)
@@ -508,47 +496,13 @@ def _lookup_price_toggle_for_min(row: dict, cols: list[str]) -> float:
 def lookup_price_for_code_and_mode_strict(window, code: str, price_mode: str) -> float:
     pm = _normalize_price_mode(price_mode)
 
-    # ✅ Incluye tus columnas “reales” (las mismas ideas que product_prices_text)
-    cols_offer = [
-        # “normales”
-        "OFERTA", "P_OFERTA", "PRECIO_OFERTA", "PRECIO_PROMO", "PROMO", "PROMOCION",
-        "PRECIO_12", "PRECIO_12_UNIDADES", "MAYOR_12", "MAYOR12", "DOCENA", "PRECIO_MAYORISTA",
-        "P_DOCENA", "PRECIO_DOCENA", "P_12", "P12", "PRECIO12",
-        "offer", "price_offer", "precio_oferta", "precio_12", "precio_12_unidades", "mayor_12", "mayor12", "docena",
-        "precio_mayorista",
-        "precio_oferta_base", "PRECIO_OFERTA_BASE",
-        # ✅ “raras” (Excel)
-        ">12 unidades", "> 12 unidades", ">=12 unidades", ">= 12 unidades",
-    ]
-
-    cols_min = [
-        "MINIMO", "P_MINIMO", "PRECIO_MINIMO", "MIN", "MINIMUM",
-        "PRECIO_100", "PRECIO_100_UNIDADES", "MAYOR_100", "CIENTO",
-        "P_CIENTO", "PRECIO_CIENTO", "P_100", "P100", "PRECIO100",
-        "min", "price_min", "precio_minimo", "precio_100", "precio_100_unidades", "mayor_100", "ciento",
-        "precio_minimo_base", "PRECIO_MINIMO_BASE",
-        # ✅ “raras” (Excel)
-        ">100 unidades", "> 100 unidades", ">=100 unidades", ">= 100 unidades",
-    ]
-
-    # ✅ Max SOLO max (no metas unitario/base aquí, para que el fallback a base sea real y detectable)
-    cols_max = [
-        "MAXIMO", "P_MAXIMO", "PRECIO_MAXIMO", "MAX", "MAXIMUM",
-        "max", "price_max", "precio_maximo",
-        "precio_maximo_base", "PRECIO_MAXIMO_BASE",
-    ]
-
-    cols_base = [
-        "UNITARIO", "P_UNITARIO", "PRECIO_UNITARIO", "PRECIO", "PRECIO_BASE", "PRECIO_VENTA", "PVP", "P_VENTA",
-        "precio", "precio_base", "precio_venta", "pvp", "p_venta", "price", "base_price",
-        "precio_unitario", "PRECIO_UNITARIO",
-        "precio_unidad", "PRECIO_UNIDAD",
-        "precio_base_50g", "PRECIO_BASE_50G",
-        "precio_venta", "PRECIO_VENTA",
-    ]
+    cols_offer = ["P_OFERTA", "p_oferta"]
+    cols_min = ["P_MIN", "p_min"]
+    cols_max = ["P_MAX", "p_max"]
+    cols_base = ["P_MAX", "p_max"]
 
     r_pr, r_p = _find_row_any(window, code)
-    rows = [r for r in (r_pr, r_p) if isinstance(r, dict)]  # presentación -> producto
+    rows = [r for r in (r_pr, r_p) if isinstance(r, dict)]  # presentaciÃ³n -> producto
 
     if pm == "oferta":
         for r in rows:
@@ -574,7 +528,17 @@ def lookup_price_for_code_and_mode_strict(window, code: str, price_mode: str) ->
     # base
     if pm == "base":
         for r in rows:
-            v = _lookup_price_from_row(r, cols_base)
+            pid_raw = _get_ci(r, "precio_venta")
+            try:
+                pid = int(pid_raw)
+            except Exception:
+                pid = 1
+            if pid == 2:
+                v = _lookup_price_from_row(r, cols_min)
+            elif pid == 3:
+                v = _lookup_price_from_row(r, cols_offer)
+            else:
+                v = _lookup_price_from_row(r, cols_base)
             if v > 0:
                 return float(v)
         return 0.0
@@ -587,7 +551,7 @@ def _resolve_price_for_item(
     code: str,
     requested_mode: str,
     price_raw: Any,
-    default_mode_if_missing: str = "base",  # ✅ mejor default: base (no “max”)
+    default_mode_if_missing: str = "base",  # âœ… mejor default: base (no â€œmaxâ€)
 ) -> tuple[float, str, str, bool, bool]:
     """
     Devuelve:
@@ -613,7 +577,7 @@ def _resolve_price_for_item(
     if p > 0:
         return (p, eff, req, used_default, False)
 
-    # fallback base si no se encontró el modo pedido/default
+    # fallback base si no se encontrÃ³ el modo pedido/default
     base = float(lookup_price_for_code_and_mode_strict(window, code, "base") or 0.0)
     if base <= 0:
         base = float(lookup_base_price_for_code(window, code) or 0.0)
@@ -738,10 +702,10 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
         price_raw = (it or {}).get("price", None)
         pmode_raw = (it or {}).get("price_mode", "")
 
-        # ✅ normaliza SKU en minúscula
+        # âœ… normaliza SKU en minÃºscula
         q_for_resolve = q_raw.upper() if _looks_like_sku(q_raw) else q_raw
 
-        # requested por ítem
+        # requested por Ã­tem
         pmode_req = _normalize_price_mode(pmode_raw)
 
         cands = resolve_product_candidates(window, q_for_resolve, limit=6)
@@ -759,7 +723,7 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
             code, name, score, kind = cands[0]
             qty = normalize_qty_for_code(window, code, kind, qty_raw)
 
-            # ✅ precio por ítem:
+            # âœ… precio por Ã­tem:
             #   - si NO especifica nada => default max
             #   - si especifica offer/min/max => intenta ese, si falta => base
             price_val, pm_eff, pm_req_norm, used_default, fell_back = _resolve_price_for_item(
@@ -777,8 +741,8 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
                 "kind": kind,
                 "qty": float(qty),
                 "price": float(price_val),
-                "price_mode": pm_req_norm,                 # lo que pidió el usuario (normalizado) o ""
-                "price_mode_effective": pm_eff or "",      # lo que se aplicó realmente (max/base/...) o ""
+                "price_mode": pm_req_norm,                 # lo que pidiÃ³ el usuario (normalizado) o ""
+                "price_mode_effective": pm_eff or "",      # lo que se aplicÃ³ realmente (max/base/...) o ""
                 "price_mode_defaulted": bool(used_default),
                 "price_mode_fallback": bool(fell_back),
                 "confidence": float(score),
@@ -799,16 +763,16 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
 
     cli = resolved["client"]
     lines = []
-    lines.append("Voy a preparar esta cotización:")
-    lines.append(f"• Cliente: {cli.get('cliente') or '—'}")
+    lines.append("Voy a preparar esta cotizaciÃ³n:")
+    lines.append(f"â€¢ Cliente: {cli.get('cliente') or 'â€”'}")
     if cli.get("cedula"):
-        lines.append(f"• Doc: {cli.get('cedula')}")
+        lines.append(f"â€¢ Doc: {cli.get('cedula')}")
     if cli.get("telefono"):
-        lines.append(f"• Tel: {cli.get('telefono')}")
+        lines.append(f"â€¢ Tel: {cli.get('telefono')}")
     if resolved.get("payment_method"):
-        lines.append(f"• Pago: {resolved.get('payment_method')}")
-    lines.append(f"• Moneda: {currency or '—'}")
-    lines.append("• Ítems:")
+        lines.append(f"â€¢ Pago: {resolved.get('payment_method')}")
+    lines.append(f"â€¢ Moneda: {currency or 'â€”'}")
+    lines.append("â€¢ Ãtems:")
 
     if resolved["items"]:
         for r in resolved["items"]:
@@ -822,35 +786,35 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
                 # si aplicamos modo efectivo (max/base/offer/min)
                 if pm_eff:
                     if pm_req and pm_req != pm_eff and fell_back:
-                        extra = f" | precio {_price_mode_label(pm_req)} (no encontrado; se usó {_price_mode_label(pm_eff)}): {pr:g}"
+                        extra = f" | precio {_price_mode_label(pm_req)} (no encontrado; se usÃ³ {_price_mode_label(pm_eff)}): {pr:g}"
                     else:
                         extra = f" | precio {_price_mode_label(pm_eff)}: {pr:g}"
                 else:
                     extra = f" | precio unitario: {pr:g}"
             else:
                 # no se pudo resolver precio (que el modelo lo calcule)
-                # si no pidió modo explícito, asumimos max por defecto en explicación
+                # si no pidiÃ³ modo explÃ­cito, asumimos max por defecto en explicaciÃ³n
                 want = pm_req or "max"
-                extra = f" | precio {_price_mode_label(want)} (no encontrado; se usará base)"
+                extra = f" | precio {_price_mode_label(want)} (no encontrado; se usarÃ¡ base)"
 
-            lines.append(f"  - {r['codigo']} — {r['nombre']}  x {r['qty']}{extra}")
+            lines.append(f"  - {r['codigo']} â€” {r['nombre']}  x {r['qty']}{extra}")
     else:
-        lines.append("  - (ninguno resuelto aún)")
+        lines.append("  - (ninguno resuelto aÃºn)")
 
     if cli_trip:
-        lines.append("• Nota: completé datos desde histórico (si no los sobreescribiste).")
+        lines.append("â€¢ Nota: completÃ© datos desde histÃ³rico (si no los sobreescribiste).")
 
     if resolved["unresolved"]:
         lines.append("\nNecesito aclarar esto antes de ejecutar:")
         for u in resolved["unresolved"]:
             if u.get("reason") == "ambiguous":
                 n = len(u.get("candidates") or [])
-                lines.append(f"• '{u['query']}' es ambiguo ({n} opciones).")
+                lines.append(f"â€¢ '{u['query']}' es ambiguo ({n} opciones).")
             else:
-                lines.append(f"• No encontré match para: '{u['query']}'")
+                lines.append(f"â€¢ No encontrÃ© match para: '{u['query']}'")
 
-        lines.append("\nTe iré preguntando uno por uno con botones.")
-        lines.append("También puedes escribir el número (1,2,3…) o el código exacto (SKU).")
+        lines.append("\nTe irÃ© preguntando uno por uno con botones.")
+        lines.append("TambiÃ©n puedes escribir el nÃºmero (1,2,3â€¦) o el cÃ³digo exacto (SKU).")
 
     return ("\n".join(lines), resolved)
 
@@ -907,33 +871,35 @@ def execute_create_quote(window, resolved: dict) -> str:
         except Exception:
             qty_f = 1.0
 
-        # precio ya resuelto (puede ser 0 si no hubo match)
         price = r.get("price", None)
         try:
             price_f = float(price) if price is not None else 0.0
         except Exception:
             price_f = 0.0
 
-        # si por alguna razón no vino precio (o vino 0), aplicamos default max por ítem
+        pm_req = _normalize_price_mode(r.get("price_mode", ""))
+        pm_eff = _normalize_price_mode(r.get("price_mode_effective", ""))
+        pm_apply = pm_eff or pm_req
+
         if price_f <= 0:
-            pm_req = _normalize_price_mode(r.get("price_mode", ""))
-            pm_eff = _normalize_price_mode(r.get("price_mode_effective", ""))
-            # si no hay efectivo, asumimos max por defecto
-            want = pm_eff or pm_req or "max"
+            want = pm_apply or "max"
             p2 = lookup_price_for_code_and_mode_strict(window, code, want)
+            if p2 > 0 and not pm_apply:
+                pm_apply = want
             if p2 <= 0:
-                # fallback base
                 p2 = lookup_price_for_code_and_mode_strict(window, code, "base") or lookup_base_price_for_code(window, code)
+                if p2 > 0:
+                    pm_apply = "base"
             if p2 > 0:
                 price_f = float(p2)
 
         if row is not None:
             try:
-                window._force_qty_price_on_row(row, qty_f, price_f)
+                window._force_qty_price_on_row(row, qty_f, price_f, pm_apply)
             except Exception:
                 pass
 
-    return "Listo: dejé la cotización armada en pantalla. Si quieres, ahora puedes previsualizar o generar el PDF."
+    return "Listo: deje la cotizacion armada en pantalla. Si quieres, ahora puedes previsualizar o generar el PDF."
 
 
 def _parse_date_ymd(s: str) -> Optional[datetime.date]:
@@ -1004,46 +970,55 @@ def list_quotes_filtered(window, args: dict) -> str:
     con = connect(db_path)
     ensure_schema(con)
     try:
-        where = ["deleted_at IS NULL"]
+        where = ["q.deleted_at IS NULL"]
         params: list[Any] = []
 
         if status is not None:
             if status == "":
-                where.append("(estado IS NULL OR estado = '')")
+                where.append("(q.estado IS NULL OR q.estado = '')")
             else:
-                where.append("estado = ?")
+                where.append("q.estado = ?")
                 params.append(status)
 
         if currency:
-            where.append("currency_shown = ?")
+            where.append("q.currency_shown = ?")
             params.append(currency)
         if df_iso:
-            where.append("created_at >= ?")
+            where.append("q.created_at >= ?")
             params.append(df_iso)
         if dt_iso:
-            where.append("created_at < ?")
+            where.append("q.created_at < ?")
             params.append(dt_iso)
 
         rows = con.execute(
             f"""
-            SELECT id, created_at, quote_no, cliente, estado, total_neto_shown, currency_shown, pdf_path
-            FROM quotes
+            SELECT
+                q.id,
+                q.created_at,
+                q.quote_no,
+                COALESCE(c.nombre, '') AS cliente,
+                q.estado,
+                q.total_neto_shown,
+                q.currency_shown,
+                q.pdf_path
+            FROM quotes q
+            LEFT JOIN clients c ON c.id = q.id_cliente
             WHERE {" AND ".join(where)}
-            ORDER BY created_at DESC
+            ORDER BY q.created_at DESC
             LIMIT ?
             """,
             tuple(params + [limit]),
         ).fetchall()
 
         if not rows:
-            return "No encontré cotizaciones con esos filtros."
+            return "No encontrÃ© cotizaciones con esos filtros."
 
         lines = []
-        lines.append("Encontré estas cotizaciones:")
+        lines.append("EncontrÃ© estas cotizaciones:")
         for r in rows:
             qn = str(r["quote_no"] or "")
             lines.append(
-                f"• #{qn}  {r['cliente']}  {r['currency_shown']} {float(r['total_neto_shown'] or 0):.2f}  ({r['estado'] or ''})"
+                f"â€¢ #{qn}  {r['cliente']}  {r['currency_shown']} {float(r['total_neto_shown'] or 0):.2f}  ({r['estado'] or ''})"
             )
         lines.append("\nSi quieres abrir una, dime por ejemplo: 'abrir 0000123'.")
 
@@ -1070,22 +1045,25 @@ def top_clients(window, args: dict) -> str:
     con = connect(db_path)
     ensure_schema(con)
     try:
-        where = ["deleted_at IS NULL", "currency_shown = ?"]
+        where = ["q.deleted_at IS NULL", "q.currency_shown = ?"]
         params: list[Any] = [currency]
 
         if df_iso:
-            where.append("created_at >= ?")
+            where.append("q.created_at >= ?")
             params.append(df_iso)
         if dt_iso:
-            where.append("created_at < ?")
+            where.append("q.created_at < ?")
             params.append(dt_iso)
 
         rows = con.execute(
             f"""
-            SELECT cliente, SUM(total_neto_shown) AS total
-            FROM quotes
+            SELECT
+                COALESCE(NULLIF(TRIM(c.nombre), ''), '(sin cliente)') AS cliente,
+                SUM(q.total_neto_shown) AS total
+            FROM quotes q
+            LEFT JOIN clients c ON c.id = q.id_cliente
             WHERE {" AND ".join(where)}
-            GROUP BY cliente
+            GROUP BY COALESCE(NULLIF(TRIM(c.nombre), ''), '(sin cliente)')
             ORDER BY total DESC
             LIMIT ?
             """,
@@ -1097,7 +1075,7 @@ def top_clients(window, args: dict) -> str:
 
         lines = [f"Top clientes por monto en {currency}:"]
         for i, r in enumerate(rows, start=1):
-            lines.append(f"{i}) {r['cliente']} — {float(r['total'] or 0):.2f}")
+            lines.append(f"{i}) {r['cliente']} â€” {float(r['total'] or 0):.2f}")
 
         return "\n".join(lines)
     finally:
@@ -1109,5 +1087,5 @@ def report_text(w, args: dict) -> str:
     if isinstance(args, dict):
         q = str(args.get("query") or args.get("text") or args.get("user_query") or "").strip()
     if not q:
-        return "Dime qué reporte quieres. Ej: 'productos más vendidos', 'ventas por día', 'ventas por método de pago', 'stock bajo 5'."
+        return "Dime quÃ© reporte quieres. Ej: 'productos mÃ¡s vendidos', 'ventas por dÃ­a', 'ventas por mÃ©todo de pago', 'stock bajo 5'."
     return report_text_from_db(q)

@@ -104,7 +104,9 @@ class SmartCompleter(QObject):
         self.limit = int(limit)
         self.min_chars = max(1, int(min_chars))
 
-        self._pool = QThreadPool.globalInstance()
+        # Pool dedicado por completer para evitar backlog global de tareas viejas.
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(1)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(int(debounce_ms))
@@ -112,6 +114,8 @@ class SmartCompleter(QObject):
 
         self._req_id = 0
         self._task_refs: Dict[int, _SearchTask] = {}
+        self._search_busy = False
+        self._pending_query: Optional[str] = None
 
         # ✅ ToolTip es estable en Windows; Popup se puede usar si desactivas el auto-hide por FocusOut
         flags = (Qt.Popup | Qt.FramelessWindowHint) if bool(use_popup) else (Qt.ToolTip | Qt.FramelessWindowHint)
@@ -132,7 +136,8 @@ class SmartCompleter(QObject):
         self._model = _SuggestModel()
         self._view.setModel(self._model)
 
-        self.line.textEdited.connect(self._on_text)
+        # textChanged cubre escritura, pegar y entradas de lector/IME.
+        self.line.textChanged.connect(self._on_text)
 
         self.line.installEventFilter(self)
         app = QApplication.instance()
@@ -143,6 +148,25 @@ class SmartCompleter(QObject):
 
     def hide_popup(self):
         self._hide()
+
+    def is_popup_visible(self) -> bool:
+        try:
+            return bool(self._popup.isVisible() and self._model.rowCount() > 0)
+        except Exception:
+            return False
+
+    def pick_first(self) -> bool:
+        try:
+            if self._model.rowCount() <= 0:
+                return False
+            idx = self._model.index(0, 0)
+            if not idx.isValid():
+                return False
+            self._view.setCurrentIndex(idx)
+            self._pick_index(idx)
+            return True
+        except Exception:
+            return False
 
     def eventFilter(self, obj, ev):
         et = ev.type()
@@ -173,8 +197,11 @@ class SmartCompleter(QObject):
                             if typed_code:
                                 if self._pick_by_code(typed_code):
                                     return True
-                        self._pick_current()
-                        return True
+                            self._pick_current()
+                            return True
+                        # Cliente: deja Enter al owner (UiMixin) para decidir
+                        # entre seleccionar sugerencia o mover el foco.
+                        return False
                     if key == Qt.Key_Escape:
                         self._hide()
                         return True
@@ -190,28 +217,60 @@ class SmartCompleter(QObject):
         return super().eventFilter(obj, ev)
 
     def _on_text(self, *_):
+        if not self.line.hasFocus():
+            return
         self._timer.start()
 
-    def _do_search(self):
-        q = (self.line.text() or "").strip()
-        if len(q) < self.min_chars:
-            self._hide()
-            return
-
+    def _start_search(self, query: str) -> None:
         self._req_id += 1
         rid = self._req_id
+        self._search_busy = True
 
-        task = _SearchTask(rid, self.index, self.kind, q, self.limit)
+        task = _SearchTask(rid, self.index, self.kind, query, self.limit)
         self._task_refs[rid] = task
         task.signals.done.connect(self._on_results)
         self._pool.start(task)
 
+    def _drain_pending_query(self) -> None:
+        if self._search_busy:
+            return
+        q = self._pending_query
+        self._pending_query = None
+        if q is None:
+            return
+        q = str(q or "").strip()
+        if len(q) < self.min_chars:
+            self._hide()
+            return
+        self._start_search(q)
+
+    def _do_search(self):
+        if not self.line.hasFocus():
+            self._hide()
+            return
+        q = (self.line.text() or "").strip()
+        if self._search_busy:
+            self._pending_query = q
+            return
+        if len(q) < self.min_chars:
+            self._hide()
+            return
+        self._start_search(q)
+
     def _on_results(self, req_id: int, rows: list):
+        self._search_busy = False
         if int(req_id) != int(self._req_id):
             self._task_refs.pop(int(req_id), None)
+            self._drain_pending_query()
             return
 
         self._task_refs.pop(int(req_id), None)
+
+        # Si el campo ya no tiene foco, no mostrar/reabrir popup.
+        if not self.line.hasFocus():
+            self._hide()
+            self._drain_pending_query()
+            return
 
         items: List[SuggestItem] = []
         if self.kind == "product":
@@ -239,10 +298,12 @@ class SmartCompleter(QObject):
 
         if not items:
             self._hide()
+            self._drain_pending_query()
             return
 
         self._show_under_line()
         self._view.setCurrentIndex(self._model.index(0, 0))
+        self._drain_pending_query()
 
     def _show_under_line(self):
         r = self.line.rect()

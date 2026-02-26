@@ -82,6 +82,7 @@ _STATUS_MAP = [
     (re.compile(r"\bpor\s+pagar\b", re.I), "POR_PAGAR"),
     (re.compile(r"\bpendiente(?:s)?\b", re.I), "PENDIENTE"),
     (re.compile(r"\bpagad[ao]s?\b", re.I), "PAGADO"),
+    (re.compile(r"\breenviado(?:s)?\b", re.I), "REENVIADO"),
     (re.compile(r"\bsin\s+estado\b", re.I), ""),
     (re.compile(r"\btodos?\b", re.I), ""),  # “todas las cotizaciones” -> sin filtro
 ]
@@ -89,7 +90,7 @@ _STATUS_MAP = [
 
 def pick_status_from_text(text: str) -> Optional[str]:
     """
-    Devuelve el status normalizado (POR_PAGAR / PENDIENTE / PAGADO / "" / None).
+    Devuelve el status normalizado (POR_PAGAR / PENDIENTE / PAGADO / REENVIADO / "" / None).
     None = no se detectó nada.
     ""   = “sin filtro” o “sin estado”, según contexto (lo decide el caller).
     """

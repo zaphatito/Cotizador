@@ -204,6 +204,60 @@ def _has_fts5(con: sqlite3.Connection) -> bool:
         return False
 
 
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    try:
+        row = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (str(name or ""),),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _column_exists(con: sqlite3.Connection, table: str, col: str) -> bool:
+    if not _table_exists(con, table):
+        return False
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        cols = {str(r["name"]).lower() for r in rows}
+        return str(col or "").lower() in cols
+    except Exception:
+        return False
+
+
+def _clients_table_has_rows(con: sqlite3.Connection) -> bool:
+    return _table_exists(con, "clients")
+
+
+def _country_code_norm(value: Any) -> str:
+    v = str(value or "").strip().upper()
+    if v in ("PE", "PERU"):
+        return "PE"
+    if v in ("PY", "PARAGUAY"):
+        return "PY"
+    if v in ("VE", "VENEZUELA"):
+        return "VE"
+    return v
+
+
+def _load_app_country_code(con: sqlite3.Connection) -> str:
+    if not _table_exists(con, "settings"):
+        return ""
+    try:
+        row = con.execute(
+            "SELECT value FROM settings WHERE key = 'country' LIMIT 1"
+        ).fetchone()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    try:
+        return _country_code_norm(row["value"])
+    except Exception:
+        return ""
+
+
 def ensure_ai_schema(con: sqlite3.Connection) -> bool:
     if not _has_fts5(con):
         return False
@@ -345,6 +399,23 @@ def rebuild_clients_index(con: sqlite3.Connection) -> None:
 
     con.execute(f"DELETE FROM {_FTS_CLIENTS}")
 
+    if _clients_table_has_rows(con):
+        deleted_filter = " AND deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
+        con.execute(
+            f"""
+            INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono)
+            SELECT
+                COALESCE(nombre, ''),
+                COALESCE(documento, ''),
+                COALESCE(telefono, '')
+            FROM clients
+            WHERE TRIM(COALESCE(nombre, '')) <> ''
+              {deleted_filter}
+            ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
+            """
+        )
+        return
+
     con.execute(
         f"""
         INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono)
@@ -401,18 +472,53 @@ def _search_clients_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Dic
     mq = _fts_match_query(q)
     if not mq:
         return []
-    rows = con.execute(
-        f"""
-        SELECT
-            cliente, cedula, telefono,
-            bm25({_FTS_CLIENTS}) AS score
-        FROM {_FTS_CLIENTS}
-        WHERE {_FTS_CLIENTS} MATCH ?
-        ORDER BY score
-        LIMIT ?
-        """,
-        (mq, int(limit)),
-    ).fetchall()
+    if _clients_table_has_rows(con):
+        active_client_filter = " AND c.deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
+        rows = con.execute(
+            f"""
+            SELECT
+                f.cliente AS cliente,
+                f.cedula AS cedula,
+                f.telefono AS telefono,
+                bm25({_FTS_CLIENTS}) AS score
+            FROM {_FTS_CLIENTS} AS f
+            WHERE {_FTS_CLIENTS} MATCH ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM clients c
+                  WHERE LOWER(TRIM(COALESCE(c.nombre,''))) = LOWER(TRIM(COALESCE(f.cliente,'')))
+                    AND LOWER(TRIM(COALESCE(c.documento,''))) = LOWER(TRIM(COALESCE(f.cedula,'')))
+                    AND LOWER(TRIM(COALESCE(c.telefono,''))) = LOWER(TRIM(COALESCE(f.telefono,'')))
+                    {active_client_filter}
+              )
+            ORDER BY score
+            LIMIT ?
+            """,
+            (mq, int(limit)),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            f"""
+            SELECT
+                f.cliente AS cliente,
+                f.cedula AS cedula,
+                f.telefono AS telefono,
+                bm25({_FTS_CLIENTS}) AS score
+            FROM {_FTS_CLIENTS} AS f
+            WHERE {_FTS_CLIENTS} MATCH ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM quotes q
+                  WHERE q.deleted_at IS NULL
+                    AND LOWER(TRIM(COALESCE(q.cliente,''))) = LOWER(TRIM(COALESCE(f.cliente,'')))
+                    AND LOWER(TRIM(COALESCE(q.cedula,''))) = LOWER(TRIM(COALESCE(f.cedula,'')))
+                    AND LOWER(TRIM(COALESCE(q.telefono,''))) = LOWER(TRIM(COALESCE(f.telefono,'')))
+              )
+            ORDER BY score
+            LIMIT ?
+            """,
+            (mq, int(limit)),
+        ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -459,27 +565,54 @@ def _search_clients_like(con: sqlite3.Connection, q: str, limit: int) -> List[Di
     like = f"%{qn}%"
     like_ns = f"%{qn.replace(' ', '')}%"
 
-    rows = con.execute(
-        """
-        SELECT DISTINCT
-            COALESCE(cliente,'') AS cliente,
-            COALESCE(cedula,'') AS cedula,
-            COALESCE(telefono,'') AS telefono
-        FROM quotes
-        WHERE deleted_at IS NULL
-          AND (
-              LOWER(COALESCE(cliente,'')) LIKE ?
-              OR LOWER(COALESCE(cedula,'')) LIKE ?
-              OR LOWER(COALESCE(telefono,'')) LIKE ?
-              OR REPLACE(LOWER(COALESCE(cliente,'')), ' ', '') LIKE ?
-              OR REPLACE(LOWER(COALESCE(cedula,'')), ' ', '') LIKE ?
-              OR REPLACE(LOWER(COALESCE(telefono,'')), ' ', '') LIKE ?
-          )
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (like, like, like, like_ns, like_ns, like_ns, int(limit)),
-    ).fetchall()
+    if _clients_table_has_rows(con):
+        deleted_filter = "deleted_at IS NULL AND" if _column_exists(con, "clients", "deleted_at") else ""
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                COALESCE(nombre,'') AS cliente,
+                COALESCE(documento,'') AS cedula,
+                COALESCE(telefono,'') AS telefono
+            FROM clients
+            WHERE
+              """
+            + deleted_filter
+            + """
+              (
+                  LOWER(COALESCE(nombre,'')) LIKE ?
+                  OR LOWER(COALESCE(documento,'')) LIKE ?
+                  OR LOWER(COALESCE(telefono,'')) LIKE ?
+                  OR REPLACE(LOWER(COALESCE(nombre,'')), ' ', '') LIKE ?
+                  OR REPLACE(LOWER(COALESCE(documento,'')), ' ', '') LIKE ?
+                  OR REPLACE(LOWER(COALESCE(telefono,'')), ' ', '') LIKE ?
+              )
+            ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (like, like, like, like_ns, like_ns, like_ns, int(limit)),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                COALESCE(cliente,'') AS cliente,
+                COALESCE(cedula,'') AS cedula,
+                COALESCE(telefono,'') AS telefono
+            FROM quotes
+            WHERE deleted_at IS NULL
+              AND (
+                  LOWER(COALESCE(cliente,'')) LIKE ?
+                  OR LOWER(COALESCE(cedula,'')) LIKE ?
+                  OR LOWER(COALESCE(telefono,'')) LIKE ?
+                  OR REPLACE(LOWER(COALESCE(cliente,'')), ' ', '') LIKE ?
+                  OR REPLACE(LOWER(COALESCE(cedula,'')), ' ', '') LIKE ?
+                  OR REPLACE(LOWER(COALESCE(telefono,'')), ' ', '') LIKE ?
+              )
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (like, like, like, like_ns, like_ns, like_ns, int(limit)),
+        ).fetchall()
 
     out = []
     for r in rows:
@@ -504,6 +637,11 @@ class _FuzzyCache:
     pref_rows_all: List[Dict[str, Any]]
     pref_rows_by_1: Dict[str, List[Dict[str, Any]]]
     pref_rows_by_2: Dict[str, List[Dict[str, Any]]]
+    search_rows_all: List[Dict[str, Any]]
+    search_rows_text: List[Dict[str, Any]]
+    search_rows_by_1: Dict[str, List[Dict[str, Any]]]
+    search_rows_by_2: Dict[str, List[Dict[str, Any]]]
+    search_rows_by_code: Dict[str, Dict[str, Any]]
 
 
 _GLOBAL_FUZZY_CACHE: Dict[str, _FuzzyCache] = {}
@@ -531,6 +669,7 @@ class LocalSearchIndex:
     def _finalize_fuzzy_cache(
         *,
         products: List[Tuple[str, str]],
+        product_rows: List[Dict[str, Any]],
         clients: List[Tuple[str, str, str]],
         combos: List[Dict[str, Any]],
         presentations: List[Dict[str, Any]],
@@ -548,9 +687,57 @@ class LocalSearchIndex:
             pref_rows_all=[],
             pref_rows_by_1={},
             pref_rows_by_2={},
+            search_rows_all=[],
+            search_rows_text=[],
+            search_rows_by_1={},
+            search_rows_by_2={},
+            search_rows_by_code={},
         )
         cache.choices = {codigo: texto for (codigo, texto) in products}
         cache.choices_text = dict(cache.choices)
+
+        def _register_search_row(src: Dict[str, Any], *, kind: str) -> None:
+            code = str(src.get("codigo") or "").strip().upper()
+            if not code or code in cache.search_rows_by_code:
+                return
+
+            name = str(src.get("nombre") or "").strip()
+            cat = str(src.get("categoria") or "").strip()
+            gen = str(src.get("genero") or "").strip()
+            ml = str(src.get("ml") or "").strip()
+            fuente = str(src.get("fuente") or "").strip()
+
+            text = str(src.get("_text") or "").strip()
+            if not text:
+                text = _norm_query(" ".join([code, name, cat, gen, ml]).strip())
+            text_ns = str(src.get("_text_ns") or "").strip()
+            if not text_ns:
+                text_ns = re.sub(r"\s+", "", text)
+
+            row = {
+                "codigo": code,
+                "nombre": name,
+                "categoria": cat,
+                "genero": gen,
+                "ml": ml,
+                "fuente": fuente,
+                "_text": text,
+                "_text_ns": text_ns,
+                "_kind": kind,
+            }
+            cache.search_rows_by_code[code] = row
+            cache.search_rows_all.append(row)
+            if kind != "combo":
+                cache.search_rows_text.append(row)
+
+            k1 = code[:1]
+            k2 = code[:2]
+            cache.search_rows_by_1.setdefault(k1, []).append(row)
+            if len(k2) == 2:
+                cache.search_rows_by_2.setdefault(k2, []).append(row)
+
+        for p in (product_rows or []):
+            _register_search_row(p, kind="product")
 
         for c in combos:
             code = str(c.get("codigo") or "").strip()
@@ -560,6 +747,7 @@ class LocalSearchIndex:
             cache.combo_map[code] = c
             if code not in cache.choices and txt:
                 cache.choices[code] = txt
+            _register_search_row(c, kind="combo")
 
         for p in presentations:
             code = str(p.get("codigo") or "").strip()
@@ -571,6 +759,7 @@ class LocalSearchIndex:
                 cache.choices_text[code] = txt
             if code not in cache.choices and txt:
                 cache.choices[code] = txt
+            _register_search_row(p, kind="presentation")
 
         cache.pref_rows_all = list(combos or []) + list(presentations or [])
         for row in cache.pref_rows_all:
@@ -695,16 +884,31 @@ class LocalSearchIndex:
 
             con = self._connect()
             try:
-                crows = con.execute(
-                    """
-                    SELECT cliente, cedula, telefono
-                    FROM quotes
-                    WHERE deleted_at IS NULL
-                      AND TRIM(COALESCE(cliente,'')) <> ''
-                    GROUP BY cliente, cedula, telefono
-                    ORDER BY MAX(created_at) DESC
-                    """
-                ).fetchall()
+                if _clients_table_has_rows(con):
+                    deleted_filter = " AND deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
+                    crows = con.execute(
+                        f"""
+                        SELECT
+                            COALESCE(nombre, '') AS cliente,
+                            COALESCE(documento, '') AS cedula,
+                            COALESCE(telefono, '') AS telefono
+                        FROM clients
+                        WHERE TRIM(COALESCE(nombre, '')) <> ''
+                          {deleted_filter}
+                        ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
+                        """
+                    ).fetchall()
+                else:
+                    crows = con.execute(
+                        """
+                        SELECT cliente, cedula, telefono
+                        FROM quotes
+                        WHERE deleted_at IS NULL
+                          AND TRIM(COALESCE(cliente,'')) <> ''
+                        GROUP BY cliente, cedula, telefono
+                        ORDER BY MAX(created_at) DESC
+                        """
+                    ).fetchall()
 
                 clients: List[Tuple[str, str, str]] = []
                 for r in crows:
@@ -726,6 +930,7 @@ class LocalSearchIndex:
 
                 products: List[Tuple[str, str]] = []
                 product_meta: List[Dict[str, Any]] = []
+                product_rows: List[Dict[str, Any]] = []
                 products_by_cat: Dict[str, List[Dict[str, Any]]] = {}
                 products_by_cat_no_gen: Dict[str, List[Dict[str, Any]]] = {}
                 products_by_cat_gen: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -747,6 +952,18 @@ class LocalSearchIndex:
                     wd = _words_to_digits(base)
                     txt = " ".join([base, ns, split1, split2, wd, re.sub(r"\s+", "", wd)]).strip()
                     products.append((codigo, txt))
+                    product_rows.append(
+                        {
+                            "codigo": codigo,
+                            "nombre": nombre,
+                            "categoria": categoria,
+                            "genero": genero,
+                            "ml": ml,
+                            "fuente": fuente,
+                            "_text": txt,
+                            "_text_ns": re.sub(r"\s+", "", txt),
+                        }
+                    )
                     cat_u = str(categoria or "").strip().upper()
                     gen_l = str(genero or "").strip().lower()
                     pm = {
@@ -792,6 +1009,7 @@ class LocalSearchIndex:
                     if products or combos or presentations:
                         self._fuzzy = self._finalize_fuzzy_cache(
                             products=products,
+                            product_rows=product_rows,
                             clients=clients,
                             combos=combos,
                             presentations=presentations,
@@ -1009,6 +1227,7 @@ class LocalSearchIndex:
 
                 self._fuzzy = self._finalize_fuzzy_cache(
                     products=products,
+                    product_rows=product_rows,
                     clients=clients,
                     combos=combos,
                     presentations=presentations,
@@ -1026,6 +1245,170 @@ class LocalSearchIndex:
             finally:
                 con.close()
 
+    @staticmethod
+    def _product_result_from_search_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "codigo": str(row.get("codigo") or "").strip(),
+            "nombre": str(row.get("nombre") or "").strip(),
+            "categoria": str(row.get("categoria") or "").strip(),
+            "genero": str(row.get("genero") or "").strip(),
+            "ml": str(row.get("ml") or "").strip(),
+            "fuente": str(row.get("fuente") or "").strip(),
+        }
+
+    @staticmethod
+    def _score_fast_search_row(
+        row: Dict[str, Any],
+        *,
+        qn: str,
+        qn_ns: str,
+        variants: List[Tuple[str, str]],
+    ) -> int:
+        code = str(row.get("codigo") or "").strip().lower()
+        if not code:
+            return 0
+
+        text = str(row.get("_text") or "")
+        text_ns = str(row.get("_text_ns") or "")
+        score = 0
+
+        if qn_ns and code == qn_ns:
+            return 1000
+        if qn_ns and code.startswith(qn_ns):
+            score = max(score, 910 - min(120, (len(code) - len(qn_ns)) * 3))
+        if qn_ns and qn_ns in code:
+            score = max(score, 780)
+
+        if qn and text.startswith(qn):
+            score = max(score, 760)
+        if qn and qn in text:
+            score = max(score, 710)
+        if qn_ns and qn_ns in text_ns:
+            score = max(score, 680)
+
+        for i, (qv, qv_ns) in enumerate(variants):
+            if qv == qn:
+                continue
+            base = max(430, 610 - (i * 14))
+            if qv and qv in text:
+                score = max(score, base)
+            if qv_ns and qv_ns in text_ns:
+                score = max(score, base - 12)
+
+        return score
+
+    def _search_products_fast(
+        self,
+        *,
+        cache: _FuzzyCache,
+        qn: str,
+        variants_raw: List[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        if not qn:
+            return []
+
+        limit = max(1, int(limit))
+        qn_ns = re.sub(r"\s+", "", qn)
+        has_digits = any(ch.isdigit() for ch in qn_ns)
+        code_like = (" " not in qn) or has_digits
+
+        variants: List[Tuple[str, str]] = []
+        seen_vars = set()
+        for qv in [qn] + list(variants_raw or []):
+            qq = str(qv or "").strip()
+            if not qq or qq in seen_vars:
+                continue
+            seen_vars.add(qq)
+            variants.append((qq, re.sub(r"\s+", "", qq)))
+            if len(variants) >= 10:
+                break
+
+        base_rows = cache.search_rows_all
+        if (" " in qn) and (not has_digits):
+            base_rows = cache.search_rows_text
+
+        rows = base_rows
+        qcode = str(qn_ns or "").strip().upper()
+        if code_like and qcode:
+            if len(qcode) >= 2:
+                rows = cache.search_rows_by_2.get(qcode[:2], rows)
+            elif len(qcode) == 1:
+                rows = cache.search_rows_by_1.get(qcode[:1], rows)
+
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for row in (rows or []):
+            s = self._score_fast_search_row(row, qn=qn, qn_ns=qn_ns, variants=variants)
+            if s > 0:
+                scored.append((s, row))
+
+        if not scored and rows is not base_rows:
+            for row in (base_rows or []):
+                s = self._score_fast_search_row(row, qn=qn, qn_ns=qn_ns, variants=variants)
+                if s > 0:
+                    scored.append((s, row))
+
+        scored.sort(
+            key=lambda it: (
+                int(it[0]),
+                1 if str(it[1].get("_kind") or "") == "product" else 0,
+                str(it[1].get("codigo") or ""),
+            ),
+            reverse=True,
+        )
+
+        out: List[Dict[str, Any]] = []
+        seen_codes: set[str] = set()
+        for _score, row in scored:
+            code = str(row.get("codigo") or "").strip().upper()
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            out.append(self._product_result_from_search_row(row))
+            if len(out) >= limit:
+                return out
+
+        if out:
+            # Para texto libre ya tenemos coincidencias directas; evita fuzzy pesado
+            # en cada tecla para mantener respuesta instantanea.
+            if (" " in qn) and (not has_digits):
+                return out[:limit]
+            if len(out) >= max(4, (limit + 1) // 2):
+                return out[:limit]
+
+        # Fuzzy adicional en RAM para consultas de texto (sin tocar SQLite).
+        choices = cache.choices if (has_digits or (" " not in qn)) else cache.choices_text
+        if choices:
+            best: Dict[str, int] = {}
+            for qv, _qv_ns in variants:
+                hits = process.extract(
+                    qv,
+                    choices,
+                    scorer=fuzz.WRatio,
+                    limit=max(limit * 6, 60),
+                    score_cutoff=50,
+                )
+                for _val, score, key in hits:
+                    k = str(key or "").strip().upper()
+                    if not k:
+                        continue
+                    s = int(score or 0)
+                    if s > best.get(k, 0):
+                        best[k] = s
+
+            for code, _score in sorted(best.items(), key=lambda kv: kv[1], reverse=True):
+                if code in seen_codes:
+                    continue
+                row = cache.search_rows_by_code.get(code)
+                if row is None:
+                    continue
+                out.append(self._product_result_from_search_row(row))
+                seen_codes.add(code)
+                if len(out) >= limit:
+                    break
+
+        return out[:limit]
+
     def search_products(self, q: str, limit: int = 15) -> List[Dict[str, Any]]:
         qn = _norm_query(q)
         if len(qn) < 1:
@@ -1033,6 +1416,17 @@ class LocalSearchIndex:
 
         short = (len(qn) < 2)
         variants = [qn] if short else _query_variants(qn)
+        cache = self._ensure_fuzzy_cache()
+        fast_out = self._search_products_fast(
+            cache=cache,
+            qn=qn,
+            variants_raw=variants,
+            limit=limit,
+        )
+        # En UI se consulta por cada tecla: evita consultas SQLite/FTS costosas.
+        # Si no hay match en caché, devolvemos vacío de inmediato.
+        return fast_out
+
         pre_out: List[Dict[str, Any]] = []
 
         con = self._connect()
@@ -1043,7 +1437,6 @@ class LocalSearchIndex:
             seen = set()
             out: List[Dict[str, Any]] = []
 
-            cache = self._ensure_fuzzy_cache()
             qn_ns = re.sub(r"\s+", "", qn)
 
             if self._fts_available:
@@ -1278,6 +1671,74 @@ class LocalSearchIndex:
             seen = set()
             out: List[Dict[str, Any]] = []
             collect_limit = max(limit * 5, 60)
+            has_clients_table = _clients_table_has_rows(con)
+            app_country_code = _load_app_country_code(con)
+
+            def _client_key(row: Dict[str, Any]) -> str:
+                cli = str(row.get("cliente") or "").strip().lower()
+                doc = str(row.get("cedula") or "").strip().lower()
+                tel = str(row.get("telefono") or "").strip().lower()
+                return f"{cli}|{doc}|{tel}"
+
+            def _load_generic_client() -> Dict[str, Any] | None:
+                if not has_clients_table:
+                    return None
+                where_sql = ["UPPER(TRIM(COALESCE(nombre, ''))) = 'CLIENTE GENERICO'"]
+                params: list[Any] = []
+                if app_country_code:
+                    where_sql.append("UPPER(TRIM(COALESCE(country_code, ''))) = ?")
+                    params.append(str(app_country_code))
+                if _column_exists(con, "clients", "deleted_at"):
+                    where_sql.append("deleted_at IS NULL")
+                row = con.execute(
+                    """
+                    SELECT
+                        COALESCE(nombre, '') AS cliente,
+                        COALESCE(documento, '') AS cedula,
+                        COALESCE(telefono, '') AS telefono,
+                        COALESCE(country_code, '') AS country_code,
+                        COALESCE(tipo_documento, '') AS tipo_documento
+                    FROM clients
+                    WHERE """
+                    + " AND ".join(where_sql)
+                    + """
+                    ORDER BY
+                        CASE
+                            WHEN UPPER(TRIM(COALESCE(documento, ''))) IN ('00000000', '0') THEN 1
+                            ELSE 0
+                        END DESC,
+                        COALESCE(source_created_at, updated_at, created_at) DESC,
+                        id DESC
+                    LIMIT 1
+                    """
+                    ,
+                    tuple(params),
+                ).fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["score"] = float(d.get("score") or 0.0)
+                d["_rel"] = float(d.get("_rel") or 0.0)
+                return d
+
+            def _row_match_score(row: Dict[str, Any]) -> int:
+                base = _norm_query(
+                    " ".join(
+                        [
+                            str(row.get("cliente") or ""),
+                            str(row.get("cedula") or ""),
+                            str(row.get("telefono") or ""),
+                        ]
+                    ).strip()
+                )
+                if not base:
+                    return 0
+                score = int(fuzz.WRatio(qn, base) or 0)
+                q_ns = re.sub(r"\s+", "", qn)
+                if q_ns:
+                    base_ns = re.sub(r"\s+", "", base)
+                    score = max(score, int(fuzz.WRatio(q_ns, base_ns) or 0))
+                return score
 
             if self._fts_available:
                 for qv in variants:
@@ -1323,7 +1784,8 @@ class LocalSearchIndex:
 
                 scored = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
                 for key, score in scored:
-                    if score < 48:
+                    # Evita sugerencias "aleatorias" cuando no hay parecido real.
+                    if score < 72:
                         continue
                     i = int(key)
                     cli, doc, tel = cache.clients[i]
@@ -1342,16 +1804,21 @@ class LocalSearchIndex:
                     keys.append(k)
 
                 # query counts en 1 tiro
-                expr = "LOWER(TRIM(COALESCE(cliente,''))) || '|' || LOWER(TRIM(COALESCE(cedula,''))) || '|' || LOWER(TRIM(COALESCE(telefono,'')))"
+                expr = (
+                    "LOWER(TRIM(COALESCE(c.nombre,''))) || '|' || "
+                    "LOWER(TRIM(COALESCE(c.documento,''))) || '|' || "
+                    "LOWER(TRIM(COALESCE(c.telefono,'')))"
+                )
                 ph = ",".join(["?"] * len(keys))
                 rr = con.execute(
                     f"""
                     SELECT
                         {expr} AS k,
                         COUNT(*) AS cnt,
-                        MAX(created_at) AS last_created
+                        MAX(quotes.created_at) AS last_created
                     FROM quotes
-                    WHERE deleted_at IS NULL
+                    LEFT JOIN clients c ON c.id = quotes.id_cliente
+                    WHERE quotes.deleted_at IS NULL
                       AND ({expr}) IN ({ph})
                     GROUP BY k
                     """,
@@ -1373,6 +1840,10 @@ class LocalSearchIndex:
                     except Exception:
                         r["_rel"] = 0.0
 
+                # Si no existe maestro de clientes, filtra entradas stale del indice.
+                if not has_clients_table:
+                    out = [r for r in out if int(r.get("usage_cnt") or 0) > 0]
+
                 out.sort(
                     key=lambda r: (
                         int(r.get("usage_cnt") or 0),
@@ -1381,6 +1852,68 @@ class LocalSearchIndex:
                     ),
                     reverse=True,
                 )
+
+            # Evita sugerencias stale del cache fuzzy cuando un cliente fue soft-delete.
+            if has_clients_table and out:
+                unique_keys: list[str] = []
+                seen_keys: set[str] = set()
+                for r in out:
+                    ck = _client_key(r)
+                    if (not ck) or (ck in seen_keys):
+                        continue
+                    seen_keys.add(ck)
+                    unique_keys.append(ck)
+
+                if unique_keys:
+                    expr_cli = (
+                        "LOWER(TRIM(COALESCE(nombre,''))) || '|' || "
+                        "LOWER(TRIM(COALESCE(documento,''))) || '|' || "
+                        "LOWER(TRIM(COALESCE(telefono,'')))"
+                    )
+                    ph = ",".join(["?"] * len(unique_keys))
+                    active_filter = "TRIM(COALESCE(deleted_at, '')) = '' AND " if _column_exists(con, "clients", "deleted_at") else ""
+                    active_rows = con.execute(
+                        f"""
+                        SELECT {expr_cli} AS k
+                        FROM clients
+                        WHERE {active_filter}({expr_cli}) IN ({ph})
+                        """,
+                        tuple(unique_keys),
+                    ).fetchall()
+                    active_keys = {str(r["k"] or "") for r in active_rows}
+                    out = [r for r in out if _client_key(r) in active_keys]
+
+            generic_row = _load_generic_client()
+            if generic_row is not None:
+                gkey = _client_key(generic_row)
+                generic_rows = [r for r in out if _client_key(r) == gkey]
+                non_generic_rows = [r for r in out if _client_key(r) != gkey]
+                generic_candidate = generic_rows[0] if generic_rows else generic_row
+                generic_blob = _norm_query(
+                    " ".join(
+                        [
+                            str(generic_candidate.get("cliente") or ""),
+                            str(generic_candidate.get("cedula") or ""),
+                            str(generic_candidate.get("telefono") or ""),
+                        ]
+                    ).strip()
+                )
+                q_ns = re.sub(r"\s+", "", qn)
+                blob_ns = re.sub(r"\s+", "", generic_blob)
+                # Relevancia estricta: solo mostrar/poner primero al generico
+                # cuando el texto ingresado coincide de forma textual.
+                generic_is_relevant = (
+                    (bool(qn) and qn in generic_blob)
+                    or (bool(q_ns) and q_ns in blob_ns)
+                )
+
+                # Si el generico hace match con lo ingresado, siempre primero.
+                if generic_is_relevant:
+                    out = [generic_candidate] + non_generic_rows
+                elif non_generic_rows:
+                    out = non_generic_rows
+                else:
+                    out = []
 
             # limpia campo interno
             res = []

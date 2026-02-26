@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QDoubleSpinBox,
+    QAbstractSpinBox,
     QDialogButtonBox,
     QMessageBox,
     QWidget,
@@ -45,11 +46,13 @@ def show_currency_dialog(
     """
     dlg = QDialog(parent)
     dlg.setWindowTitle("Moneda y tasas de cambio")
-    dlg.resize(380, 260)
+    dlg.setMinimumWidth(360)
     if not app_icon.isNull():
         dlg.setWindowIcon(app_icon)
 
     v = QVBoxLayout(dlg)
+    v.setContentsMargins(14, 12, 14, 12)
+    v.setSpacing(8)
 
     # imports locales para evitar ciclos
     from ..config import APP_CURRENCY, get_secondary_currencies, get_currency_context
@@ -93,6 +96,8 @@ def show_currency_dialog(
     for code in all_codes:
         text = f"Moneda principal ({code})" if code == base else f"Moneda secundaria ({code})"
         rb = QRadioButton(text)
+        rb.setStyleSheet("background: transparent;")
+        rb.setMinimumHeight(24)
         radios[code] = rb
         v.addWidget(rb)
 
@@ -103,18 +108,33 @@ def show_currency_dialog(
 
     grp_tasas = QGroupBox("Tasa de cambio")
     tasas_layout = QVBoxLayout(grp_tasas)
+    tasas_layout.setContentsMargins(10, 10, 10, 10)
+    tasas_layout.setSpacing(6)
+    lbl_base_currency_info = QLabel("La moneda principal no requiere tasa de cambio.")
+    lbl_base_currency_info.setWordWrap(True)
+    lbl_base_currency_info.setStyleSheet("background: transparent;")
+    tasas_layout.addWidget(lbl_base_currency_info)
 
     rate_rows: dict[str, tuple[QWidget, QDoubleSpinBox]] = {}
     for code in sec_list:
         row = QWidget()
+        row.setStyleSheet("background: transparent;")
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(QLabel(f"1 {base} ="))
+        h.setSpacing(8)
+
+        lbl_base = QLabel(f"1 {base} =")
+        lbl_base.setStyleSheet("background: transparent;")
+        lbl_base.setMinimumWidth(72)
+        h.addWidget(lbl_base)
 
         sp = QDoubleSpinBox()
         sp.setDecimals(6)
         sp.setMinimum(0.000001)
         sp.setMaximum(999999999.0)
+        sp.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        sp.setMinimumHeight(30)
+        sp.setAlignment(Qt.AlignRight)
 
         initial = rates.get(code, 0.0)
         if initial <= 0.0:
@@ -125,13 +145,28 @@ def show_currency_dialog(
         sp.setValue(initial)
 
         h.addWidget(sp, 1)
-        h.addWidget(QLabel(code))
+        lbl_code = QLabel(code)
+        lbl_code.setStyleSheet("background: transparent;")
+        lbl_code.setMinimumWidth(36)
+        h.addWidget(lbl_code)
         tasas_layout.addWidget(row)
 
         rate_rows[code] = (row, sp)
 
     if not sec_list:
         grp_tasas.setVisible(False)
+    else:
+        # Reserva altura para evitar que el dialogo "salte" al alternar moneda base/secundaria.
+        try:
+            first_code = sec_list[0]
+            for code, (row, _sp) in rate_rows.items():
+                row.setVisible(code == first_code)
+            lbl_base_currency_info.setVisible(False)
+            stable_height = max(grp_tasas.sizeHint().height(), grp_tasas.minimumSizeHint().height())
+            if stable_height > 0:
+                grp_tasas.setMinimumHeight(stable_height)
+        except Exception:
+            pass
 
     v.addWidget(grp_tasas)
 
@@ -144,12 +179,15 @@ def show_currency_dialog(
         if not selected_code:
             selected_code = base
 
-        if selected_code == base or not sec_list:
+        if not sec_list:
             grp_tasas.setVisible(False)
-        else:
-            grp_tasas.setVisible(True)
-            for code, (row, _sp) in rate_rows.items():
-                row.setVisible(code == selected_code)
+            return
+
+        grp_tasas.setVisible(True)
+        show_rate = (selected_code != base)
+        lbl_base_currency_info.setVisible(not show_rate)
+        for code, (row, _sp) in rate_rows.items():
+            row.setVisible(show_rate and code == selected_code)
 
     for _code, rb in radios.items():
         rb.toggled.connect(_apply_visibility)
@@ -157,6 +195,15 @@ def show_currency_dialog(
     _apply_visibility()
 
     bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    ok_btn = bb.button(QDialogButtonBox.Ok)
+    if ok_btn is not None:
+        ok_btn.setProperty("variant", "primary")
+        ok_btn.setMinimumHeight(30)
+        ok_btn.setMinimumWidth(86)
+    cancel_btn = bb.button(QDialogButtonBox.Cancel)
+    if cancel_btn is not None:
+        cancel_btn.setMinimumHeight(30)
+        cancel_btn.setMinimumWidth(86)
     v.addWidget(bb)
 
     result: dict | None = None
@@ -201,6 +248,8 @@ def show_currency_dialog(
 
     bb.accepted.connect(on_accept)
     bb.rejected.connect(dlg.reject)
+
+    dlg.adjustSize()
 
     if dlg.exec() != QDialog.Accepted or result is None:
         return None

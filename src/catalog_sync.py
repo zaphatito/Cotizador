@@ -15,6 +15,99 @@ import sqlModels.presentations_repo as presentations_repo
 log = get_logger(__name__)
 
 
+def _find_col_ci(df: pd.DataFrame, *candidates: str) -> str | None:
+    low = {str(c).strip().lower(): str(c) for c in list(df.columns)}
+    for cand in candidates:
+        key = str(cand or "").strip().lower()
+        if key in low:
+            return low[key]
+    return None
+
+
+def validate_products_catalog_df(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Verifica que el catalogo de productos tenga estructura y datos minimos validos.
+    Retorna (ok, motivo).
+    """
+    if df is None:
+        return False, "No hay productos cargados."
+    if not isinstance(df, pd.DataFrame):
+        return False, "El catalogo de productos no es valido."
+    if df.empty:
+        return False, "No hay productos cargados."
+
+    col_id = _find_col_ci(df, "id", "codigo")
+    col_nombre = _find_col_ci(df, "nombre")
+    col_categoria = _find_col_ci(df, "categoria", "departamento")
+    col_p_max = _find_col_ci(df, "p_max")
+    col_p_min = _find_col_ci(df, "p_min")
+    col_p_oferta = _find_col_ci(df, "p_oferta")
+    col_precio_venta = _find_col_ci(df, "precio_venta")
+
+    missing: list[str] = []
+    if not col_id:
+        missing.append("id/codigo")
+    if not col_nombre:
+        missing.append("nombre")
+    if not col_categoria:
+        missing.append("categoria/departamento")
+    if not col_p_max:
+        missing.append("p_max")
+    if not col_p_min:
+        missing.append("p_min")
+    if not col_p_oferta:
+        missing.append("p_oferta")
+    if not col_precio_venta:
+        missing.append("precio_venta")
+    if missing:
+        return False, "Faltan columnas requeridas: " + ", ".join(missing)
+
+    id_ser = df[col_id].fillna("").astype(str).str.strip()
+    if (id_ser == "").any():
+        bad = int((id_ser == "").sum())
+        return False, f"Hay {bad} productos sin codigo."
+
+    nom_ser = df[col_nombre].fillna("").astype(str).str.strip()
+    if (nom_ser == "").any():
+        bad = int((nom_ser == "").sum())
+        return False, f"Hay {bad} productos sin nombre."
+
+    cat_ser = df[col_categoria].fillna("").astype(str).str.strip()
+    if (cat_ser == "").any():
+        bad = int((cat_ser == "").sum())
+        return False, f"Hay {bad} productos sin categoria."
+
+    p_max = pd.to_numeric(df[col_p_max], errors="coerce")
+    p_min = pd.to_numeric(df[col_p_min], errors="coerce")
+    p_oferta = pd.to_numeric(df[col_p_oferta], errors="coerce")
+    if p_max.isna().any() or p_min.isna().any() or p_oferta.isna().any():
+        return False, "Hay productos con precios no numericos."
+
+    any_price = (p_max > 0) | (p_min > 0) | (p_oferta > 0)
+    if not bool(any_price.any()):
+        return False, "Todos los precios estan en 0."
+
+    pv = pd.to_numeric(df[col_precio_venta], errors="coerce")
+    pv_int = pv.round()
+    pv_bad = pv.isna() | (pv != pv_int) | (~pv_int.isin([1.0, 2.0, 3.0]))
+    if bool(pv_bad.any()):
+        bad = int(pv_bad.sum())
+        return False, f"Hay {bad} productos con precio_venta invalido (solo 1, 2 o 3)."
+
+    return True, ""
+
+
+def products_update_required_message(df: pd.DataFrame) -> str:
+    ok, reason = validate_products_catalog_df(df)
+    if ok:
+        return ""
+    reason_txt = str(reason or "El catalogo de productos esta mal cargado.").strip()
+    return (
+        f"{reason_txt}\n\n"
+        "Debes usar 'Actualizar productos' para recargar el Excel."
+    )
+
+
 def _normalize_presentations_df_for_app(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza columns de presentations_current para la app.
@@ -43,8 +136,6 @@ def _normalize_presentations_df_for_app(df: pd.DataFrame) -> pd.DataFrame:
         mapping[low["p_min"]] = "P_MIN"
     if "p_oferta" in low:
         mapping[low["p_oferta"]] = "P_OFERTA"
-    if "precio_present" in low:
-        mapping[low["precio_present"]] = "PRECIO_PRESENT"
     if "requiere_botella" in low:
         mapping[low["requiere_botella"]] = "REQUIERE_BOTELLA"
     if "stock_disponible" in low:
@@ -68,7 +159,7 @@ def _normalize_presentations_df_for_app(df: pd.DataFrame) -> pd.DataFrame:
             out[c] = ""
         out[c] = out[c].fillna("").astype(str).str.strip()
 
-    req_num = ["P_MAX", "P_MIN", "P_OFERTA", "PRECIO_PRESENT", "STOCK_DISPONIBLE"]
+    req_num = ["P_MAX", "P_MIN", "P_OFERTA", "STOCK_DISPONIBLE"]
     for c in req_num:
         if c not in out.columns:
             out[c] = 0.0
@@ -104,13 +195,10 @@ def _normalize_presentations_df_for_app(df: pd.DataFrame) -> pd.DataFrame:
     out["departamento"] = out["DEPARTAMENTO"]
     out["genero"] = out["GENERO"]
     out["categoria"] = "PRESENTACION"
-    out["precio_present"] = out["PRECIO_PRESENT"]
-    out["precio_unitario"] = out["PRECIO_PRESENT"]
-    out["precio_oferta"] = out["P_OFERTA"]
-    out["precio_oferta_base"] = out["P_OFERTA"]
-    out["precio_minimo"] = out["P_MIN"]
-    out["precio_minimo_base"] = out["P_MIN"]
-    out["precio_venta"] = out["P_MAX"]
+    out["p_max"] = out["P_MAX"]
+    out["p_min"] = out["P_MIN"]
+    out["p_oferta"] = out["P_OFERTA"]
+    out["precio_venta"] = 1
     out["cantidad_disponible"] = out["STOCK_DISPONIBLE"]
 
     return out

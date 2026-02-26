@@ -20,7 +20,7 @@ from ..widgets import show_preview_dialog, ListadoProductosDialog
 from ..db_path import resolve_db_path
 
 from sqlModels.db import connect, ensure_schema, tx
-from sqlModels.quotes_repo import insert_quote
+from sqlModels.quotes_repo import find_doc_identity_conflict, insert_quote
 from sqlModels.sequences_repo import next_quote_no
 
 from .ticket_actions import generar_ticket_para_cotizacion
@@ -66,6 +66,10 @@ class PdfActionsMixin:
         items = self.items
         if not all([c, ci, t]):
             QMessageBox.warning(self, "Advertencia", "❌ Faltan datos del cliente")
+            return
+        ok_doc, msg_doc, _tipo_doc = self._validate_doc_phone_values(ci, t)
+        if not ok_doc:
+            QMessageBox.warning(self, "Advertencia", msg_doc)
             return
         total_items = sum(nz(i.get("total")) for i in items) if items else 0.0
         if not items or total_items <= 0.0:
@@ -141,6 +145,10 @@ class PdfActionsMixin:
         if not all([c, ci, t]):
             QMessageBox.warning(self, "Advertencia", "❌ Faltan datos del cliente")
             return
+        ok_doc, msg_doc, tipo_doc = self._validate_doc_phone_values(ci, t)
+        if not ok_doc:
+            QMessageBox.warning(self, "Advertencia", msg_doc)
+            return
 
         total_items = sum(nz(i.get("total")) for i in self.items) if self.items else 0.0
         if not self.items or total_items <= 0:
@@ -193,6 +201,57 @@ class PdfActionsMixin:
             con = connect(db_path)
             ensure_schema(con)
 
+            conflict = find_doc_identity_conflict(
+                con,
+                country_code=COUNTRY_CODE,
+                tipo_documento=tipo_doc,
+                cedula=ci,
+                cliente=c,
+                telefono=t,
+                include_deleted=False,
+            )
+            if conflict:
+                quote_ref = str(conflict.get("quote_no") or f"ID {conflict.get('id')}")
+                old_cli = str(conflict.get("cliente") or "").strip()
+                old_tel = str(conflict.get("telefono") or "").strip()
+                old_tipo = str(conflict.get("tipo_documento") or "").strip().upper()
+                old_doc = str(conflict.get("cedula") or "").strip()
+
+                # En vez de bloquear con conflicto, recarga los datos guardados
+                # para mantener una sola identidad por documento.
+                try:
+                    if old_cli:
+                        self.entry_cliente.setText(old_cli)
+                    if old_tipo and hasattr(self, "_set_selected_doc_type"):
+                        self._set_selected_doc_type(old_tipo)
+                    if old_doc:
+                        self.entry_cedula.setText(old_doc)
+                    if old_tel:
+                        self.entry_telefono.setText(old_tel)
+                    try:
+                        self._update_title_with_client(self.entry_cliente.text())
+                    except Exception:
+                        pass
+                    try:
+                        self._schedule_refresh_recs_preview()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                QMessageBox.information(
+                    self,
+                    "Documento ya registrado",
+                    (
+                        "Se cargaron los datos ya guardados para ese documento.\n\n"
+                        f"Historial: {quote_ref}\n"
+                        f"Cliente: {old_cli}\n"
+                        f"Telefono: {old_tel}"
+                    ),
+                )
+                con.close()
+                return
+
             created_at = datetime.datetime.now().isoformat(timespec="seconds")
             curr, _sec, rate = get_currency_context()
 
@@ -218,6 +277,7 @@ class PdfActionsMixin:
                         cliente=c,
                         cedula=ci,
                         telefono=t,
+                        tipo_documento=tipo_doc,
                         metodo_pago=metodo_pago_db,
                         currency_shown=str(curr or ""),
                         tasa_shown=float(rate) if rate is not None else None,
@@ -251,6 +311,7 @@ class PdfActionsMixin:
                 pdf_path=ruta,
                 items_pdf=datos["items"],
                 quote_code=quote_code,
+                country=APP_COUNTRY,
                 cliente_nombre=c,
                 printer_name="TICKERA",
                 width=48,
@@ -284,6 +345,11 @@ class PdfActionsMixin:
         self.entry_cliente.clear()
         self.entry_cedula.clear()
         self.entry_telefono.clear()
+        try:
+            if getattr(self, "combo_tipo_documento", None) is not None:
+                self.combo_tipo_documento.setCurrentIndex(0)
+        except Exception:
+            pass
         self.entry_producto.clear()
         self.model.remove_rows(list(range(len(self.items))))
         log.info("Formulario limpiado")

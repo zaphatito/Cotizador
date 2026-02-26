@@ -8,9 +8,6 @@ import pandas as pd
 
 from .utils import now_iso
 
-_CATS = {"ESENCIA", "AROMATERAPIA", "ESENCIAS"}
-
-
 def _to_float(v, default: float = 0.0) -> float:
     try:
         if v is None:
@@ -41,11 +38,40 @@ def _to_text(v) -> str:
     return str(v or "").strip()
 
 
+def _to_price_id(v, default: int = 1) -> int:
+    try:
+        if v is None:
+            return int(default)
+
+        if isinstance(v, (int, float)):
+            iv = int(v)
+            return iv if iv in (1, 2, 3) else int(default)
+
+        s = str(v).strip().lower()
+        if not s:
+            return int(default)
+
+        if s in {"1", "p_max", "max", "maximo", "unitario", "base", "lista"}:
+            return 1
+        if s in {"2", "p_min", "min", "minimo"}:
+            return 2
+        if s in {"3", "p_oferta", "oferta", "promo", "promocion"}:
+            return 3
+
+        try:
+            iv = int(float(s.replace(",", ".")))
+            return iv if iv in (1, 2, 3) else int(default)
+        except Exception:
+            return int(default)
+    except Exception:
+        return int(default)
+
+
 def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.DataFrame) -> None:
     """
     Espera columnas de producto (estructura excel):
       CODIGO, NOMBRE, DEPARTAMENTO, GENERO,
-      CANTIDAD_DISPONIBLE, P_MAX, P_MIN, P_OFERTA, __FUENTE
+      CANTIDAD_DISPONIBLE, P_MAX, P_MIN, P_OFERTA, PRECIO_VENTA, __FUENTE
 
     Tambien soporta columnas de compatibilidad previas.
     """
@@ -70,29 +96,18 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
         genero = _to_text(r.get("GENERO") or r.get("genero"))
 
         cantidad = _to_float(r.get("CANTIDAD_DISPONIBLE") if "CANTIDAD_DISPONIBLE" in r else r.get("cantidad_disponible"), 0.0)
-        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("precio_venta"), 0.0)
-        p_min = _to_float(r.get("P_MIN") if "P_MIN" in r else r.get("precio_minimo_base"), 0.0)
-        p_oferta = _to_float(r.get("P_OFERTA") if "P_OFERTA" in r else r.get("precio_oferta_base"), 0.0)
+        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("p_max"), 0.0)
+        p_min = _to_float(r.get("P_MIN") if "P_MIN" in r else r.get("p_min"), 0.0)
+        p_oferta = _to_float(r.get("P_OFERTA") if "P_OFERTA" in r else r.get("p_oferta"), 0.0)
+        precio_venta = _to_price_id(
+            r.get("PRECIO_VENTA") if "PRECIO_VENTA" in r else r.get("precio_venta"),
+            1,
+        )
 
         fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
 
         depto_u = depto.upper()
         categoria = depto_u
-
-        precio_venta = float(p_max)
-        precio_oferta_base = float(p_oferta)
-        precio_minimo_base = float(p_min)
-
-        precio_unitario = 0.0
-        precio_unidad = 0.0
-        precio_base_50g = 0.0
-
-        if categoria == "BOTELLAS":
-            precio_unidad = precio_venta
-        elif categoria in _CATS:
-            precio_base_50g = precio_venta
-        else:
-            precio_unitario = precio_venta
 
         ml = _to_text(r.get("ml"))
 
@@ -139,12 +154,7 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
                 float(p_max),
                 float(p_min),
                 float(p_oferta),
-                float(precio_unitario),
-                float(precio_unidad),
-                float(precio_base_50g),
-                float(precio_oferta_base),
-                float(precio_minimo_base),
-                float(precio_venta),
+                int(precio_venta),
                 fuente,
             )
         )
@@ -161,12 +171,7 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
                 float(p_max),
                 float(p_min),
                 float(p_oferta),
-                float(precio_unitario),
-                float(precio_unidad),
-                float(precio_base_50g),
-                float(precio_oferta_base),
-                float(precio_minimo_base),
-                float(precio_venta),
+                int(precio_venta),
                 fuente,
                 now,
             )
@@ -215,11 +220,10 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
                 nombre, categoria, departamento, genero, ml,
                 cantidad_disponible,
                 p_max, p_min, p_oferta,
-                precio_unitario, precio_unidad, precio_base_50g,
-                precio_oferta_base, precio_minimo_base, precio_venta,
+                precio_venta,
                 fuente
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             rows_hist,
         )
@@ -232,11 +236,10 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
                 nombre, categoria, departamento, genero, ml,
                 cantidad_disponible,
                 p_max, p_min, p_oferta,
-                precio_unitario, precio_unidad, precio_base_50g,
-                precio_oferta_base, precio_minimo_base, precio_venta,
+                precio_venta,
                 fuente, updated_at
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 codigo=excluded.codigo,
                 nombre=excluded.nombre,
@@ -248,11 +251,6 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
                 p_max=excluded.p_max,
                 p_min=excluded.p_min,
                 p_oferta=excluded.p_oferta,
-                precio_unitario=excluded.precio_unitario,
-                precio_unidad=excluded.precio_unidad,
-                precio_base_50g=excluded.precio_base_50g,
-                precio_oferta_base=excluded.precio_oferta_base,
-                precio_minimo_base=excluded.precio_minimo_base,
                 precio_venta=excluded.precio_venta,
                 fuente=excluded.fuente,
                 updated_at=excluded.updated_at

@@ -22,9 +22,9 @@ def _ensure_parent_dir(path: str) -> None:
 
 def _mask_pii(s: str) -> str:
     """
-    Mascara dígitos largos (tel/doc) conservando lo mínimo.
+    Mascara dÃ­gitos largos (tel/doc) conservando lo mÃ­nimo.
     Ej:
-      12345678 -> ******78
+      87654321 -> ******21
       +51987654321 -> +51*******21
     """
     if not s:
@@ -37,7 +37,7 @@ def _mask_pii(s: str) -> str:
         keep = 2
         return ("*" * (len(t) - keep)) + t[-keep:]
 
-    # grupos de dígitos >= 6 (incluye + y espacios)
+    # grupos de dÃ­gitos >= 6 (incluye + y espacios)
     return re.sub(r"[+]*\d[\d\s\-]{5,}\d", repl, s)
 
 
@@ -53,7 +53,7 @@ def append_jsonl(path: str, record: Dict[str, Any]) -> None:
 def make_training_example(user_text: str, plan: dict, resolved: dict) -> Dict[str, Any]:
     """
     Formato simple para dataset (opcional).
-    OJO: máscara PII.
+    OJO: mÃ¡scara PII.
     """
     return {
         "user": _mask_pii(user_text or ""),

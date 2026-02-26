@@ -2,7 +2,6 @@ import os
 import pandas as pd
 
 from .utils import to_float, nz
-from .config import CATS
 
 
 _HEADER_TRY_ORDER = [4, 0, 1, 2, 3, 5]
@@ -45,6 +44,35 @@ def _find_col(cols_lower: dict[str, str], *cands: str) -> str | None:
                 return orig
 
     return None
+
+
+def _parse_price_type_id(v, default: int = 1) -> int:
+    try:
+        if v is None:
+            return int(default)
+
+        if isinstance(v, (int, float)):
+            iv = int(v)
+            return iv if iv in (1, 2, 3) else int(default)
+
+        s = str(v).strip().lower()
+        if not s:
+            return int(default)
+
+        if s in ("1", "p_max", "max", "maximo", "unitario", "base", "lista"):
+            return 1
+        if s in ("2", "p_min", "min", "minimo"):
+            return 2
+        if s in ("3", "p_oferta", "oferta", "promo", "promocion"):
+            return 3
+
+        try:
+            iv = int(float(s.replace(",", ".")))
+            return iv if iv in (1, 2, 3) else int(default)
+        except Exception:
+            return int(default)
+    except Exception:
+        return int(default)
 
 
 def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, required_tokens: list[str]) -> pd.DataFrame:
@@ -114,6 +142,15 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
     col_p_max = _find_col(cols_lower, "precio maximo", "precio máximo")
     col_p_min = _find_col(cols_lower, "precio minimo", "precio mínimo")
     col_p_oferta = _find_col(cols_lower, "precio oferta", "oferta")
+    col_precio_venta = _find_col(
+        cols_lower,
+        "precio venta",
+        "tipo precio",
+        "precio por defecto",
+        "precio default",
+        "p venta",
+        "p_venta",
+    )
 
     records: list[dict] = []
 
@@ -131,6 +168,10 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
         p_max = to_float(row.get(col_p_max, 0) if col_p_max else 0, 0.0)
         p_min = to_float(row.get(col_p_min, 0) if col_p_min else 0, 0.0)
         p_oferta = to_float(row.get(col_p_oferta, 0) if col_p_oferta else 0, 0.0)
+        precio_venta_tipo = _parse_price_type_id(
+            row.get(col_precio_venta, 1) if col_precio_venta else 1,
+            1,
+        )
 
         depto_up = (departamento or "").upper()
 
@@ -145,6 +186,7 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
                 "P_MAX": p_max,
                 "P_MIN": p_min,
                 "P_OFERTA": p_oferta,
+                "PRECIO_VENTA": int(precio_venta_tipo),
                 "__FUENTE": fuente,
 
                 # Compatibilidad app actual
@@ -154,9 +196,10 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
                 "departamento_excel": departamento,
                 "genero": genero,
                 "cantidad_disponible": cantidad,
-                "precio_venta": p_max,
-                "precio_oferta_base": p_oferta,
-                "precio_minimo_base": p_min,
+                "precio_venta": int(precio_venta_tipo),
+                "p_max": p_max,
+                "p_min": p_min,
+                "p_oferta": p_oferta,
                 "__fuente": fuente,
             }
         )
@@ -185,33 +228,20 @@ def cargar_excel_productos_desde_inventarios(data_dir: str) -> pd.DataFrame:
     # Mantiene columnas que esperan otras partes del sistema.
     compat_records: list[dict] = []
     for _, r in df.iterrows():
-        cat = str(r.get("categoria") or "").upper()
-
         base = {
             "id": r.get("id"),
             "nombre": r.get("nombre"),
             "categoria": r.get("categoria"),
             "genero": r.get("genero", ""),
             "cantidad_disponible": nz(r.get("cantidad_disponible"), 0.0),
-            "precio_venta": nz(r.get("precio_venta"), 0.0),
-            "precio_oferta_base": nz(r.get("precio_oferta_base"), 0.0),
-            "precio_minimo_base": nz(r.get("precio_minimo_base"), 0.0),
+            "precio_venta": int(nz(r.get("precio_venta"), 1) or 1),
             "codigo": r.get("CODIGO"),
             "departamento": r.get("DEPARTAMENTO"),
             "p_max": nz(r.get("P_MAX"), 0.0),
             "p_min": nz(r.get("P_MIN"), 0.0),
             "p_oferta": nz(r.get("P_OFERTA"), 0.0),
+            "ml": "",
         }
-
-        if cat == "BOTELLAS":
-            base["precio_unidad"] = nz(r.get("precio_venta"), 0.0)
-            base["ml"] = ""
-        elif cat in CATS:
-            base["precio_base_50g"] = nz(r.get("precio_venta"), 0.0)
-            base["ml"] = ""
-        else:
-            base["precio_unitario"] = nz(r.get("precio_venta"), 0.0)
-            base["ml"] = ""
 
         compat_records.append(base)
 

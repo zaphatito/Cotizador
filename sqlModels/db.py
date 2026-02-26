@@ -55,6 +55,61 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
     return r is not None
 
 
+def _column_exists(con: sqlite3.Connection, table: str, col: str) -> bool:
+    if not _table_exists(con, table):
+        return False
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        cols = {str(r["name"]).lower() for r in rows}
+        return col.lower() in cols
+    except Exception:
+        return False
+
+
+def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
+    """
+    Detecta una DB nueva creada con el DDL actual (sin meta.schema_version).
+    En ese caso evitamos ejecutar migraciones antiguas.
+    """
+    required = [
+        ("quotes", "api_sent_at"),
+        ("quotes", "api_error_at"),
+        ("quotes", "api_error_message"),
+        ("quotes", "id_cliente"),
+        ("quote_items", "id_precioventa"),
+        ("quote_items", "tipo_prod"),
+        ("clients", "documento_norm"),
+        ("clients", "deleted_at"),
+        ("products_current", "p_max"),
+        ("products_current", "p_min"),
+        ("products_current", "p_oferta"),
+        ("products_current", "precio_venta"),
+        ("presentations_current", "p_max"),
+        ("presentations_current", "p_min"),
+        ("presentations_current", "p_oferta"),
+    ]
+    for table, col in required:
+        if not _column_exists(con, table, col):
+            return False
+
+    forbidden = [
+        ("quotes", "cliente"),
+        ("quotes", "cedula"),
+        ("quotes", "tipo_documento"),
+        ("quotes", "telefono"),
+        ("products_current", "precio_unitario"),
+        ("products_current", "precio_unidad"),
+        ("products_current", "precio_base_50g"),
+        ("products_current", "precio_oferta_base"),
+        ("products_current", "precio_minimo_base"),
+        ("presentations_current", "precio_present"),
+    ]
+    for table, col in forbidden:
+        if _column_exists(con, table, col):
+            return False
+    return True
+
+
 def _infer_schema_version(con: sqlite3.Connection) -> int:
     """
     Si la DB viene de versiones MUY viejas (sin meta o sin schema_version),
@@ -117,25 +172,51 @@ def ensure_schema(con: sqlite3.Connection) -> None:
                 raise
 
         # 2) leer versión actual
+        meta_dirty = False
         cur_v_s = _get_meta(con, "schema_version")
         if cur_v_s is None:
-            cur_v = _infer_schema_version(con)
+            if _looks_like_head_schema_without_meta(con):
+                cur_v = SCHEMA_VERSION
+            else:
+                cur_v = _infer_schema_version(con)
+            meta_dirty = True
         else:
             try:
                 cur_v = int(cur_v_s)
             except Exception:
                 cur_v = _infer_schema_version(con)
+                meta_dirty = True
 
         # 3) migrar incremental
+        migrated = False
         if cur_v < SCHEMA_VERSION:
             for target_v in range(cur_v + 1, SCHEMA_VERSION + 1):
                 mig = MIGRATIONS.get(target_v)
                 if mig:
                     mig(con)  # debe ser segura/condicional
+            migrated = True
+            meta_dirty = True
 
         # 4) Reintentar índices diferidos (ahora sí existen columnas)
         for stmt in deferred_indexes:
             con.execute(stmt)
 
-        # 5) fijar versión final
-        _set_meta(con, "schema_version", str(SCHEMA_VERSION))
+        # 4.5) Post-setup solo cuando migra o falta meta.
+        if migrated or meta_dirty:
+            try:
+                from .clients_repo import ensure_generic_clients
+
+                ensure_generic_clients(con)
+            except Exception:
+                pass
+
+            try:
+                from .quote_statuses_repo import ensure_quote_statuses_ready
+
+                ensure_quote_statuses_ready(con)
+            except Exception:
+                pass
+
+        # 5) fijar versión final (evita escrituras en cada ensure_schema)
+        if meta_dirty or (str(cur_v_s or "").strip() != str(SCHEMA_VERSION)):
+            _set_meta(con, "schema_version", str(SCHEMA_VERSION))

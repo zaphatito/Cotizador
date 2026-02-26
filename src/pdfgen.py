@@ -7,7 +7,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE, STORE_ID
 from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, resolve_font_asset, DATA_DIR
-from .quote_code import format_quote_code
+from .quote_code import format_quote_code, format_quote_display_no
 from .utils  import fmt_money_pdf, nz
 from .pricing import cantidad_para_mostrar
 
@@ -66,6 +66,7 @@ LAYOUT_VE = {
 LAYOUT_ALT = {
     # Encabezado
     "QUOTE_SHOW": True,
+    "QUOTE_FONT_SIZE": 16,  # +2 para PY/PE
     "QUOTE_PX": 685, "QUOTE_PY": 182,
     "DATE_PX": 700, "DATE_PY": 243,
     "CLIENT_RIGHT_PX": 295,
@@ -322,6 +323,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
     X = lambda px: _x_img(W, px)
     Y = lambda py: _y_img(H, py)
+    quote_display_no = format_quote_display_no(quote_code=quote_code, store_id=STORE_ID, width=7)
 
     def draw_background():
         if TEMPLATE_PATH and os.path.exists(TEMPLATE_PATH):
@@ -346,8 +348,8 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
         if L["QUOTE_SHOW"]:
             c.setFillColor(TEXT_COLOR)
-            c.setFont(FONT_BOLD, 14)
-            c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{quote_code}")
+            c.setFont(FONT_BOLD, int(L.get("QUOTE_FONT_SIZE", 14)))
+            c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{quote_display_no}")
 
         c.setFont(FONT_BOLD, 10)
         c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
@@ -532,9 +534,24 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         obs_x = X(L["OBS_X_PX"])
         obs_y = Y(L["OBS_START_Y_PX"] if L["OBS_START_Y_PX"] is not None else L["TOTALS_Ys_PX"][0])
         obs_min_y = Y(L["OBS_MAX_Y_LIMIT_PX"])
+        # Evita que Observaciones invada el bloque de totales/descuento (lado derecho).
+        obs_right_limit_px = L.get("OBS_RIGHT_LIMIT_PX")
+        if obs_right_limit_px is None:
+            totals_bg = L.get("TOTALS_BG") or {}
+            bg_x_px = totals_bg.get("x_px")
+            if bg_x_px is not None:
+                obs_right_limit_px = float(bg_x_px) - 12.0
+            else:
+                obs_right_limit_px = 900.0
+        max_obs_width = max(20.0, X(float(obs_right_limit_px)) - obs_x)
+
         for line in page_obs_lines:
-            c.drawString(obs_x, obs_y, line[:135])
-            obs_y -= L["OBS_LINE_H"]
+            wrapped_obs = _wrap_smart(c, line, max_obs_width, FONT_REG, 9)
+            for wline in wrapped_obs:
+                c.drawString(obs_x, obs_y, wline)
+                obs_y -= L["OBS_LINE_H"]
+                if obs_y < obs_min_y:
+                    break
             if obs_y < obs_min_y:
                 break
 

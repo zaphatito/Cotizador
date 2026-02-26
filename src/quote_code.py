@@ -75,6 +75,24 @@ def format_quote_code(
     return f"{cc}-{st}-{qn}"
 
 
+def format_quote_display_no(
+    *,
+    quote_code: object,
+    store_id: str | None,
+    width: int = 7,
+) -> str:
+    s = str(quote_code or "").strip()
+    m_new = _NEW_CODE_RE.match(s)
+    if m_new:
+        st = normalize_store_id(m_new.group(2))
+        qn = normalize_quote_digits(m_new.group(3), width=width)
+        return f"{st}-{qn}"
+
+    st = normalize_store_id(store_id)
+    qn = normalize_quote_digits(s, width=width)
+    return f"{st}-{qn}"
+
+
 def extract_quote_code_from_pdf_path(pdf_path: str) -> str:
     base = os.path.splitext(os.path.basename(pdf_path or ""))[0]
     if not base:

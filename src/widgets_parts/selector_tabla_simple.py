@@ -12,13 +12,14 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QPushButton,
 )
+from .excel_table_behavior import ExcelTableController
 
 
 class SelectorTablaSimple(QDialog):
     def __init__(self, parent, titulo, filas, app_icon: QIcon = QIcon()):
         super().__init__(parent)
         self.setWindowTitle(titulo)
-        self.resize(560, 420)
+        self.setMinimumWidth(500)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
         self.seleccion = None
@@ -32,7 +33,21 @@ class SelectorTablaSimple(QDialog):
         self.tabla.setHorizontalHeaderLabels(["Código", "Nombre", "Departamento", "Género"])
         self.tabla.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tabla.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.tabla.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabla.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.tabla.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tabla.setAlternatingRowColors(True)
+        self.tabla.setShowGrid(False)
+        self.tabla.verticalHeader().setVisible(False)
+        self._excel_table = ExcelTableController(
+            self.tabla,
+            allow_copy=True,
+            allow_paste=False,
+            allow_cut=False,
+            clear_on_delete=False,
+            move_on_enter=True,
+            move_on_tab=True,
+            skip_enter_preview_rows=False,
+        )
         v.addWidget(self.tabla)
 
         self._rows = filas[:]
@@ -70,8 +85,10 @@ class SelectorTablaSimple(QDialog):
 
         self.tabla.cellDoubleClicked.connect(lambda row, _col: self._guardar(row))
         btn = QPushButton("Seleccionar")
+        btn.setProperty("variant", "primary")
         btn.clicked.connect(lambda: self._guardar(self.tabla.currentRow()))
         v.addWidget(btn)
+        self.adjustSize()
 
     def _guardar(self, row):
         if row < 0:

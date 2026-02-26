@@ -19,7 +19,12 @@ from .logging_setup import get_logger
 from .config import COUNTRY_CODE, APP_CONFIG, ENABLE_AI
 
 from .db_path import resolve_db_path
-from .catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
+from .catalog_sync import (
+    sync_catalog_from_excel_to_db,
+    load_catalog_from_db,
+    validate_products_catalog_df,
+    products_update_required_message,
+)
 from .catalog_manager import CatalogManager
 from .quote_events import QuoteEvents
 
@@ -28,6 +33,7 @@ from .widgets_parts.quote_history_dialog import QuoteHistoryWindow
 
 from .ai.search_index import LocalSearchIndex
 from .ai.assistant.ollama_bootstrap import ensure_ollama_on_startup
+from .ui_theme import apply_modern_theme
 log = get_logger(__name__)
 
 _MUTEX_HANDLE = None
@@ -141,6 +147,7 @@ class ChangelogDialog(QDialog):
         lay.addWidget(box)
 
         btn = QPushButton("Entendido")
+        btn.setProperty("variant", "primary")
         btn.clicked.connect(self.accept)
         lay.addWidget(btn, alignment=Qt.AlignRight)
 
@@ -237,6 +244,7 @@ def run_app():
     _single_instance_or_raise_existing()
 
     app = QApplication(sys.argv)
+    apply_modern_theme(app)
 
     app_icon = load_app_icon(COUNTRY_CODE)
     if not app_icon.isNull():
@@ -340,15 +348,16 @@ def run_app():
         if df_presentaciones is None:
             df_presentaciones = pd.DataFrame()
 
-        if df_productos.empty:
-            QMessageBox.information(
+        ok_catalog, reason_catalog = validate_products_catalog_df(df_productos)
+        if not ok_catalog:
+            log.warning("Catalogo de productos invalido al iniciar: %s", reason_catalog)
+            QMessageBox.warning(
                 None,
-                "Catálogo no cargado",
-                "No hay productos cargados todavía.\n\n"
-                "Puedes abrir el menú (☰) y usar 'Actualizar productos' para importar el Excel.\n"
-                "El historial y configuraciones sí estarán disponibles, pero no se podrán abrir cotizaciones.",
+                "Catalogo invalido",
+                products_update_required_message(df_productos),
             )
-
+            df_productos = pd.DataFrame()
+            df_presentaciones = pd.DataFrame()
     except Exception as e:
         log.exception("Error inicializando DB/Schema")
         QMessageBox.critical(None, "Error", f"❌ Error inicializando la base de datos:\n{e}")
@@ -358,4 +367,5 @@ def run_app():
     events = QuoteEvents()
     win = QuoteHistoryWindow(catalog_manager=catalog, quote_events=events, app_icon=app_icon)
     win.show()
+
     sys.exit(app.exec())

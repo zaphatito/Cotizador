@@ -6,7 +6,7 @@ import base64
 import textwrap
 from typing import Callable, Optional
 
-# 203 dpi ≈ 8 dots/mm
+# 203 dpi ~= 8 dots/mm
 DOTS_PER_MM = 8
 
 # RPT004: DIP SW-5 define 42 o 48 chars/line. Usa el que te salga en self-test.
@@ -14,18 +14,18 @@ DEFAULT_TICKET_WIDTH = 48
 DEFAULT_PRINTER_NAME = "TICKERA"
 
 DEFAULT_TOP_MM = 0.0
-DEFAULT_BOTTOM_MM = 10.0  # cortar 10mm después del último item
+DEFAULT_BOTTOM_MM = 10.0  # cortar 10mm despues del ultimo item
 
 # Modos:
 # - "full" / "partial": cortan (sin extra feed)
-# - "full_feed" / "partial_feed": feed hasta posición de corte + extra y cortan (recomendado)
+# - "full_feed" / "partial_feed": feed hasta posicion de corte + extra y cortan (recomendado)
 # - "full_save"/"partial_save": alias de *_feed
 DEFAULT_CUT_MODE = "full_feed"
 
-# Ya NO cortamos observaciones por defecto (solo "límite de seguridad" muy alto)
+# Ya NO cortamos observaciones por defecto (solo "limite de seguridad" muy alto)
 OBS_MAX_LEN = 1000
 
-# Codepage (para que NO se pierdan caracteres comunes en ES; dígitos siempre OK)
+# Codepage (para que NO se pierdan caracteres comunes en ES; digitos siempre OK)
 # En muchas Epson/ESC-POS: 2 = CP850
 DEFAULT_CODEPAGE = 2
 DEFAULT_TEXT_ENCODING = "cp850"
@@ -70,8 +70,8 @@ def _cut_cmd(mode: str, extra_units: int) -> bytes:
 
 def _wrap_keep_newlines(text: str, width: int) -> list[str]:
     """
-    Wrap respetando saltos de línea existentes.
-    Nunca devuelve lista vacía: mínimo [''].
+    Wrap respetando saltos de linea existentes.
+    Nunca devuelve lista vacia: minimo [''].
     """
     width = max(1, int(width))
     t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -84,7 +84,7 @@ def _wrap_keep_newlines(text: str, width: int) -> list[str]:
         if not para:
             out.append("")
             continue
-        # wrap “duro” si no hay espacios (para números largos, códigos, etc.)
+        # wrap "duro" si no hay espacios (para numeros largos, codigos, etc.)
         out.extend(textwrap.wrap(
             para,
             width=width,
@@ -102,17 +102,13 @@ def build_ticket_text(
     width: int = DEFAULT_TICKET_WIDTH,
     qty_text_fn: Optional[Callable[[dict], str]] = None,
     obs_max_len: int = OBS_MAX_LEN,
+    header_extra_lines: Optional[list[str]] = None,
+    total_general_text: str = "",
 ) -> str:
     if not items:
         return ""
 
     width = max(1, int(width))
-
-    # Columnas:
-    # - izquierda: código + observación (wrap)
-    # - derecha: cantidad (wrap) alineada ABAJO
-    qty_col = 10
-    code_col = max(1, width - qty_col)
 
     def _pick_code(it: dict) -> str:
         for k in ("codigo", "code", "cod", "sku", "SKU", "codigo_producto", "id_producto", "id"):
@@ -125,7 +121,7 @@ def build_ticket_text(
         return ""
 
     def _pick_obs(it: dict) -> str:
-        # respeta lo que venga; puede traer saltos de línea
+        # Respeta lo que venga; puede traer saltos de linea.
         obs = (it.get("observacion") or "").strip()
         if not obs:
             return ""
@@ -158,8 +154,14 @@ def build_ticket_text(
     if cli:
         lines.append(f"Nombre: {cli}"[:width])
 
+    for extra in (header_extra_lines or []):
+        txt = str(extra or "").strip()
+        if txt:
+            lines.append(txt[:width])
+
     lines.append(("-" * width)[:width])
 
+    printed_items = 0
     for it in items:
         code = _pick_code(it)
         if not code:
@@ -169,35 +171,47 @@ def build_ticket_text(
         if not qty_txt:
             continue
 
+        qty = str(qty_txt or "").strip()
+        if not qty:
+            continue
+
         obs = _pick_obs(it)
+        left_text = f"{code} - {obs}" if obs else code
+        # Reservamos espacio fijo para " - {cantidad}" con al menos 1 guion.
+        left_wrap_width = max(1, width - len(qty) - 3)
+        left_lines = _wrap_keep_newlines(left_text, left_wrap_width) or [left_text]
 
-        # ---- Left block: code + obs, con wrap ----
-        left_lines: list[str] = []
-        left_lines.extend(_wrap_keep_newlines(code, code_col))
+        for i, raw_line in enumerate(left_lines):
+            left = str(raw_line or "").strip()
 
-        if obs:
-            # si quieres separar visualmente, descomenta esta línea:
-            # left_lines.append("")
-            left_lines.extend(_wrap_keep_newlines(obs, code_col))
+            # Solo en la ultima linea del item: guiones + cantidad.
+            if i < len(left_lines) - 1:
+                lines.append(left[:width])
+                continue
 
-        # ---- Right block: qty, con wrap ----
-        qty_lines = _wrap_keep_newlines(qty_txt, qty_col)
+            # Reserva espacio para " - cantidad" y al menos 1 guion.
+            max_left = max(1, width - len(qty) - 3)
+            if len(left) > max_left:
+                left = left[:max_left]
 
-        # Total de líneas para el item = máximo, y cantidad alineada abajo
-        total = max(len(left_lines), len(qty_lines))
-        left_pad = left_lines + [""] * (total - len(left_lines))                 # relleno abajo
-        qty_pad = [""] * (total - len(qty_lines)) + qty_lines                    # relleno arriba (para que quede abajo)
+            if left:
+                dash_len = max(1, width - len(left) - len(qty) - 2)
+                lines.append(f"{left} {'-' * dash_len} {qty}")
+            else:
+                dash_len = max(1, width - len(qty) - 1)
+                lines.append(f"{'-' * dash_len} {qty}")
 
-        for i in range(total):
-            l = (left_pad[i] or "")[:code_col].ljust(code_col, " ")
-            r = (qty_pad[i] or "")[:qty_col].rjust(qty_col, " ")
-            lines.append(f"{l}{r}")
+        printed_items += 1
 
-    if len(lines) <= 2:
+    if printed_items <= 0:
         return ""
 
-    return "\n".join(lines) + "\n"
+    total_txt = str(total_general_text or "").strip()
+    if total_txt:
+        lines.append(("-" * width)[:width])
+        lines.append(f"TOTAL COTIZACION: {total_txt}"[:width])
 
+    return "\n".join(lines) + "\n"
 
 def build_escpos_payload(
     ticket_text: str,
@@ -233,7 +247,7 @@ def build_escpos_payload(
     top_units = _mm_to_units(top_mm)
     bottom_units = _mm_to_units(bottom_mm)
 
-    # Font A (48 cols en 80mm) / Font B si quisieras más cols
+    # Font A (48 cols en 80mm) / Font B si quisieras mas cols
     font_cmd = b"\x1b\x4d\x00" if int(width) <= 48 else b"\x1b\x4d\x01"
 
     def feed_units(n: int) -> bytes:
@@ -295,7 +309,7 @@ $target = $printers | Where-Object {
 } | Select-Object -First 1
 
 if(-not $target) {
-    Write-Host ('ERROR: No se encontró la impresora: ' + $wanted)
+    Write-Host ('ERROR: No se encontro la impresora: ' + $wanted)
     Write-Host 'Impresoras detectadas (Name | ShareName):'
     $printers | Select-Object Name, ShareName | Format-Table -AutoSize | Out-String | Write-Host
     exit 1
@@ -432,3 +446,4 @@ def write_ticket_cmd_for_pdf(
         f.write(cmd_content)
 
     return {"ticket_cmd": ticket_cmd}
+

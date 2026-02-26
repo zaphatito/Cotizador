@@ -16,6 +16,8 @@ class CatalogManager(QObject):
         super().__init__()
         self._df_productos = df_productos
         self._df_presentaciones = df_presentaciones
+        self._catalog_health_cache_key: tuple[int, int, int] | None = None
+        self._catalog_health_cache_value: tuple[bool, str] = (False, "No hay productos cargados.")
 
     @property
     def df_productos(self) -> pd.DataFrame:
@@ -28,4 +30,25 @@ class CatalogManager(QObject):
     def set_catalog(self, df_productos: pd.DataFrame, df_presentaciones: pd.DataFrame) -> None:
         self._df_productos = df_productos
         self._df_presentaciones = df_presentaciones
+        self._catalog_health_cache_key = None
         self.catalog_updated.emit(df_productos, df_presentaciones)
+
+    def _catalog_health_cache_token(self, df: pd.DataFrame) -> tuple[int, int, int]:
+        try:
+            rows, _cols = tuple(getattr(df, "shape", (0, 0)))
+            col_count = len(getattr(df, "columns", []))
+            return (id(df), int(rows), int(col_count))
+        except Exception:
+            return (id(df), 0, 0)
+
+    def catalog_health(self) -> tuple[bool, str]:
+        key = self._catalog_health_cache_token(self._df_productos)
+        if key == self._catalog_health_cache_key:
+            return self._catalog_health_cache_value
+
+        from .catalog_sync import validate_products_catalog_df
+
+        health = validate_products_catalog_df(self._df_productos)
+        self._catalog_health_cache_key = key
+        self._catalog_health_cache_value = health
+        return health

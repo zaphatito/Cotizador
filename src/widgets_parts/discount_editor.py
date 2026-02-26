@@ -31,7 +31,7 @@ def show_discount_editor(
     """
     dlg = QDialog(parent)
     dlg.setWindowTitle("Descuento del ítem")
-    dlg.resize(420, 220)
+    dlg.setMinimumWidth(380)
     if not app_icon.isNull():
         dlg.setWindowIcon(app_icon)
 
@@ -97,6 +97,9 @@ def show_discount_editor(
     sp_monto.valueChanged.connect(on_monto_changed)
 
     bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    ok_btn = bb.button(QDialogButtonBox.Ok)
+    if ok_btn is not None:
+        ok_btn.setProperty("variant", "primary")
     v.addWidget(bb)
 
     payload: dict = {}
@@ -113,6 +116,8 @@ def show_discount_editor(
 
     bb.accepted.connect(accept)
     bb.rejected.connect(dlg.reject)
+
+    dlg.adjustSize()
 
     if dlg.exec() != QDialog.Accepted:
         return None

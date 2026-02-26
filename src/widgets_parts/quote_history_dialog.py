@@ -4,22 +4,25 @@ from __future__ import annotations
 import os
 import datetime
 import re
+import threading
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent
+from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
     QApplication, QDialog, QInputDialog, QCheckBox, QComboBox, QFormLayout, QGroupBox,
+    QStyledItemDelegate, QStyleOptionViewItem, QStyle,
 )
 
-from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.db import connect, tx
+from sqlModels.api_identity import API_LOGIN_PASSWORD, build_api_settings
+from sqlModels.quote_statuses_repo import get_quote_statuses_cached
 from sqlModels.settings_repo import get_setting, set_setting
 from sqlModels.quotes_repo import (
     list_quotes, get_quote_header, get_quote_items, soft_delete_quote,
     update_quote_payment, update_quote_status,
-    normalize_status, status_label,
-    STATUS_PAGADO, STATUS_POR_PAGAR, STATUS_PENDIENTE, STATUS_NO_APLICA
+    status_label,
 )
 from sqlModels.rates_repo import load_rates
 
@@ -28,7 +31,13 @@ from ..utils import nz
 from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
 
 from ..db_path import resolve_db_path
-from ..catalog_sync import sync_catalog_from_excel_to_db, load_catalog_from_db
+from ..api.presupuesto_client import sync_pending_history_quotes_once
+from ..catalog_sync import (
+    sync_catalog_from_excel_to_db,
+    load_catalog_from_db,
+    validate_products_catalog_df,
+    products_update_required_message,
+)
 from ..config import (
     ALLOWED_COMPANY_TYPES,
     APP_CONFIG,
@@ -43,7 +52,11 @@ from ..config import (
     is_recommendations_enabled,
     set_recommendations_enabled,
 )
-from ..quote_code import format_quote_code, quote_match_key
+from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits
+from ..ui_theme import (
+    normalize_theme_mode,
+    set_theme_mode,
+)
 
 from ..app_window import SistemaCotizaciones
 from ..app_window_parts.ticket_actions import generar_ticket_para_cotizacion
@@ -53,6 +66,7 @@ from .menu import MainMenuWindow, RatesDialog
 from .rates_history_dialog import RatesHistoryDialog
 from .quote_status_dialog import QuoteStatusDialog
 from .status_colors import bg_for_status, best_text_color_for_bg
+from .status_colors_dialog import StatusColorsDialog
 
 # ✅ NUEVO: dock assistant
 
@@ -74,12 +88,7 @@ def center_on_screen(w):
 
 
 def _doc_header_for_country(country: str) -> str:
-    c = (country or "").strip().upper()
-    if c == "PERU":
-        return "DNI / RUC"
-    if c == "VENEZUELA":
-        return "Cédula/RIF"
-    return "Cédula/RUC"
+    return "Documento"
 
 
 def _parse_dt(value) -> datetime.datetime | None:
@@ -128,14 +137,113 @@ def _is_today(value) -> bool:
         return False
 
 
+class _HistoryNoCellFocusDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_row = -1
+
+    def set_hover_row(self, row: int) -> None:
+        new_row = int(row) if isinstance(row, int) and row >= 0 else -1
+        if new_row == self._hover_row:
+            return
+        old_row = self._hover_row
+        self._hover_row = new_row
+        try:
+            view = self.parent()
+            if view is not None and hasattr(view, "viewport"):
+                self._update_row_region(view, old_row)
+                self._update_row_region(view, new_row)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _update_row_region(view, row: int) -> None:
+        try:
+            r = int(row)
+        except Exception:
+            return
+        if r < 0:
+            return
+        model = view.model() if hasattr(view, "model") else None
+        if model is None:
+            return
+        cols = int(model.columnCount())
+        if cols <= 0:
+            return
+        first = model.index(r, 0)
+        last = model.index(r, cols - 1)
+        if not first.isValid() or not last.isValid():
+            return
+        rect = view.visualRect(first).united(view.visualRect(last))
+        if rect.isValid():
+            view.viewport().update(rect)
+
+    @staticmethod
+    def _row_hover_color(option: QStyleOptionViewItem) -> QColor:
+        base = option.palette.base().color()
+        lum = (0.2126 * base.redF()) + (0.7152 * base.greenF()) + (0.0722 * base.blueF())
+        if lum < 0.45:
+            return QColor(255, 255, 255, 34)
+        return QColor(15, 23, 35, 28)
+
+    @staticmethod
+    def _row_selected_overlay_color(option: QStyleOptionViewItem) -> QColor:
+        base = option.palette.base().color()
+        lum = (0.2126 * base.redF()) + (0.7152 * base.greenF()) + (0.0722 * base.blueF())
+        if lum < 0.45:
+            return QColor(255, 255, 255, 46)
+        return QColor(15, 23, 35, 34)
+
+    @staticmethod
+    def _row_selected_border_color(option: QStyleOptionViewItem) -> QColor:
+        c = QColor(option.palette.highlight().color())
+        if not c.isValid():
+            c = QColor("#6E7F95")
+        c.setAlpha(210)
+        return c
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        opt.state &= ~QStyle.State_HasFocus
+        selected_row = bool(opt.state & QStyle.State_Selected)
+        hovered_row = (index.row() == self._hover_row)
+        if selected_row:
+            # Mantiene el color de estado de la fila y evita que el style-sheet
+            # global reemplace todo el fondo al seleccionar.
+            opt.state &= ~QStyle.State_Selected
+        if hovered_row:
+            # Evita el hover por celda del estilo global.
+            opt.state &= ~QStyle.State_MouseOver
+        super().paint(painter, opt, index)
+        if selected_row:
+            painter.save()
+            painter.fillRect(opt.rect, self._row_selected_overlay_color(opt))
+            pen = QPen(self._row_selected_border_color(opt))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.drawLine(opt.rect.topLeft(), opt.rect.topRight())
+            painter.drawLine(opt.rect.bottomLeft(), opt.rect.bottomRight())
+            try:
+                last_col = index.model().columnCount() - 1
+            except Exception:
+                last_col = -1
+            if index.column() == 0:
+                painter.drawLine(opt.rect.topLeft(), opt.rect.bottomLeft())
+            if last_col >= 0 and index.column() == last_col:
+                painter.drawLine(opt.rect.topRight(), opt.rect.bottomRight())
+            painter.restore()
+        elif hovered_row:
+            painter.fillRect(opt.rect, self._row_hover_color(opt))
+
+
 class HistoryConfigDialog(QDialog):
     _ADMIN_PASSWORD = "Papina."
 
     def __init__(self, history_window: "QuoteHistoryWindow"):
         super().__init__(history_window)
         self._history = history_window
-        self.setWindowTitle("Configuracion")
-        self.resize(520, 520)
+        self.setWindowTitle("Configuración")
+        self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
 
@@ -147,16 +255,25 @@ class HistoryConfigDialog(QDialog):
         self.chk_recs.setChecked(bool(is_recommendations_enabled(refresh=True)))
         self.chk_recs.toggled.connect(self._on_recs_toggled)
 
+        self.cmb_theme = QComboBox()
+        self.cmb_theme.addItem("Sistema (auto)", "system")
+        self.cmb_theme.addItem("Claro", "light")
+        self.cmb_theme.addItem("Oscuro", "dark")
+        self._load_theme_setting()
+        self.cmb_theme.currentIndexChanged.connect(self._on_theme_changed)
+
         self.btn_chat_style = QPushButton("Personalizar chat")
         self.btn_chat_style.clicked.connect(self._open_chat_style)
 
         self.btn_rates = QPushButton("Configurar tasas de cambio")
         self.btn_rates.clicked.connect(self._open_rates)
+        self.btn_status_colors = QPushButton("Configurar estados")
+        self.btn_status_colors.clicked.connect(self._open_status_colors)
 
         self.btn_unlock_app_values = QPushButton("Modificar valores de la aplicación")
         self.btn_unlock_app_values.clicked.connect(self._unlock_app_values)
 
-        self.grp_app_values = QGroupBox("Valores de la aplicacion")
+        self.grp_app_values = QGroupBox("Valores de la aplicación")
         self.grp_app_values.setVisible(False)
         self.grp_app_values.setEnabled(False)
 
@@ -178,15 +295,16 @@ class HistoryConfigDialog(QDialog):
         self.ed_username = QLineEdit()
         self.ed_username.setPlaceholderText("Nombre de usuario")
 
-        form.addRow("Pais:", self.cmb_country)
+        form.addRow("País:", self.cmb_country)
         form.addRow("Tipo de listado:", self.cmb_listing_type)
         form.addRow("", self.chk_allow_no_stock)
         form.addRow("Store ID:", self.ed_store_id)
-        form.addRow("Compania:", self.cmb_company_type)
+        form.addRow("Compañía:", self.cmb_company_type)
         form.addRow("Nombre de usuario:", self.ed_username)
 
         row_actions = QHBoxLayout()
-        self.btn_save_app_values = QPushButton("Guardar valores de aplicacion")
+        self.btn_save_app_values = QPushButton("Guardar valores de aplicación")
+        self.btn_save_app_values.setProperty("variant", "primary")
         self.btn_save_app_values.clicked.connect(self._save_app_values)
         row_actions.addStretch(1)
         row_actions.addWidget(self.btn_save_app_values)
@@ -197,9 +315,14 @@ class HistoryConfigDialog(QDialog):
 
         layout.addWidget(self.chk_ai)
         layout.addWidget(self.chk_recs)
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Tema de la interfaz:"))
+        theme_row.addWidget(self.cmb_theme, 1)
+        layout.addLayout(theme_row)
         layout.addSpacing(8)
         layout.addWidget(self.btn_chat_style)
         layout.addWidget(self.btn_rates)
+        layout.addWidget(self.btn_status_colors)
         layout.addSpacing(12)
         layout.addWidget(self.btn_unlock_app_values)
         layout.addWidget(self.grp_app_values)
@@ -208,6 +331,7 @@ class HistoryConfigDialog(QDialog):
 
         self._load_app_values()
         self._sync_controls()
+        self.adjustSize()
 
     def _sync_controls(self):
         ai_on = bool(is_ai_enabled(refresh=True))
@@ -264,6 +388,17 @@ class HistoryConfigDialog(QDialog):
             except Exception:
                 pass
 
+    def _open_status_colors(self):
+        dlg = StatusColorsDialog(
+            self,
+            on_colors_applied=(
+                self._history.refresh_status_colors
+                if (self._history is not None and hasattr(self._history, "refresh_status_colors"))
+                else None
+            ),
+        )
+        dlg.exec()
+
     @staticmethod
     def _set_combo_value(combo: QComboBox, value: str) -> None:
         val = str(value or "").strip()
@@ -286,7 +421,6 @@ class HistoryConfigDialog(QDialog):
         con = None
         try:
             con = connect(resolve_db_path())
-            ensure_schema(con)
 
             country = get_setting(con, "country", country).strip().upper()
             listing_type = get_setting(con, "listing_type", listing_type).strip().upper()
@@ -311,6 +445,52 @@ class HistoryConfigDialog(QDialog):
         self._set_combo_value(self.cmb_company_type, company_type)
         self.ed_username.setText(username)
 
+    def _load_theme_setting(self):
+        mode = "system"
+        con = None
+        try:
+            con = connect(resolve_db_path())
+            mode = get_setting(con, "ui_theme_mode", "system")
+        except Exception:
+            mode = "system"
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        mode = normalize_theme_mode(mode)
+        idx = self.cmb_theme.findData(mode)
+        self.cmb_theme.blockSignals(True)
+        if idx >= 0:
+            self.cmb_theme.setCurrentIndex(idx)
+        else:
+            self.cmb_theme.setCurrentIndex(0)
+        self.cmb_theme.blockSignals(False)
+
+    def _on_theme_changed(self):
+        mode = normalize_theme_mode(self.cmb_theme.currentData())
+        con = None
+        try:
+            con = connect(resolve_db_path())
+            with tx(con):
+                set_setting(con, "ui_theme_mode", mode)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar el tema:\n{e}")
+            return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        try:
+            set_theme_mode(mode, app=QApplication.instance(), persist=False)
+        except Exception:
+            pass
+
     def _unlock_app_values(self) -> None:
         text, ok = QInputDialog.getText(
             self,
@@ -322,15 +502,15 @@ class HistoryConfigDialog(QDialog):
             return
 
         if str(text or "").strip() != self._ADMIN_PASSWORD:
-            log.warning("Intento de desbloqueo de configuracion con clave incorrecta.")
+            log.warning("Intento de desbloqueo de configuración con clave incorrecta.")
             QMessageBox.warning(self, "Clave incorrecta", "La clave ingresada no es valida.")
             return
 
         self.grp_app_values.setVisible(True)
         self.grp_app_values.setEnabled(True)
         self.btn_unlock_app_values.setEnabled(False)
-        self.btn_unlock_app_values.setText("Valores de la aplicacion habilitados")
-        log.info("Se habilitaron los valores protegidos de configuracion.")
+        self.btn_unlock_app_values.setText("Valores de la aplicación habilitados")
+        log.info("Se habilitaron los valores protegidos de configuración.")
 
     def _save_app_values(self) -> None:
         allowed_countries = {"PARAGUAY", "PERU", "VENEZUELA"}
@@ -345,26 +525,26 @@ class HistoryConfigDialog(QDialog):
         username = str(self.ed_username.text() or "").strip()
 
         if country not in allowed_countries:
-            QMessageBox.warning(self, "Validacion", "Pais invalido.")
+            QMessageBox.warning(self, "Validación", "País inválido.")
             return
         if listing_type not in allowed_listing_types:
-            QMessageBox.warning(self, "Validacion", "Tipo de listado invalido.")
+            QMessageBox.warning(self, "Validación", "Tipo de listado inválido.")
             return
         if company_type not in allowed_company_types:
-            QMessageBox.warning(self, "Validacion", "Compania invalida.")
+            QMessageBox.warning(self, "Validación", "Compañía inválida.")
             return
         if store_id and not re.fullmatch(r"[A-Za-z0-9]+", store_id):
             QMessageBox.warning(
                 self,
-                "Validacion",
-                "Store ID invalido. Use solo letras y numeros.",
+                "Validación",
+                "Store ID inválido. Use solo letras y números.",
             )
             return
 
         con = None
         try:
             con = connect(resolve_db_path())
-            ensure_schema(con)
+
             with tx(con):
                 set_setting(con, "country", country)
                 set_setting(con, "listing_type", listing_type)
@@ -372,8 +552,15 @@ class HistoryConfigDialog(QDialog):
                 set_setting(con, "store_id", store_id)
                 set_setting(con, "company_type", company_type)
                 set_setting(con, "username", username)
+                api_vals = build_api_settings(
+                    country=country,
+                    company_type=company_type,
+                    password_plain=API_LOGIN_PASSWORD,
+                )
+                for k, v in api_vals.items():
+                    set_setting(con, k, v)
         except Exception as e:
-            log.exception("No se pudieron guardar los valores protegidos de configuracion.")
+            log.exception("No se pudieron guardar los valores protegidos de configuración.")
             QMessageBox.critical(self, "Error", f"No se pudieron guardar los cambios:\n{e}")
             return
         finally:
@@ -389,9 +576,12 @@ class HistoryConfigDialog(QDialog):
         APP_CONFIG["store_id"] = store_id
         APP_CONFIG["company_type"] = company_type
         APP_CONFIG["username"] = username
+        APP_CONFIG["id_user_api"] = str(api_vals.get("id_user_api", ""))
+        APP_CONFIG["user_api"] = str(api_vals.get("user_api", ""))
+        APP_CONFIG["password_api_hash"] = str(api_vals.get("password_api_hash", ""))
 
         log.info(
-            "Configuracion protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s",
+            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s",
             country,
             listing_type,
             allow_no_stock,
@@ -399,10 +589,15 @@ class HistoryConfigDialog(QDialog):
             company_type,
             username,
         )
+        try:
+            if self._history is not None and hasattr(self._history, "_wake_background_api_sync"):
+                self._history._wake_background_api_sync()
+        except Exception:
+            pass
         QMessageBox.information(
             self,
-            "Configuracion guardada",
-            "Los cambios fueron guardados.\nReinicie la aplicacion para aplicar todos los cambios globales.",
+            "Configuración guardada",
+            "Los cambios fueron guardados.\nReinicie la aplicación para aplicar todos los cambios globales.",
         )
 
 
@@ -423,6 +618,19 @@ class QuotesTableModel(QAbstractTableModel):
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
                 "Estado", "Total", "Moneda", "Items", "PDF"
             ]
+
+        self._today_font = QFont()
+        self._today_font.setBold(True)
+        self._centered_cols = {
+            self._idx_no(),
+            self._idx_estado(),
+            self._idx_total(),
+            self._idx_currency(),
+            self._idx_items(),
+        }
+        idx_pago = self._idx_pago()
+        if self.show_payment and idx_pago is not None:
+            self._centered_cols.add(idx_pago)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self.rows)
@@ -458,8 +666,82 @@ class QuotesTableModel(QAbstractTableModel):
     def _idx_pdf(self) -> int:
         return 10 if self.show_payment else 9
 
-    def _row_bg(self, r: dict):
-        return bg_for_status(r.get("estado"))
+    @staticmethod
+    def _text_key(v) -> str:
+        return ("" if v is None else str(v)).casefold()
+
+    def _hydrate_row_cache(self, row: dict, *, today: datetime.date) -> None:
+        created_raw = row.get("created_at", "")
+        created_dt = _parse_dt(created_raw)
+        row["_cache_dt"] = created_dt
+        row["_cache_is_today"] = bool(created_dt and created_dt.date() == today)
+        row["_cache_created_display"] = format_dt_legible(created_raw)
+
+        estado_val = row.get("estado")
+        estado_txt = status_label(estado_val)
+        row["_cache_estado_txt"] = estado_txt
+        row["_cache_estado_key"] = self._text_key(estado_txt)
+
+        bg = bg_for_status(estado_val)
+        row["_cache_bg_color"] = bg
+        row["_cache_bg_brush"] = QBrush(bg) if bg is not None else None
+        row["_cache_fg_brush"] = QBrush(best_text_color_for_bg(bg)) if bg is not None else None
+
+        pago_txt = str(row.get("metodo_pago") or "").strip()
+        row["_cache_pago_txt"] = pago_txt
+        row["_cache_pago_key"] = self._text_key(pago_txt)
+
+        try:
+            total_num = float(nz(row.get("total_shown"), 0.0))
+            row["_cache_total_num"] = total_num
+            row["_cache_total_txt"] = f"{total_num:.2f}"
+        except Exception:
+            row["_cache_total_num"] = 0.0
+            row["_cache_total_txt"] = str(row.get("total_shown", "0.00"))
+
+        currency_txt = str(row.get("currency_shown") or "")
+        row["_cache_currency_txt"] = currency_txt
+        row["_cache_currency_key"] = self._text_key(currency_txt)
+
+        items_raw = row.get("items_count", 0)
+        try:
+            items_num = int(nz(items_raw, 0))
+        except Exception:
+            try:
+                items_num = int(str(items_raw).strip())
+            except Exception:
+                items_num = 0
+        row["_cache_items_num"] = items_num
+        row["_cache_items_txt"] = str(items_num)
+
+        pdf_path = str(row.get("pdf_path") or "")
+        pdf_name = os.path.basename(pdf_path)
+        row["_cache_pdf_path"] = pdf_path
+        row["_cache_pdf_name"] = pdf_name
+        row["_cache_pdf_key"] = self._text_key(pdf_name)
+
+        qn = row.get("quote_no")
+        qn_raw = "" if qn is None else str(qn).strip()
+        qn_digits = extract_quote_digits(qn_raw)
+        if qn_digits:
+            try:
+                qn_text = str(int(qn_digits)).zfill(max(7, len(qn_digits)))
+            except Exception:
+                qn_text = qn_digits
+        else:
+            qn_text = qn_raw
+        row["_cache_quote_no_txt"] = qn_text
+        row["_cache_quote_no_key"] = self._text_key(qn_text)
+        try:
+            row["_cache_quote_no_num"] = int(quote_match_key(qn))
+            row["_cache_quote_no_has_num"] = True
+        except Exception:
+            row["_cache_quote_no_num"] = 0
+            row["_cache_quote_no_has_num"] = False
+
+        row["_cache_cliente_key"] = self._text_key(row.get("cliente"))
+        row["_cache_cedula_key"] = self._text_key(row.get("cedula"))
+        row["_cache_telefono_key"] = self._text_key(row.get("telefono"))
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
@@ -468,27 +750,19 @@ class QuotesTableModel(QAbstractTableModel):
         c = index.column()
 
         if role == Qt.FontRole:
-            if _is_today(r.get("created_at")):
-                f = QFont()
-                f.setBold(True)
-                return f
-            return None
+            return self._today_font if r.get("_cache_is_today") else None
 
         if role == Qt.BackgroundRole:
-            bg = self._row_bg(r)
-            return QBrush(bg) if bg is not None else None
+            return r.get("_cache_bg_brush")
 
         if role == Qt.ForegroundRole:
-            bg = self._row_bg(r)
-            if bg is None:
-                return None
-            return QBrush(best_text_color_for_bg(bg))
+            return r.get("_cache_fg_brush")
 
         if role == Qt.DisplayRole:
             if c == 0:
-                return format_dt_legible(r.get("created_at", ""))
+                return r.get("_cache_created_display", "")
             if c == 1:
-                return r.get("quote_no", "")
+                return r.get("_cache_quote_no_txt", "")
             if c == 2:
                 return r.get("cliente", "")
             if c == 3:
@@ -497,114 +771,98 @@ class QuotesTableModel(QAbstractTableModel):
                 return r.get("telefono", "")
 
             if c == self._idx_estado():
-                return status_label(r.get("estado"))
+                return r.get("_cache_estado_txt", "")
 
             if self.show_payment and c == self._idx_pago():
-                return (r.get("metodo_pago") or "").strip()
+                return r.get("_cache_pago_txt", "")
 
             if c == self._idx_total():
-                try:
-                    return f"{float(nz(r.get('total_shown'), 0.0)):.2f}"
-                except Exception:
-                    return str(r.get("total_shown", "0.00"))
+                return r.get("_cache_total_txt", "0.00")
 
             if c == self._idx_currency():
-                return r.get("currency_shown", "")
+                return r.get("_cache_currency_txt", "")
 
             if c == self._idx_items():
-                return str(r.get("items_count", 0))
+                return r.get("_cache_items_txt", "0")
 
             if c == self._idx_pdf():
-                p = r.get("pdf_path", "") or ""
-                return os.path.basename(p)
+                return r.get("_cache_pdf_name", "")
 
         if role == Qt.TextAlignmentRole:
-            centered_cols = {self._idx_no(), self._idx_estado(), self._idx_total(), self._idx_currency(), self._idx_items()}
-            if self.show_payment and self._idx_pago() is not None:
-                centered_cols.add(self._idx_pago())
-            if c in centered_cols:
+            if c in self._centered_cols:
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
 
         if role == Qt.ToolTipRole and c == self._idx_pdf():
-            return r.get("pdf_path", "")
+            return r.get("_cache_pdf_path", "")
 
         return None
 
     def set_rows(self, rows: list[dict]):
         self.beginResetModel()
-        self.rows = rows or []
+        today = datetime.datetime.now().date()
+        hydrated: list[dict] = []
+        for src in (rows or []):
+            row = dict(src or {})
+            self._hydrate_row_cache(row, today=today)
+            hydrated.append(row)
+        self.rows = hydrated
         self.endResetModel()
 
     def get_id_at(self, row: int) -> int | None:
         if 0 <= row < len(self.rows):
-            return int(self.rows[row]["id"])
+            try:
+                return int(self.rows[row]["id"])
+            except Exception:
+                return None
         return None
 
     def _sort_key(self, r: dict, c: int):
-        def key_text(v):
-            s = "" if v is None else str(v)
-            return s.casefold()
-
-        def key_float(v):
-            try:
-                return float(nz(v, 0.0))
-            except Exception:
-                return 0.0
-
-        def key_int(v):
-            try:
-                return int(nz(v, 0))
-            except Exception:
-                try:
-                    return int(str(v).strip())
-                except Exception:
-                    return 0
-
         if c == 0:
-            dt = _parse_dt(r.get("created_at"))
+            dt = r.get("_cache_dt")
             return (dt is None, dt or datetime.datetime.min)
 
         if c == self._idx_no():
-            qn = r.get("quote_no")
-            try:
-                return (False, int(quote_match_key(qn)), key_text(qn))
-            except Exception:
-                return (qn is None, key_text(qn))
+            if r.get("_cache_quote_no_has_num"):
+                return (
+                    False,
+                    int(r.get("_cache_quote_no_num", 0)),
+                    r.get("_cache_quote_no_key", ""),
+                )
+            return (True, r.get("_cache_quote_no_key", ""))
 
         if c == 2:
             v = r.get("cliente")
-            return (v is None, key_text(v))
+            return (v is None, r.get("_cache_cliente_key", ""))
         if c == 3:
             v = r.get("cedula")
-            return (v is None, key_text(v))
+            return (v is None, r.get("_cache_cedula_key", ""))
         if c == 4:
             v = r.get("telefono")
-            return (v is None, key_text(v))
+            return (v is None, r.get("_cache_telefono_key", ""))
 
         if c == self._idx_estado():
-            v = status_label(r.get("estado"))
-            return (v is None, key_text(v))
+            return (False, r.get("_cache_estado_key", ""))
 
         if self.show_payment and c == self._idx_pago():
             v = r.get("metodo_pago")
-            return (v is None, key_text(v))
+            return (v is None, r.get("_cache_pago_key", ""))
 
         if c == self._idx_total():
             v = r.get("total_shown")
-            return (v is None, key_float(v))
+            return (v is None, float(r.get("_cache_total_num", 0.0)))
 
         if c == self._idx_currency():
             v = r.get("currency_shown")
-            return (v is None, key_text(v))
+            return (v is None, r.get("_cache_currency_key", ""))
 
         if c == self._idx_items():
             v = r.get("items_count")
-            return (v is None, key_int(v))
+            return (v is None, int(r.get("_cache_items_num", 0)))
 
         if c == self._idx_pdf():
-            p = r.get("pdf_path") or ""
-            return (not bool(p), key_text(os.path.basename(p)))
+            p = r.get("_cache_pdf_path") or ""
+            return (not bool(p), r.get("_cache_pdf_key", ""))
 
         return (False, "")
 
@@ -620,18 +878,25 @@ class QuotesTableModel(QAbstractTableModel):
 
 
 class QuoteHistoryWindow(QMainWindow):
+    _DEFAULT_SIZE = (1300, 720)
+    _MIN_REASONABLE = (980, 620)
+    _WIN_KEY_PREFIX = "ui_window_history"
+
     def __init__(self, *, catalog_manager, quote_events, app_icon):
         super().__init__()
         self.setWindowTitle("Sistema de cotizaciones")
-        self.resize(1300, 720)
+        self.resize(*self._DEFAULT_SIZE)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
 
         self._db_path = resolve_db_path()
+        self._window_state_restored = False
 
         self._centered_once = False
         self.catalog_manager = catalog_manager
         self.quote_events = quote_events
+
+        self._restore_window_state()
 
         # ✅ Asistente dock (reemplaza ChatQuoteDialog)
         self.assistant = None
@@ -641,7 +906,7 @@ class QuoteHistoryWindow(QMainWindow):
         show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
         self.model = QuotesTableModel(show_payment=show_payment)
 
-        self.page_size = 200
+        self.page_size = 50
         self.offset = 0
         self.total = 0
 
@@ -670,52 +935,84 @@ class QuoteHistoryWindow(QMainWindow):
             except Exception:
                 pass
 
+        self._api_sync_stop_event = threading.Event()
+        self._api_sync_wake_event = threading.Event()
+        self._api_sync_thread: threading.Thread | None = None
+
         central = QWidget()
         self.setCentralWidget(central)
         main = QVBoxLayout(central)
+        main.setContentsMargins(10, 8, 10, 8)
+        main.setSpacing(8)
 
         top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(7)
 
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText(
             "Filtrar (cualquier columna): cliente / doc / teléfono / N° / estado / pago / total / moneda / items / PDF…"
         )
+        self.txt_search.setClearButtonEnabled(True)
         self.txt_search.textChanged.connect(self._on_filters_changed)
 
         self.txt_prod = QLineEdit()
         self.txt_prod.setPlaceholderText("Contiene producto: código o nombre")
+        self.txt_prod.setClearButtonEnabled(True)
         self.txt_prod.textChanged.connect(self._on_filters_changed)
 
         self.btn_new = QPushButton("➕ Nueva cotización")
+        self.btn_new.setProperty("variant", "primary")
+        self.btn_new.setMinimumHeight(30)
+        self.btn_new.setMinimumWidth(165)
         self.btn_new.clicked.connect(self._open_new_quote)
 
         self.btn_chat = QPushButton("💬 Chat")
+        self.btn_chat.setMinimumHeight(30)
+        self.btn_chat.setMinimumWidth(110)
         self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra.")
         self.btn_chat.clicked.connect(self._open_chat)
 
         self.btn_menu = QPushButton("☰ Menú")
+        self.btn_menu.setMinimumHeight(30)
+        self.btn_menu.setMinimumWidth(104)
         self.btn_menu.clicked.connect(self._open_main_menu)
 
-        top.addWidget(self.txt_search, 2)
+        top.addWidget(self.txt_search, 3)
         top.addWidget(self.txt_prod, 2)
         top.addWidget(self.btn_new, 0)
+        top.addWidget(self.btn_chat, 0)
         top.addWidget(self.btn_menu, 0)
         main.addLayout(top)
 
         self.table = QTableView()
+        self.table.setObjectName("historyTable")
+        self.table.setMouseTracking(True)
+        self._history_delegate = _HistoryNoCellFocusDelegate(self.table)
+        self.table.setItemDelegate(self._history_delegate)
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setSelectionMode(QTableView.SingleSelection)
         self.table.setEditTriggers(QTableView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.table.entered.connect(self._on_table_hovered)
+        self.table.viewport().installEventFilter(self)
 
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
 
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Stretch)
+        try:
+            hh.setResizeContentsPrecision(8)
+        except Exception:
+            pass
 
         try:
             idx_no = self.model._idx_no()
@@ -739,36 +1036,47 @@ class QuoteHistoryWindow(QMainWindow):
 
         main.addWidget(self.table)
 
-        nav = QHBoxLayout()
-        self.lbl_page = QLabel("—")
-        btn_prev = QPushButton("◀")
-        btn_next = QPushButton("▶")
-        btn_prev.clicked.connect(self._prev_page)
-        btn_next.clicked.connect(self._next_page)
-        nav.addWidget(self.lbl_page)
-        nav.addStretch(1)
-        nav.addWidget(btn_prev)
-        nav.addWidget(btn_next)
-        nav.addWidget(self.btn_chat, 0)
-        main.addLayout(nav)
-
-        actions = QHBoxLayout()
         self.btn_pdf = QPushButton("Abrir PDF")
         self.btn_dup = QPushButton("Abrir cotización")
         self.btn_hide = QPushButton("Eliminar")
+        self.btn_hide.setProperty("variant", "danger")
+        self.btn_pdf.setMinimumHeight(30)
+        self.btn_dup.setMinimumHeight(30)
+        self.btn_hide.setMinimumHeight(30)
+        self.btn_pdf.setMinimumWidth(110)
+        self.btn_dup.setMinimumWidth(132)
+        self.btn_hide.setMinimumWidth(96)
 
         self.btn_pdf.clicked.connect(self._open_pdf)
         self.btn_dup.clicked.connect(self._duplicate)
         self.btn_hide.clicked.connect(self._soft_delete)
 
-        for b in (self.btn_pdf, self.btn_dup, self.btn_hide):
-            actions.addWidget(b)
-        actions.addStretch(1)
-        main.addLayout(actions)
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(8)
+        self.lbl_page = QLabel("—")
+        btn_prev = QPushButton("◀")
+        btn_next = QPushButton("▶")
+        btn_prev.setMinimumHeight(30)
+        btn_next.setMinimumHeight(30)
+        btn_prev.setMinimumWidth(34)
+        btn_next.setMinimumWidth(34)
+        btn_prev.clicked.connect(self._prev_page)
+        btn_next.clicked.connect(self._next_page)
+        nav.addWidget(self.lbl_page)
+        nav.addWidget(btn_prev)
+        nav.addWidget(btn_next)
+        nav.addStretch(1)
+        nav.addWidget(self.btn_pdf)
+        nav.addWidget(self.btn_dup)
+        nav.addWidget(self.btn_hide)
+        main.addLayout(nav)
 
         self._apply_catalog_gate()
         self.refresh_recommendations_controls()
         self._reload_first_page()
+        QTimer.singleShot(350, self._preload_status_catalog)
+        QTimer.singleShot(1500, self._start_background_api_sync)
 
     # -----------------------------
     #  ✅ CONTROL DE VENTANAS HIJAS
@@ -903,6 +1211,18 @@ class QuoteHistoryWindow(QMainWindow):
             except Exception:
                 pass
 
+    def refresh_status_colors(self):
+        try:
+            rows = int(self.model.rowCount())
+            cols = int(self.model.columnCount())
+            if rows > 0 and cols > 0:
+                top = self.model.index(0, 0)
+                bottom = self.model.index(rows - 1, cols - 1)
+                self.model.dataChanged.emit(top, bottom, [Qt.BackgroundRole, Qt.ForegroundRole])
+            self.table.viewport().update()
+        except Exception:
+            pass
+
     def open_chat_personalization(self):
         if not is_ai_enabled(refresh=True):
             QMessageBox.information(self, "IA desactivada", "Activa la IA para personalizar el chat.")
@@ -931,28 +1251,150 @@ class QuoteHistoryWindow(QMainWindow):
 
     # -----------------------------
 
+    def _preload_status_catalog(self):
+        try:
+            get_quote_statuses_cached(db_path=self._db_path, force_reload=False)
+        except Exception:
+            pass
+
     def _on_quote_saved(self):
         self._rt_timer.start()
+        self._wake_background_api_sync()
+
+    def _start_background_api_sync(self):
+        if (self._api_sync_thread is not None) and self._api_sync_thread.is_alive():
+            return
+        self._api_sync_stop_event.clear()
+        self._api_sync_wake_event.clear()
+        self._api_sync_thread = threading.Thread(
+            target=self._api_sync_loop,
+            name="quote-api-sync",
+            daemon=True,
+        )
+        self._api_sync_thread.start()
+
+    def _wake_background_api_sync(self):
+        try:
+            self._api_sync_wake_event.set()
+        except Exception:
+            pass
+
+    def _stop_background_api_sync(self):
+        try:
+            self._api_sync_stop_event.set()
+            self._api_sync_wake_event.set()
+            t = self._api_sync_thread
+            if (t is not None) and t.is_alive():
+                t.join(timeout=1.5)
+        except Exception:
+            pass
+        finally:
+            self._api_sync_thread = None
+
+    def _api_sync_loop(self):
+        interval_idle_s = 180.0
+        interval_batch_s = 45.0
+        interval_error_s = 300.0
+        interval_disabled_s = 900.0
+        batch_limit = 25
+        wait_s = 25.0
+        disabled_logged = False
+
+        def _has_api_identity() -> bool:
+            try:
+                store_id = str(APP_CONFIG.get("store_id", "") or "").strip()
+                username = str(APP_CONFIG.get("username", "") or "").strip()
+                return bool(store_id and username)
+            except Exception:
+                return False
+
+        while not self._api_sync_stop_event.is_set():
+            self._api_sync_wake_event.wait(timeout=max(0.2, float(wait_s)))
+            self._api_sync_wake_event.clear()
+            if self._api_sync_stop_event.is_set():
+                break
+
+            if not _has_api_identity():
+                if not disabled_logged:
+                    log.info("Sync API automatico deshabilitado: falta username/store_id.")
+                    disabled_logged = True
+                wait_s = interval_disabled_s
+                continue
+
+            try:
+                res = sync_pending_history_quotes_once(limit=batch_limit)
+                if bool(res.get("disabled")):
+                    if not disabled_logged:
+                        log.info("Sync API automatico deshabilitado: falta username/store_id.")
+                        disabled_logged = True
+                    wait_s = interval_disabled_s
+                    continue
+
+                if disabled_logged:
+                    log.info("Sync API automatico habilitado: username/store_id configurados.")
+                    disabled_logged = False
+
+                found = int(res.get("found") or 0)
+                sent = int(res.get("sent") or 0)
+                skipped = int(res.get("skipped") or 0)
+                failed = int(res.get("failed") or 0)
+
+                if sent or failed:
+                    log.info(
+                        "Sync API automatico: found=%s sent=%s skipped=%s failed=%s",
+                        found,
+                        sent,
+                        skipped,
+                        failed,
+                    )
+
+                if found >= batch_limit:
+                    wait_s = interval_batch_s
+                elif failed > 0:
+                    wait_s = interval_error_s
+                else:
+                    wait_s = interval_idle_s
+            except Exception as e:
+                log.warning("Sync API automatico fallo: %s", e)
+                wait_s = interval_error_s
 
     def _on_catalog_updated(self, *_):
         self._apply_catalog_gate()
 
-    def _has_products(self) -> bool:
+    def _catalog_health(self) -> tuple[bool, str]:
         try:
-            df = getattr(self.catalog_manager, "df_productos", None)
-            return (df is not None) and (not df.empty)
+            mgr = self.catalog_manager
         except Exception:
-            return False
+            return False, "No se pudo leer el catalogo de productos."
+        try:
+            if mgr is not None and hasattr(mgr, "catalog_health"):
+                return mgr.catalog_health()
+        except Exception:
+            pass
+        try:
+            df = getattr(mgr, "df_productos", None)
+        except Exception:
+            return False, "No se pudo leer el catalogo de productos."
+        return validate_products_catalog_df(df)
+
+    def _has_products(self) -> bool:
+        ok, _reason = self._catalog_health()
+        return bool(ok)
 
     def _apply_catalog_gate(self):
-        ok = self._has_products()
+        ok, reason = self._catalog_health()
         ai_on = bool(is_ai_enabled(refresh=True))
         chat_ok = ok and ai_on and (self.assistant is not None)
         self.btn_new.setEnabled(ok)
         self.btn_dup.setEnabled(ok)
         self.btn_chat.setVisible(ai_on)
         self.btn_chat.setEnabled(chat_ok)
-        tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
+        if ok:
+            tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
+        else:
+            tip = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not tip.strip():
+                tip = reason or "Debes actualizar productos."
         self.btn_new.setToolTip("" if ok else tip)
         self.btn_dup.setToolTip("" if ok else tip)
         if not ai_on:
@@ -968,7 +1410,53 @@ class QuoteHistoryWindow(QMainWindow):
         super().showEvent(event)
         if not self._centered_once:
             self._centered_once = True
-            center_on_screen(self)
+            self._ensure_startup_size()
+            if not self.isMaximized():
+                center_on_screen(self)
+
+    def _on_table_hovered(self, index: QModelIndex):
+        try:
+            delegate = getattr(self, "_history_delegate", None)
+            if delegate is None:
+                return
+            row = index.row() if (index is not None and index.isValid()) else -1
+            delegate.set_hover_row(row)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if (
+                getattr(self, "table", None) is not None
+                and obj is self.table.viewport()
+                and event is not None
+                and event.type() == QEvent.Leave
+            ):
+                delegate = getattr(self, "_history_delegate", None)
+                if delegate is not None:
+                    delegate.set_hover_row(-1)
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _ensure_startup_size(self):
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if not screen:
+                return
+            geo = screen.availableGeometry()
+
+            max_w = max(self._MIN_REASONABLE[0], geo.width() - 40)
+            max_h = max(self._MIN_REASONABLE[1], geo.height() - 60)
+
+            target_w = min(self._DEFAULT_SIZE[0], max_w)
+            target_h = min(self._DEFAULT_SIZE[1], max_h)
+
+            # Solo corrige si llega "chico" por layout/estilo.
+            if self.width() < self._MIN_REASONABLE[0] or self.height() < self._MIN_REASONABLE[1]:
+                self.resize(target_w, target_h)
+        except Exception:
+            pass
 
     def _on_filters_changed(self, *_):
         self._filter_timer.start()
@@ -1006,10 +1494,9 @@ class QuoteHistoryWindow(QMainWindow):
             pass
 
     def _reload_current_page(self):
+        con = None
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
-
             rows, total = list_quotes(
                 con,
                 search_text=(self.txt_search.text() or "").strip(),
@@ -1018,11 +1505,16 @@ class QuoteHistoryWindow(QMainWindow):
                 limit=self.page_size,
                 offset=self.offset,
             )
-            con.close()
         except Exception as e:
             log.exception("Error listando cotizaciones")
             QMessageBox.critical(self, "Error", f"No se pudo cargar el histórico:\n{e}")
             return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
         self.total = total
         self.model.set_rows(rows)
@@ -1045,13 +1537,12 @@ class QuoteHistoryWindow(QMainWindow):
         self._reload_current_page()
 
     def _on_table_double_clicked(self, index: QModelIndex):
-        if not self._has_products():
-            QMessageBox.warning(
-                self,
-                "Sin productos",
-                "No puedes abrir cotizaciones sin productos.\n\n"
-                "Usa ☰ Menú → Actualizar productos.",
-            )
+        ok, reason = self._catalog_health()
+        if not ok:
+            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not msg.strip():
+                msg = reason or "Debes actualizar productos."
+            QMessageBox.warning(self, "Catalogo invalido", msg)
             return
         try:
             if index and index.isValid():
@@ -1072,18 +1563,17 @@ class QuoteHistoryWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        act_dup = QAction("Abrir Cotización", self)
-        act_pdf = QAction("Abrir PDF", self)
-        act_state = QAction("Cambiar estado…", self)
-        act_ticket = QAction("Reimprimir ticket", self)
-        act_regen = QAction("Regenerar PDF", self)
-        act_hide = QAction("Eliminar", self)
+        act_dup = QAction("🧾 Abrir Cotización", self)
+        act_pdf = QAction("📄 Abrir PDF", self)
+        act_state = QAction("🔄 Cambiar estado…", self)
+        act_ticket = QAction("🖨️ Reimprimir ticket", self)
+        act_regen = QAction("♻️ Regenerar PDF", self)
+        act_hide = QAction("🗑️ Eliminar", self)
 
         act_edit_pay = None
         if APP_COUNTRY == "PERU":
-            act_edit_pay = QAction("Editar pago…", self)
+            act_edit_pay = QAction("💳 Editar pago…", self)
             act_edit_pay.setEnabled(has_sel)
-            act_edit_pay.triggered.connect(self._edit_payment_peru)
 
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
@@ -1092,12 +1582,6 @@ class QuoteHistoryWindow(QMainWindow):
         act_regen.setEnabled(has_sel)
         act_hide.setEnabled(has_sel)
 
-        act_dup.triggered.connect(self._duplicate)
-        act_pdf.triggered.connect(self._open_pdf)
-        act_state.triggered.connect(self._change_status)
-        act_ticket.triggered.connect(self._reprint_ticket)
-        act_regen.triggered.connect(self._regen_pdf_overwrite)
-        act_hide.triggered.connect(self._soft_delete)
 
         menu.addAction(act_dup)
         menu.addSeparator()
@@ -1112,11 +1596,36 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(act_hide)
         menu.addSeparator()
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+        picked = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if picked is None:
+            return
+
+        fn = None
+        if picked is act_dup:
+            fn = self._duplicate
+        elif picked is act_pdf:
+            fn = self._open_pdf
+        elif picked is act_state:
+            fn = self._change_status
+        elif act_edit_pay is not None and picked is act_edit_pay:
+            fn = self._edit_payment_peru
+        elif picked is act_ticket:
+            fn = self._reprint_ticket
+        elif picked is act_regen:
+            fn = self._regen_pdf_overwrite
+        elif picked is act_hide:
+            fn = self._soft_delete
+
+        if fn is not None:
+            QTimer.singleShot(120, fn)
 
     def _open_chat(self):
-        if not self._has_products():
-            QMessageBox.warning(self, "Sin productos", "Usa ☰ Menú → Actualizar productos.")
+        ok, reason = self._catalog_health()
+        if not ok:
+            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not msg.strip():
+                msg = reason or "Debes actualizar productos."
+            QMessageBox.warning(self, "Catalogo invalido", msg)
             return
         self.refresh_ai_controls()
         if (not is_ai_enabled(refresh=True)) or (self.assistant is None):
@@ -1133,14 +1642,19 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.information(self, "Atención", "Selecciona una cotización.")
             return
 
+        con = None
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
             header = get_quote_header(con, qid)
-            con.close()
             current = (header.get("estado") or "").strip()
         except Exception:
             current = ""
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
         dlg = QuoteStatusDialog(self, current_status=current)
         if dlg.exec() != QDialog.Accepted:
@@ -1148,19 +1662,22 @@ class QuoteHistoryWindow(QMainWindow):
 
         new_status = dlg.status()
 
+        con = None
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
             with tx(con):
                 update_quote_status(con, qid, new_status)
-            con.close()
-
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
-
         except Exception as e:
             log.exception("Error actualizando estado")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el estado:\n{e}")
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     def _edit_payment_peru(self):
         if APP_COUNTRY != "PERU":
@@ -1171,15 +1688,20 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.information(self, "Atención", "Selecciona una cotización.")
             return
 
+        con = None
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
             header = get_quote_header(con, qid)
-            con.close()
         except Exception as e:
             log.exception("Error leyendo cotización")
             QMessageBox.critical(self, "Error", f"No se pudo leer la cotización:\n{e}")
             return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
         current_mp = (header.get("metodo_pago") or "").strip()
 
@@ -1195,28 +1717,30 @@ class QuoteHistoryWindow(QMainWindow):
 
         new_mp = (text or "").strip()
 
+        con = None
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
             with tx(con):
                 update_quote_payment(con, qid, new_mp)
-            con.close()
-
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
-
         except Exception as e:
             log.exception("Error actualizando pago")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el pago:\n{e}")
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     def _open_new_quote(self):
-        if not self._has_products():
-            QMessageBox.warning(
-                self,
-                "Sin productos",
-                "No puedes crear cotizaciones sin productos.\n\n"
-                "Usa ☰ Menú → Actualizar productos.",
-            )
+        ok, reason = self._catalog_health()
+        if not ok:
+            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not msg.strip():
+                msg = reason or "Debes actualizar productos."
+            QMessageBox.warning(self, "Catalogo invalido", msg)
             return
 
         win = SistemaCotizaciones(
@@ -1254,13 +1778,24 @@ class QuoteHistoryWindow(QMainWindow):
             return
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
+
             q = get_quote_header(con, qid)
-            con.close()
 
             pdf = resolve_pdf_path_portable(q.get("pdf_path"))
             if not pdf or not os.path.exists(pdf):
-                QMessageBox.warning(self, "PDF no encontrado", f"No existe:\n{pdf}")
+                pdf_name = os.path.basename(pdf) if pdf else "(sin ruta)"
+                pdf_dir = os.path.dirname(pdf) if pdf else ""
+                mb = QMessageBox(self)
+                mb.setIcon(QMessageBox.Warning)
+                mb.setWindowTitle("PDF no encontrado")
+                mb.setText("No se encontró el archivo PDF.")
+                mb.setInformativeText(
+                    f"Archivo: {pdf_name}"
+                    + (f"\nUbicación: {pdf_dir}" if pdf_dir else "")
+                )
+                if pdf:
+                    mb.setDetailedText(pdf)
+                mb.exec()
                 return
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(pdf)))
         except Exception as e:
@@ -1268,8 +1803,12 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{e}")
 
     def _duplicate(self):
-        if not self._has_products():
-            QMessageBox.warning(self, "Sin productos", "Usa ☰ Menú → Actualizar productos.")
+        ok, reason = self._catalog_health()
+        if not ok:
+            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not msg.strip():
+                msg = reason or "Debes actualizar productos."
+            QMessageBox.warning(self, "Catalogo invalido", msg)
             return
 
         qid = self._selected_quote_id()
@@ -1278,14 +1817,14 @@ class QuoteHistoryWindow(QMainWindow):
             return
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
+
             header = get_quote_header(con, qid)
             items_base, _items_shown = get_quote_items(con, qid)
-            con.close()
 
             payload = {
                 "cliente": header.get("cliente", ""),
                 "cedula": header.get("cedula", ""),
+                "tipo_documento": header.get("tipo_documento", ""),
                 "telefono": header.get("telefono", ""),
                 "items_base": items_base,
             }
@@ -1367,10 +1906,10 @@ class QuoteHistoryWindow(QMainWindow):
 
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
+
             with tx(con):
                 soft_delete_quote(con, qid, datetime.datetime.now().isoformat(timespec="seconds"))
-            con.close()
+
             self._reload_first_page()
         except Exception as e:
             log.exception("Error eliminando cotización")
@@ -1384,10 +1923,9 @@ class QuoteHistoryWindow(QMainWindow):
 
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
+
             header = get_quote_header(con, qid)
             _items_base, items_shown = get_quote_items(con, qid)
-            con.close()
 
             pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
             cliente = header.get("cliente", "")
@@ -1402,6 +1940,7 @@ class QuoteHistoryWindow(QMainWindow):
                 pdf_path=pdf_path,
                 items_pdf=items_shown,
                 quote_code=quote_code,
+                country=header.get("country_code") or APP_COUNTRY,
                 cliente_nombre=cliente,
                 printer_name="TICKERA",
                 width=48,
@@ -1428,10 +1967,9 @@ class QuoteHistoryWindow(QMainWindow):
 
         try:
             con = connect(self._db_path)
-            ensure_schema(con)
+
             header = get_quote_header(con, qid)
             _items_base, items_shown = get_quote_items(con, qid)
-            con.close()
 
             old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
             if not old_out_path:
@@ -1480,13 +2018,12 @@ class QuoteHistoryWindow(QMainWindow):
             generar_pdf(datos, fixed_quote_no=quote_code, out_path=new_out_path)
 
             con = connect(self._db_path)
-            ensure_schema(con)
+
             with tx(con):
                 con.execute(
                     "UPDATE quotes SET quote_no = ?, pdf_path = ? WHERE id = ?",
                     (quote_code, os.path.basename(new_out_path), int(qid)),
                 )
-            con.close()
 
             if os.path.abspath(old_out_path) != os.path.abspath(new_out_path):
                 try:
@@ -1498,18 +2035,139 @@ class QuoteHistoryWindow(QMainWindow):
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
 
+            pdf_name = os.path.basename(new_out_path)
+            pdf_dir = os.path.dirname(new_out_path)
             QMessageBox.information(
                 self,
                 "PDF regenerado",
-                f"PDF actualizado:\n{new_out_path}\n\nCódigo: {quote_code}",
+                f"PDF actualizado:\n{pdf_name}\n\nUbicación:\n{pdf_dir}\n\nCódigo: {quote_code}",
             )
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
         except Exception as e:
             log.exception("Error regenerando PDF")
             QMessageBox.critical(self, "Error", f"No se pudo regenerar el PDF:\n{e}")
 
+    def _regen_pdf_overwrite_for_quote_id(self, qid: int) -> tuple[str, str]:
+        con = None
+        try:
+            con = connect(self._db_path)
+            header = get_quote_header(con, int(qid))
+            _items_base, items_shown = get_quote_items(con, int(qid))
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
+        if not old_out_path:
+            raise RuntimeError("La cotización no tiene ruta de PDF.")
+
+        quote_code = format_quote_code(
+            country_code=header.get("country_code") or COUNTRY_CODE,
+            store_id=STORE_ID,
+            quote_no=header.get("quote_no"),
+            width=7,
+        )
+
+        old_base = os.path.splitext(os.path.basename(old_out_path))[0]
+        if "_" in old_base:
+            suffix = old_base.split("_", 1)[1].strip()
+        else:
+            cli_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(header.get("cliente") or "").strip()).strip("_")
+            suffix = cli_slug or "cliente"
+
+        new_filename = f"C-{quote_code}_{suffix}.pdf"
+        new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
+
+        metodo_pago = (header.get("metodo_pago") or "").strip()
+        if APP_COUNTRY == "PERU":
+            pass
+        elif APP_COUNTRY == "PARAGUAY":
+            if not metodo_pago:
+                metodo_pago = "Tarjeta"
+        else:
+            if not metodo_pago:
+                metodo_pago = "Transferencia"
+
+        datos = {
+            "fecha": (header.get("created_at", "") or "")[:10],
+            "cliente": header.get("cliente", ""),
+            "cedula": header.get("cedula", ""),
+            "telefono": header.get("telefono", ""),
+            "metodo_pago": metodo_pago,
+            "items": items_shown,
+            "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
+            "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
+            "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
+        }
+
+        generar_pdf(datos, fixed_quote_no=quote_code, out_path=new_out_path)
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            with tx(con):
+                con.execute(
+                    "UPDATE quotes SET quote_no = ?, pdf_path = ? WHERE id = ?",
+                    (quote_code, os.path.basename(new_out_path), int(qid)),
+                )
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        if os.path.abspath(old_out_path) != os.path.abspath(new_out_path):
+            try:
+                if os.path.exists(old_out_path):
+                    os.remove(old_out_path)
+            except Exception:
+                pass
+
+        return quote_code, new_out_path
+
+    def _regen_pdf_and_cmd_for_quote_id(self, qid: int) -> tuple[str, str, str]:
+        quote_code, new_pdf_path = self._regen_pdf_overwrite_for_quote_id(int(qid))
+        if not new_pdf_path or not os.path.exists(new_pdf_path):
+            raise RuntimeError("No se pudo regenerar el PDF.")
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            header = get_quote_header(con, int(qid))
+            _items_base, items_shown = get_quote_items(con, int(qid))
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        ticket_paths = generar_ticket_para_cotizacion(
+            pdf_path=new_pdf_path,
+            items_pdf=items_shown,
+            quote_code=quote_code,
+            country=header.get("country_code") or APP_COUNTRY,
+            cliente_nombre=header.get("cliente", ""),
+            printer_name="TICKERA",
+            width=48,
+            top_mm=0.0,
+            bottom_mm=10.0,
+            cut_mode="full_feed",
+        )
+        cmd_path = str(ticket_paths.get("ticket_cmd") or "").strip()
+        if not cmd_path or not os.path.exists(cmd_path):
+            raise RuntimeError("No se pudo regenerar el archivo CMD del ticket.")
+
+        return quote_code, new_pdf_path, cmd_path
+
     def closeEvent(self, event: QCloseEvent):
         if self._closing_with_children:
+            self._stop_background_api_sync()
+            self._save_window_state()
             event.accept()
             return
 
@@ -1517,6 +2175,8 @@ class QuoteHistoryWindow(QMainWindow):
         open_wins = self._alive_quote_windows()
 
         if not open_wins:
+            self._stop_background_api_sync()
+            self._save_window_state()
             event.accept()
             return
 
@@ -1554,4 +2214,81 @@ class QuoteHistoryWindow(QMainWindow):
             event.ignore()
             return
 
+        self._save_window_state()
+        self._stop_background_api_sync()
         event.accept()
+
+    @staticmethod
+    def _parse_int(value, default: int = 0) -> int:
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _parse_bool(value) -> bool:
+        s = str(value or "").strip().lower()
+        return s in ("1", "true", "yes", "on", "si")
+
+    def _restore_window_state(self):
+        con = None
+        try:
+            con = connect(self._db_path)
+            p = self._WIN_KEY_PREFIX
+            w = self._parse_int(get_setting(con, f"{p}_w", "0"), 0)
+            h = self._parse_int(get_setting(con, f"{p}_h", "0"), 0)
+            x = self._parse_int(get_setting(con, f"{p}_x", "-1"), -1)
+            y = self._parse_int(get_setting(con, f"{p}_y", "-1"), -1)
+            is_max = self._parse_bool(get_setting(con, f"{p}_max", "0"))
+        except Exception:
+            return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        if w > 100 and h > 100:
+            self.resize(w, h)
+            self._window_state_restored = True
+        if x >= 0 and y >= 0:
+            self.move(x, y)
+            self._window_state_restored = True
+        if is_max:
+            self.showMaximized()
+            self._window_state_restored = True
+
+    def _save_window_state(self):
+        try:
+            geo = self.normalGeometry() if self.isMaximized() else self.geometry()
+            w = int(geo.width())
+            h = int(geo.height())
+            x = int(geo.x())
+            y = int(geo.y())
+            is_max = bool(self.isMaximized())
+        except Exception:
+            return
+
+        if w <= 100 or h <= 100:
+            return
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            p = self._WIN_KEY_PREFIX
+            with tx(con):
+                set_setting(con, f"{p}_w", str(w))
+                set_setting(con, f"{p}_h", str(h))
+                set_setting(con, f"{p}_x", str(x))
+                set_setting(con, f"{p}_y", str(y))
+                set_setting(con, f"{p}_max", "1" if is_max else "0")
+        except Exception:
+            pass
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+

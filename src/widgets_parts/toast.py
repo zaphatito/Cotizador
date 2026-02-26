@@ -53,13 +53,14 @@ class Toast(QFrame):
         self.setStyleSheet(
             """
             QFrame#Toast {
-                background: rgba(25, 25, 25, 220);
-                border: 1px solid rgba(255,255,255,40);
-                border-radius: 10px;
+                background: rgba(13, 27, 45, 235);
+                border: 1px solid rgba(132, 181, 234, 140);
+                border-radius: 12px;
             }
             QLabel {
-                color: white;
+                color: #f4f8ff;
                 font-size: 12px;
+                font-weight: 600;
             }
             """
         )

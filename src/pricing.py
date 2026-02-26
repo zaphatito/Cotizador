@@ -18,7 +18,6 @@ def cantidad_para_mostrar(it: dict) -> str:
                 gramos = 0.0
             return format_grams(gramos)
         else:
-            # En PY (y otros no-PERU) qty = "unidades" (1 unidad = 50g)
             try:
                 q_int = int(round(float(qty)))
             except Exception:
@@ -38,15 +37,15 @@ def cantidad_para_mostrar(it: dict) -> str:
 
 
 # =====================================================
-# Factor para total por categoría / país
+# Factor para total por categoria / pais
 # =====================================================
 def factor_total_por_categoria(cat: str) -> float:
     """
-    Factor que SOLO afecta el cálculo de subtotal/total (no el precio unitario mostrado).
+    Factor que SOLO afecta el calculo de subtotal/total (no el precio unitario mostrado).
 
     - CATS (esencias/granel):
-        * PERU: qty ya viene en otra unidad (tu lógica actual), NO aplica x50 aquí.
-        * NO-PERU (ej. Paraguay): qty representa "unidades" de 50g => total = unit * qty * 50
+        * PERU: qty ya viene en otra unidad, NO aplica x50 aqui.
+        * NO-PERU: qty representa unidades de 50g => total = unit * qty * 50
     """
     cat_u = (cat or "").upper()
     if cat_u in CATS and APP_COUNTRY != "PERU":
@@ -54,89 +53,84 @@ def factor_total_por_categoria(cat: str) -> float:
     return 1.0
 
 
-def _first_price(prod: dict, *keys: str) -> float:
-    """Devuelve el primer valor numérico (>0) encontrado entre las llaves dadas."""
+def _first_nonzero(prod: dict, *keys: str) -> float:
     for k in keys:
         try:
-            val = float(nz(prod.get(k), 0.0))
+            v = float(nz(prod.get(k), 0.0))
         except Exception:
-            val = 0.0
-        if val > 0:
-            return val
+            v = 0.0
+        if v > 0:
+            return float(v)
+    return 0.0
+
+
+def normalize_price_id(value, default: int = 1) -> int:
+    try:
+        if isinstance(value, (int, float)):
+            iv = int(value)
+            return iv if iv in (1, 2, 3) else int(default)
+
+        s = str(value or "").strip().lower()
+        if not s:
+            return int(default)
+
+        if s in ("1", "p_max", "max", "maximo", "unitario", "base", "lista"):
+            return 1
+        if s in ("2", "p_min", "min", "minimo"):
+            return 2
+        if s in ("3", "p_oferta", "oferta", "promo", "promocion"):
+            return 3
+
+        iv = int(float(s.replace(",", ".")))
+        return iv if iv in (1, 2, 3) else int(default)
+    except Exception:
+        return int(default)
+
+
+def default_price_id_for_product(prod: dict) -> int:
+    # Regla de negocio: el precio por defecto siempre es p_max.
+    return 1
+
+
+def price_for_price_id(prod: dict, price_id: int) -> float:
+    if not isinstance(prod, dict):
+        return 0.0
+    pid = normalize_price_id(price_id, 1)
+    p_max = _first_nonzero(prod, "p_max", "P_MAX")
+    p_min = _first_nonzero(prod, "p_min", "P_MIN")
+    p_oferta = _first_nonzero(prod, "p_oferta", "P_OFERTA")
+
+    if pid == 2 and p_min > 0:
+        return float(p_min)
+    if pid == 3 and p_oferta > 0:
+        return float(p_oferta)
+    if p_max > 0:
+        return float(p_max)
+    if p_oferta > 0:
+        return float(p_oferta)
+    if p_min > 0:
+        return float(p_min)
     return 0.0
 
 
 def precio_base_para_listado(prod: dict) -> float:
     """
-    Precio que se muestra en el listado (no depende de cantidades).
-
-    - BOTELLAS: precio por unidad
-    - CATS (granel): precio unitario BASE (NO x50 aquí)
-    - PRESENTACION: usa PRECIO_PRESENT (precio de la presentación base, sin botella)
-    - Resto: PVP / lista / unitario, incluyendo PRECIO_PRESENT como posible clave
+    Precio mostrado en listado:
+    - Productos: p_max por defecto.
+    - Presentaciones: p_max por defecto.
     """
     cat = (prod.get("categoria") or "").upper()
-
-    if cat == "BOTELLAS":
-        return _first_price(prod, "precio_unidad", "precio_venta")
-
-    if cat in CATS:
-        # ✅ No multiplicar por 50 aquí (unitario debe mantenerse)
-        return _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
-
     if cat == "PRESENTACION":
-        return _first_price(
-            prod,
-            "PRECIO_PRESENT",
-            "precio_unitario",
-            "PRECIO",
-            "precio_venta",
-        )
-
-    return _first_price(
-        prod,
-        "PRECIO_PRESENT",
-        "precio_maximo",
-        "pvp",
-        "pvpr",
-        "precio_lista",
-        "PRECIO",
-        "precio_unitario",
-        "precio_venta",
-    )
+        return price_for_price_id(prod, 1)
+    return price_for_price_id(prod, default_price_id_for_product(prod))
 
 
 def precio_unitario_por_categoria(cat: str, prod: dict, qty_units: float) -> float:
     """
-    Calcula el precio unitario aplicando reglas por categoría.
-    ▶️ Sin tramos por cantidad.
-
-    IMPORTANTE:
-    - Para CATS (esencias/granel) el unitario NO se escala por país.
-      El x50 se aplica en el TOTAL (ver factor_total_por_categoria).
+    Devuelve el precio segun el tipo por defecto.
+    Regla actual: siempre p_max por defecto.
     """
     cat_u = (cat or "").upper()
-
-    if cat_u in CATS:
-        # ✅ Unitario base (sin x50)
-        return _first_price(prod, "precio_base_50g", "precio_unitario", "precio_venta")
-
-    if cat_u == "BOTELLAS":
-        return _first_price(prod, "precio_unidad", "precio_unitario", "precio_venta")
-
     if cat_u == "PRESENTACION":
-        return _first_price(
-            prod,
-            "PRECIO_PRESENT",
-            "precio_unitario",
-            "PRECIO",
-            "precio_venta",
-        )
-
-    return _first_price(
-        prod,
-        "PRECIO_PRESENT",
-        "precio_unitario",
-        "PRECIO",
-        "precio_venta",
-    )
+        return price_for_price_id(prod, 1)
+    return price_for_price_id(prod, default_price_id_for_product(prod))

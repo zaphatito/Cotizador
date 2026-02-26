@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from typing import Final
 
-# Configura aqui tus endpoints por case.
-# Formato: (numero_case, "url_completa")
+# DEV (activo por ahora):
+API_BASE_URL: Final[str] = "http://localhost:3000/service"
+
+# PROD (manual, cuando quieras cambiar):
+# API_BASE_URL: Final[str] = "http://efperfumes.online:3005/service"
+
+# Cases API de sesion + presupuesto.
+API_CASE_LOGIN: Final[int] = 1
+API_CASE_POST_PRESUPUESTO: Final[int] = 2
+
 API_CASES: Final[tuple[tuple[int, str], ...]] = (
-    # (1, "https://api.tu-dominio.com/v1/clientes"),
-    # (2, "https://api.tu-dominio.com/v1/ventas/{id}"),
+    (API_CASE_LOGIN, f"{API_BASE_URL}/sessions/busLogin"),
+    (API_CASE_POST_PRESUPUESTO, f"{API_BASE_URL}/db/postPresupuesto"),
 )
 
 # Headers por defecto para todos los requests.

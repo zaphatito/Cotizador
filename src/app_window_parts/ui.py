@@ -1,13 +1,15 @@
 # src/app_window_parts/ui.py
 from __future__ import annotations
 
+import copy
 import os
+import re
 
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QFormLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -23,20 +25,164 @@ from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemDelegate,
     QButtonGroup,
+    QComboBox,
 )
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices
-from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer, QEvent
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QRegularExpressionValidator
+from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer, QEvent, QRegularExpression
 
 from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR
-from ..config import APP_COUNTRY, id_label_for_country, listing_allows_products, listing_allows_presentations
+from ..config import APP_COUNTRY, COUNTRY_CODE, listing_allows_products, listing_allows_presentations
 from .models import ItemsModel
-from .delegates import QuantityDelegate
+from .delegates import QuantityDelegate, InlineTextDelegate
 from ..widgets import Toast
+from ..widgets_parts.excel_table_behavior import ExcelTableController
+from sqlModels.quotes_repo import (
+    doc_regex_for_country,
+    document_type_rule,
+    document_type_rules_for_country,
+    infer_tipo_documento_from_doc,
+    validate_document_for_type,
+)
 
+
+_DOC_REGEX_BY_COUNTRY: dict[str, str] = {
+    # VE: V/E/J/P/G
+    "VENEZUELA": doc_regex_for_country("VE"),
+    # PE: DNI/CE/RUC/P
+    "PERU": doc_regex_for_country("PE"),
+    # PY: CI/RUC/P
+    "PARAGUAY": doc_regex_for_country("PY"),
+}
+
+_PHONE_REGEX_BY_COUNTRY: dict[str, str] = {
+    "VENEZUELA": r"^(?:0[24]\d{9}|(?:\+58|58)[24]\d{9})$",
+    "PERU": r"^(?:(?:\+51|51)?9\d{8})$",
+    "PARAGUAY": r"^(?:(?:\+595|595)?9\d{8}|0?9\d{8})$",
+}
+
+_DOC_HINT_BY_COUNTRY: dict[str, str] = {
+    "VENEZUELA": "V/E/J/P/G",
+    "PERU": "DNI/CE/RUC/P",
+    "PARAGUAY": "CI/RUC/P",
+}
+
+_PHONE_HINT_BY_COUNTRY: dict[str, str] = {
+    "VENEZUELA": "04121234567 o +584121234567",
+    "PERU": "912345678 o +51912345678",
+    "PARAGUAY": "0981123456 o +595981123456",
+}
 
 class UiMixin:
     # ✅ umbral nuevo
     REC_P_THRESHOLD = 0.20
+
+    def _doc_type_rules(self) -> list[dict]:
+        return document_type_rules_for_country(COUNTRY_CODE)
+
+    def _selected_doc_type(self) -> str:
+        cb = getattr(self, "combo_tipo_documento", None)
+        if cb is None:
+            return ""
+        try:
+            raw = cb.currentData()
+            if raw is None:
+                raw = cb.currentText()
+            return str(raw or "").strip().upper()
+        except Exception:
+            return ""
+
+    def _set_selected_doc_type(self, doc_type: str):
+        cb = getattr(self, "combo_tipo_documento", None)
+        if cb is None:
+            return
+        t = str(doc_type or "").strip().upper()
+        if not t:
+            return
+        i = cb.findData(t)
+        if i < 0:
+            i = cb.findText(t, Qt.MatchFixedString)
+        if i >= 0:
+            cb.setCurrentIndex(i)
+
+    def _doc_regex_pattern(self, *, doc_type: str | None = None) -> str:
+        dt = str(doc_type or self._selected_doc_type() or "").strip().upper()
+        if dt:
+            rule = document_type_rule(COUNTRY_CODE, dt)
+            if rule:
+                pat = str(rule.get("regex_validation") or "").strip()
+                if pat:
+                    return pat
+        return _DOC_REGEX_BY_COUNTRY.get(APP_COUNTRY, r"^[A-Za-z0-9\-]{4,20}$")
+
+    def _phone_regex_pattern(self) -> str:
+        # Telefono sin formato obligatorio.
+        return r"^.*$"
+
+    def _doc_regex_hint(self, *, doc_type: str | None = None) -> str:
+        dt = str(doc_type or self._selected_doc_type() or "").strip().upper()
+        if dt:
+            rule = document_type_rule(COUNTRY_CODE, dt)
+            if rule:
+                desc = str(rule.get("descripcion") or "").strip().upper()
+                pad = int(rule.get("validation_pad") or 0)
+                if pad > 0:
+                    return f"{dt} ({desc}) - {pad} caracteres"
+                return f"{dt} ({desc}) - longitud variable"
+        return _DOC_HINT_BY_COUNTRY.get(APP_COUNTRY, "DOC-123456")
+
+    def _phone_regex_hint(self) -> str:
+        return "Sin formato obligatorio"
+
+    def _on_doc_type_changed(self, _idx: int = -1):
+        self._apply_client_validators()
+        try:
+            self._schedule_refresh_recs_preview()
+        except Exception:
+            pass
+
+    def _apply_client_validators(self):
+        try:
+            rx_doc = QRegularExpression(self._doc_regex_pattern(doc_type=self._selected_doc_type()))
+            self.entry_cedula.setValidator(QRegularExpressionValidator(rx_doc, self.entry_cedula))
+            self.entry_telefono.setValidator(None)
+            self.entry_cedula.setPlaceholderText(self._doc_regex_hint(doc_type=self._selected_doc_type()))
+            self.entry_telefono.setPlaceholderText(self._phone_regex_hint())
+        except Exception:
+            pass
+
+    def _infer_tipo_documento(self, doc: str) -> str:
+        return infer_tipo_documento_from_doc(COUNTRY_CODE, str(doc or ""))
+
+    def _validate_doc_phone_values(self, doc: str, phone: str) -> tuple[bool, str, str]:
+        d = str(doc or "").strip()
+        t = str(phone or "").strip()
+        doc_type = self._selected_doc_type()
+        if not doc_type:
+            return (
+                False,
+                "Selecciona un tipo de documento.",
+                "",
+            )
+        ok_doc, doc_err = validate_document_for_type(COUNTRY_CODE, doc_type, d)
+        if not ok_doc:
+            return (
+                False,
+                (
+                    f"Documento invalido para {APP_COUNTRY}.\n"
+                    f"{doc_err}\n"
+                    f"Formato permitido: {self._doc_regex_hint(doc_type=doc_type)}"
+                ),
+                "",
+            )
+        if not t:
+            return (
+                False,
+                (
+                    "Ingresa un telefono."
+                ),
+                "",
+            )
+        return True, "", str(doc_type or "").strip().upper()
 
     def _update_title_with_client(self, text: str):
         name = (text or "").strip()
@@ -46,9 +192,21 @@ class UiMixin:
         cli = str(payload.get("cliente") or "").strip()
         doc = str(payload.get("cedula") or "").strip()
         tel = str(payload.get("telefono") or "").strip()
+        doc_type = str(payload.get("tipo_documento") or "").strip().upper()
+        if not doc_type and "-" in doc:
+            pref, body = doc.split("-", 1)
+            pref = str(pref or "").strip().upper()
+            body = str(body or "").strip()
+            if pref and body:
+                doc_type = pref
+                doc = body
+        elif doc_type and doc.upper().startswith(f"{doc_type}-"):
+            doc = doc[len(doc_type) + 1 :].strip()
 
         try:
             self.entry_cliente.setText(cli)
+            if doc_type:
+                self._set_selected_doc_type(doc_type)
             self.entry_cedula.setText(doc)
             self.entry_telefono.setText(tel)
         except Exception:
@@ -156,8 +314,8 @@ class UiMixin:
             self._ai_doc = SmartCompleter(self.entry_cedula, index=self._ai_index, kind="client", parent=self)
             self._ai_doc.picked.connect(self._on_ai_client_picked)
 
-            self._ai_tel = SmartCompleter(self.entry_telefono, index=self._ai_index, kind="client", parent=self)
-            self._ai_tel.picked.connect(self._on_ai_client_picked)
+            # Telefono: sin autocompleter por pedido de UX.
+            self._ai_tel = None
 
             # ✅ al activar AI, pinta preview de recomendaciones si hay
             self._schedule_refresh_recs_preview()
@@ -178,13 +336,14 @@ class UiMixin:
         super().showEvent(event)
         if not self._shown_once:
             self._shown_once = True
-            self._center_on_screen()
+            if not bool(getattr(self, "_window_state_restored", False)):
+                self._center_on_screen()
             self._schedule_refresh_recs_preview()
 
     def _wire_enter_flow(self):
         try:
-            self.entry_cliente.returnPressed.connect(self._go_doc)
-            self.entry_cedula.returnPressed.connect(self._go_phone)
+            self.entry_cedula.returnPressed.connect(self._go_name)
+            self.entry_cliente.returnPressed.connect(self._go_phone)
             self.entry_telefono.returnPressed.connect(self._go_product_search)
         except Exception:
             pass
@@ -193,6 +352,13 @@ class UiMixin:
         try:
             self.entry_cedula.setFocus()
             self.entry_cedula.selectAll()
+        except Exception:
+            pass
+
+    def _go_name(self):
+        try:
+            self.entry_cliente.setFocus()
+            self.entry_cliente.selectAll()
         except Exception:
             pass
 
@@ -216,6 +382,8 @@ class UiMixin:
             pass
 
     def _focus_last_row(self, row_index: int):
+        if bool(getattr(self, "_suppress_focus_last_row", False)):
+            return
         try:
             r = row_index if isinstance(row_index, int) else (self.model.rowCount() - 1)
             if r < 0:
@@ -242,22 +410,39 @@ class UiMixin:
 
     def _on_qty_editor_closed(self, editor, hint):
         try:
-            idx = self.table.currentIndex()
-            if not idx.isValid():
+            if hint == QAbstractItemDelegate.RevertModelCache:
                 return
-            if idx.column() != 3:
-                return
-
-            if hint not in (
-                QAbstractItemDelegate.EditNextItem,
-                QAbstractItemDelegate.NoHint,
-                QAbstractItemDelegate.SubmitModelCache,
-            ):
-                return
+            QTimer.singleShot(0, lambda: self._focus_product_search(clear=True))
         except Exception:
             pass
 
-        QTimer.singleShot(0, lambda: self._focus_product_search(clear=True))
+    def _move_inline_to_right(self, row: int, col: int):
+        try:
+            model = getattr(self, "model", None)
+            table = getattr(self, "table", None)
+            if model is None or table is None:
+                return
+            if row < 0 or col < 0:
+                return
+            cols = int(model.columnCount())
+            rows = int(model.rowCount())
+            if rows <= 0 or cols <= 0 or row >= rows:
+                return
+
+            next_col = min(col + 1, cols - 1)
+            idx_next = model.index(row, next_col)
+            if not idx_next.isValid():
+                return
+
+            table.setCurrentIndex(idx_next)
+            table.scrollTo(idx_next, QAbstractItemView.PositionAtCenter)
+            try:
+                if bool(model.flags(idx_next) & Qt.ItemIsEditable):
+                    table.edit(idx_next)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _is_py_cash_mode(self) -> bool:
         return bool(getattr(self, "_py_cash_mode", False))
@@ -455,7 +640,178 @@ class UiMixin:
             pass
         return None
 
-    def _force_qty_price_on_row(self, row: int, qty: float, price_base: float):
+    def _build_item_from_code_for_inline_edit(self, code_u: str) -> dict | None:
+        code_u = str(code_u or "").strip().upper()
+        if not code_u:
+            return None
+
+        old_len = len(getattr(self, "items", []) or [])
+        self._suppress_focus_last_row = True
+        self._suppress_recs_preview_refresh = True
+        try:
+            ok = bool(self._agregar_por_codigo(code_u, silent=True))
+        except Exception:
+            ok = False
+        finally:
+            self._suppress_focus_last_row = False
+
+        if (not ok) or len(getattr(self, "items", []) or []) <= old_len:
+            self._suppress_recs_preview_refresh = False
+            return None
+
+        probe_row = len(self.items) - 1
+        try:
+            built = copy.deepcopy(self.items[probe_row])
+        except Exception:
+            try:
+                built = dict(self.items[probe_row])
+            except Exception:
+                built = None
+
+        try:
+            self.model.remove_rows([probe_row])
+        except Exception:
+            pass
+        finally:
+            self._suppress_recs_preview_refresh = False
+
+        if isinstance(built, dict):
+            return built
+        return None
+
+    def _replace_row_item_by_code(self, row: int, code_u: str) -> bool:
+        try:
+            row = int(row)
+        except Exception:
+            return False
+
+        if row < 0 or row >= len(getattr(self, "items", []) or []):
+            return False
+
+        try:
+            old_item = copy.deepcopy(self.items[row])
+        except Exception:
+            old_item = dict(self.items[row] or {})
+
+        old_code = str(old_item.get("codigo") or "").strip().upper()
+        new_code = str(code_u or "").strip().upper()
+        if not new_code:
+            return False
+        if new_code == old_code:
+            return True
+
+        new_item = self._build_item_from_code_for_inline_edit(new_code)
+        if not isinstance(new_item, dict):
+            return False
+
+        self.items[row] = new_item
+
+        # Preservar observacion inline del item anterior.
+        old_obs = str(old_item.get("observacion") or "")
+        if old_obs:
+            try:
+                self.model.setData(self.model.index(row, 1), old_obs, Qt.EditRole)
+            except Exception:
+                pass
+
+        # Preservar cantidad anterior (la normalizacion la hace el modelo).
+        try:
+            old_qty_txt = str(old_item.get("cantidad") or "").strip()
+        except Exception:
+            old_qty_txt = ""
+        if old_qty_txt:
+            try:
+                self.model.setData(self.model.index(row, 3), old_qty_txt, Qt.EditRole)
+            except Exception:
+                pass
+
+        # Preservar tipo de precio; fallback por defecto a p_max.
+        old_tier = str(old_item.get("precio_tier") or "").strip().lower()
+        if not old_tier:
+            try:
+                old_pid = int(old_item.get("id_precioventa") or 0)
+            except Exception:
+                old_pid = 0
+            if old_pid == 2:
+                old_tier = "minimo"
+            elif old_pid == 3:
+                old_tier = "oferta"
+            else:
+                old_tier = "unitario"
+        if old_tier not in ("unitario", "minimo", "oferta"):
+            old_tier = "unitario"
+
+        idx_price = self.model.index(row, 4)
+        applied_price = False
+        new_cat = str(self.items[row].get("categoria") or "").strip().upper()
+        if new_cat == "SERVICIO":
+            old_override = old_item.get("precio_override", None)
+            if old_override is not None:
+                try:
+                    override_price = float(old_override)
+                    if override_price < 0:
+                        override_price = 0.0
+                    applied_price = bool(
+                        self.model.setData(
+                            idx_price,
+                            {"mode": "custom", "price": override_price},
+                            Qt.EditRole,
+                        )
+                    )
+                except Exception:
+                    applied_price = False
+
+        if not applied_price:
+            try:
+                applied_price = bool(
+                    self.model.setData(
+                        idx_price,
+                        {"mode": "tier", "tier": old_tier},
+                        Qt.EditRole,
+                    )
+                )
+            except Exception:
+                applied_price = False
+        if not applied_price:
+            try:
+                self.model.setData(
+                    idx_price,
+                    {"mode": "tier", "tier": "unitario"},
+                    Qt.EditRole,
+                )
+            except Exception:
+                pass
+
+        # Preservar descuento anterior.
+        try:
+            d_mode = str(old_item.get("descuento_mode") or "").strip().lower()
+            d_pct = float(old_item.get("descuento_pct") or 0.0)
+            d_amt = float(old_item.get("descuento_monto") or 0.0)
+        except Exception:
+            d_mode, d_pct, d_amt = "", 0.0, 0.0
+
+        discount_payload = {"mode": "clear"}
+        if d_mode == "amount" and d_amt > 0:
+            discount_payload = {"mode": "amount", "amount": d_amt}
+        elif d_mode == "percent" and d_pct > 0:
+            discount_payload = {"mode": "percent", "percent": d_pct}
+        elif d_pct > 0:
+            discount_payload = {"mode": "percent", "percent": d_pct}
+        elif d_amt > 0:
+            discount_payload = {"mode": "amount", "amount": d_amt}
+
+        try:
+            self.model.setData(self.model.index(row, 2), discount_payload, Qt.EditRole)
+        except Exception:
+            pass
+
+        top = self.model.index(row, 0)
+        bottom = self.model.index(row, self.model.columnCount() - 1)
+        self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
+        self._schedule_refresh_recs_preview()
+        return True
+
+    def _force_qty_price_on_row(self, row: int, qty: float, price_base: float, price_mode: str = ""):
         """
         Fuerza qty y precio recomendado en la fila real usando setData (recalcula totales).
         """
@@ -482,7 +838,45 @@ class UiMixin:
             except Exception:
                 pr = 0.0
 
-            if pr > 0:
+            mode_raw = str(price_mode or "").strip().lower()
+            mode_map = {
+                "oferta": "oferta",
+                "offer": "oferta",
+                "promo": "oferta",
+                "promocion": "oferta",
+                "promoción": "oferta",
+                "min": "minimo",
+                "mínimo": "minimo",
+                "minimo": "minimo",
+                "minimum": "minimo",
+                "max": "unitario",
+                "máximo": "unitario",
+                "maximo": "unitario",
+                "maximum": "unitario",
+                "base": "unitario",
+                "unitario": "unitario",
+                "unit": "unitario",
+                "normal": "unitario",
+                "lista": "unitario",
+            }
+            tier = mode_map.get(mode_raw, "")
+            applied_tier = False
+
+            try:
+                item = self.items[row] if 0 <= row < len(self.items) else {}
+                cat = str((item or {}).get("categoria") or "").strip().upper()
+            except Exception:
+                cat = ""
+
+            if tier and cat != "SERVICIO":
+                try:
+                    applied_tier = bool(
+                        self.model.setData(self.model.index(row, 4), {"mode": "tier", "tier": tier}, Qt.EditRole)
+                    )
+                except Exception:
+                    applied_tier = False
+
+            if (not applied_tier) and pr > 0:
                 try:
                     self.model.setData(self.model.index(row, 4), {"mode": "custom", "price": pr}, Qt.EditRole)
                 except Exception:
@@ -515,12 +909,7 @@ class UiMixin:
         # evitar duplicado por (codigo + precio)
         cur = self._current_code_prices()
         p6 = round(pr, 6) if pr > 0 else 0.0
-        if code_u in cur and p6 > 0 and p6 in cur.get(code_u, set()):
-            try:
-                Toast.notify(self, "Ese recomendado ya está agregado.", duration_ms=2200, fade_ms=700)
-            except Exception:
-                pass
-            return True
+        if code_u in cur and p6 > 0 and p6 in cur.get(code_u, set()):            return True
 
         items_before = getattr(self, "items", []) or []
         old_len = len(items_before)
@@ -557,14 +946,7 @@ class UiMixin:
             row = len(items) - 1
 
         if row is not None:
-            self._force_qty_price_on_row(row, q, pr)
-
-        if reason:
-            try:
-                Toast.notify(self, reason, duration_ms=4200, fade_ms=900)
-            except Exception:
-                pass
-
+            self._force_qty_price_on_row(row, q, pr)
         self._schedule_refresh_recs_preview()
         return True
 
@@ -657,16 +1039,6 @@ class UiMixin:
             except Exception:
                 pass
 
-            it = None
-            try:
-                items = getattr(self, "items", []) or []
-                if 0 <= row < len(items):
-                    it = items[row]
-            except Exception:
-                it = None
-
-            cat = str((it or {}).get("categoria") or "").upper()
-
             if col == 4:
                 try:
                     self.editar_precio_unitario()
@@ -681,9 +1053,23 @@ class UiMixin:
                     pass
                 return
 
-            if col == 1 and cat == "BOTELLAS":
+            if col == 0:
+                try:
+                    self.table.edit(model.index(row, col))
+                except Exception:
+                    pass
+                return
+
+            if col == 1:
                 try:
                     self.editar_observacion()
+                except Exception:
+                    pass
+                return
+
+            if col == 3:
+                try:
+                    self.table.edit(model.index(row, col))
                 except Exception:
                     pass
                 return
@@ -772,6 +1158,9 @@ class UiMixin:
             return
 
     def _schedule_refresh_recs_preview(self):
+        if bool(getattr(self, "_suppress_recs_preview_refresh", False)):
+            return
+
         if not self._recommendations_active():
             try:
                 if getattr(self, "model", None) is not None and hasattr(self.model, "clear_recommendations_preview"):
@@ -854,6 +1243,21 @@ class UiMixin:
 
     def eventFilter(self, obj, ev):
         try:
+            if obj is getattr(self, "entry_cedula", None) and ev.type() == QEvent.KeyPress:
+                if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    try:
+                        ai_doc = getattr(self, "_ai_doc", None)
+                        if ai_doc is not None:
+                            if hasattr(ai_doc, "is_popup_visible") and bool(ai_doc.is_popup_visible()):
+                                if hasattr(ai_doc, "pick_first") and bool(ai_doc.pick_first()):
+                                    return True
+                            if hasattr(ai_doc, "hide_popup"):
+                                ai_doc.hide_popup()
+                    except Exception:
+                        pass
+                    self._go_name()
+                    return True
+
             if obj is getattr(self, "entry_producto", None) and ev.type() == QEvent.KeyPress:
                 key = ev.key()
 
@@ -884,12 +1288,27 @@ class UiMixin:
             if obj is getattr(self, "table", None) and ev.type() == QEvent.KeyPress:
                 if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                     try:
+                        if self.table.state() == QAbstractItemView.EditingState:
+                            idx_edit = self.table.currentIndex()
+                            if idx_edit and idx_edit.isValid() and idx_edit.column() != 3:
+                                r = int(idx_edit.row())
+                                c = int(idx_edit.column())
+                                QTimer.singleShot(0, lambda rr=r, cc=c: self._move_inline_to_right(rr, cc))
+                            return False
+
                         idx = self.table.currentIndex()
                         if idx and idx.isValid():
                             row = idx.row()
                             if hasattr(self.model, "is_preview_row") and bool(self.model.is_preview_row(row)):
                                 if self._try_add_preview_from_row(row):
                                     return True
+                                return True
+
+                            if idx.column() in (0, 1, 2, 3, 4):
+                                self.table.edit(idx)
+                                return True
+                            if idx.column() == 5:
+                                return True
                     except Exception:
                         pass
 
@@ -905,18 +1324,47 @@ class UiMixin:
         central = QWidget()
         self.setCentralWidget(central)
         main = QVBoxLayout(central)
+        main.setContentsMargins(10, 8, 10, 10)
+        main.setSpacing(7)
 
         grp_cli = QGroupBox("Datos del Cliente")
-        form_cli = QFormLayout()
+        form_cli = QGridLayout()
+        form_cli.setContentsMargins(10, 8, 10, 8)
+        form_cli.setHorizontalSpacing(8)
+        form_cli.setVerticalSpacing(6)
         self.entry_cliente = QLineEdit()
         self.entry_cedula = QLineEdit()
         self.entry_telefono = QLineEdit()
-        self.lbl_doc = QLabel(id_label_for_country(APP_COUNTRY) + ":")
-        form_cli.addRow("Nombre Completo:", self.entry_cliente)
-        form_cli.addRow(self.lbl_doc, self.entry_cedula)
-        form_cli.addRow("Teléfono:", self.entry_telefono)
+        self.combo_tipo_documento = QComboBox()
+        self.entry_cliente.setClearButtonEnabled(True)
+        self.entry_cedula.setClearButtonEnabled(True)
+        self.entry_telefono.setClearButtonEnabled(True)
+        self.combo_tipo_documento.setMinimumHeight(28)
+        self.combo_tipo_documento.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.combo_tipo_documento.setMinimumWidth(112)
+        self.combo_tipo_documento.setMaximumWidth(190)
+        for r in (self._doc_type_rules() or []):
+            code = str(r.get("nombre") or "").strip().upper()
+            if not code:
+                continue
+            self.combo_tipo_documento.addItem(code, code)
+        if self.combo_tipo_documento.count() > 0:
+            # Siempre iniciar con el primer tipo disponible del pais.
+            self.combo_tipo_documento.setCurrentIndex(0)
+        self.combo_tipo_documento.currentIndexChanged.connect(self._on_doc_type_changed)
+        lbl_name = QLabel("Nombre Completo:")
+        lbl_phone = QLabel("Telefono:")
+        form_cli.addWidget(self.combo_tipo_documento, 0, 0)
+        form_cli.addWidget(self.entry_cedula, 0, 1, 1, 2)
+        form_cli.addWidget(lbl_phone, 0, 3)
+        form_cli.addWidget(self.entry_telefono, 0, 4)
+        form_cli.addWidget(lbl_name, 1, 0)
+        form_cli.addWidget(self.entry_cliente, 1, 1, 1, 4)
+        form_cli.setColumnStretch(2, 3)
+        form_cli.setColumnStretch(4, 2)
+        self._apply_client_validators()
         grp_cli.setLayout(form_cli)
-        main.addWidget(grp_cli)
+        grp_cli.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         self._wire_enter_flow()
 
@@ -927,35 +1375,37 @@ class UiMixin:
         except Exception:
             pass
 
-        htop = QHBoxLayout()
+        rate_row = QHBoxLayout()
+        rate_row.setContentsMargins(0, 0, 0, 0)
+        rate_row.setSpacing(5)
 
         self.btn_moneda = self._make_tool_icon(
             "💱", "Cambiar moneda y configurar tasa", self.abrir_dialogo_moneda_y_tasa
         )
+        self.btn_moneda.setFixedSize(28, 28)
 
         self.lbl_moneda = QLabel()
         self.lbl_moneda.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.lbl_moneda.setMinimumWidth(105)
+        self.lbl_moneda.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         btn_listado = QPushButton("Listado de productos")
-        self._apply_btn_responsive(btn_listado, 140, 36)
+        self._apply_btn_responsive(btn_listado, 118, 28)
+        btn_listado.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn_listado.clicked.connect(self.abrir_listado_productos)
 
-        htop.addWidget(self.btn_moneda)
-        htop.addWidget(self.lbl_moneda)
-
-        htop.addStretch(1)
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(6)
 
         self._py_cash_mode = False
         if APP_COUNTRY == "PARAGUAY":
-            grp_pay = QGroupBox("Pago")
-            hp = QHBoxLayout(grp_pay)
-            hp.setContentsMargins(8, 6, 8, 6)
-
             self.btn_pay_card = QPushButton("Tarjeta")
             self.btn_pay_cash = QPushButton("Efectivo")
             for b in (self.btn_pay_card, self.btn_pay_cash):
-                self._apply_btn_responsive(b, 90, 32)
+                self._apply_btn_responsive(b, 86, 28)
                 b.setCheckable(True)
+                b.setProperty("role", "payment_toggle")
 
             self.btn_pay_card.setChecked(True)
 
@@ -965,32 +1415,70 @@ class UiMixin:
             self.pay_group.addButton(self.btn_pay_cash, 1)
             self.pay_group.buttonClicked.connect(self._on_py_payment_clicked)
 
-            hp.addWidget(self.btn_pay_card)
-            hp.addWidget(self.btn_pay_cash)
+            rate_row.addStretch(1)
+            rate_row.addWidget(self.btn_pay_card)
+            rate_row.addWidget(self.btn_pay_cash)
+            rate_row.addStretch(1)
 
-            htop.addWidget(grp_pay)
+            actions_row.addWidget(self.btn_moneda, 0)
+            actions_row.addWidget(self.lbl_moneda, 1)
+            actions_row.addWidget(btn_listado, 0)
 
         elif APP_COUNTRY == "PERU":
-            grp_pay = QGroupBox("Pago")
-            hp = QHBoxLayout(grp_pay)
-            hp.setContentsMargins(8, 6, 8, 6)
+            rate_row.addWidget(self.btn_moneda, 0)
+            rate_row.addWidget(self.lbl_moneda, 1)
+
+            pay_row = QHBoxLayout()
+            pay_row.setContentsMargins(0, 0, 0, 0)
+            pay_row.setSpacing(4)
 
             self.entry_metodo_pago = QLineEdit()
             self.entry_metodo_pago.setPlaceholderText("Método de pago (opcional)")
             self.entry_metodo_pago.setClearButtonEnabled(True)
-            self.entry_metodo_pago.setFixedWidth(220)
+            self.entry_metodo_pago.setFixedWidth(138)
+            self.entry_metodo_pago.setMinimumHeight(28)
 
-            hp.addWidget(self.entry_metodo_pago)
-            htop.addWidget(grp_pay)
+            pay_row.addWidget(self.entry_metodo_pago)
+            pay_row.addStretch(1)
+            actions_row.addLayout(pay_row, 1)
+            actions_row.addWidget(btn_listado, 0)
 
-        htop.addWidget(btn_listado)
-        main.addLayout(htop)
+        else:
+            rate_row.addWidget(self.btn_moneda, 0)
+            rate_row.addWidget(self.lbl_moneda, 1)
+            actions_row.addStretch(1)
+            actions_row.addWidget(btn_listado, 0)
+
+        grp_quick = QGroupBox("Acciones rápidas")
+        quick = QVBoxLayout(grp_quick)
+        quick.setContentsMargins(8, 5, 8, 5)
+        quick.setSpacing(4)
+        quick.addLayout(rate_row)
+        quick.addLayout(actions_row)
+        grp_quick.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        top_panel = QHBoxLayout()
+        top_panel.setContentsMargins(0, 0, 0, 0)
+        top_panel.setSpacing(6)
+        top_panel.addWidget(grp_cli, 13)
+        top_panel.addWidget(grp_quick, 7)
+
+        grp_cli.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        grp_quick.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        top_h = max(grp_cli.sizeHint().height(), grp_quick.sizeHint().height())
+        grp_cli.setFixedHeight(top_h)
+        grp_quick.setFixedHeight(top_h)
+        main.addLayout(top_panel)
 
         self._update_currency_label()
 
         grp_bus = QGroupBox("Búsqueda de Productos")
         vbus = QVBoxLayout()
+        vbus.setContentsMargins(6, 4, 6, 4)
+        vbus.setSpacing(4)
         hbus = QHBoxLayout()
+        hbus.setContentsMargins(0, 0, 0, 0)
+        hbus.setSpacing(6)
 
         self.entry_producto = QLineEdit()
         self.entry_producto.setPlaceholderText("Código, nombre, categoría o tipo")
@@ -1000,16 +1488,18 @@ class UiMixin:
             self.entry_producto.returnPressed.connect(self._on_return_pressed)
 
         self.entry_producto.installEventFilter(self)
+        self.entry_cedula.installEventFilter(self)
 
         lbl_bus = QLabel("Código o Nombre:")
 
         btn_agregar_srv = QPushButton("Agregar Servicio")
-        self._apply_btn_responsive(btn_agregar_srv, 110, 36)
+        self._apply_btn_responsive(btn_agregar_srv, 104, 30)
         btn_agregar_srv.setToolTip("Agregar un ítem de tipo SERVICIO / personalizado")
         btn_agregar_srv.clicked.connect(self.agregar_producto_personalizado)
 
         self.btn_autocompletar = QPushButton("Autocompletar")
-        self._apply_btn_responsive(self.btn_autocompletar, 125, 36)
+        self.btn_autocompletar.setProperty("variant", "primary")
+        self._apply_btn_responsive(self.btn_autocompletar, 116, 30)
         self.btn_autocompletar.setToolTip("Agrega productos recomendados por historial (F9 o Enter vacío agrega 1 a 1).")
         self.btn_autocompletar.clicked.connect(self._on_autocomplete_clicked)
         self._apply_recommendations_ui_state()
@@ -1021,12 +1511,14 @@ class UiMixin:
 
         vbus.addLayout(hbus)
         grp_bus.setLayout(vbus)
+        grp_bus.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         main.addWidget(grp_bus)
 
         grp_tab = QGroupBox("Productos Seleccionados")
         vtab = QVBoxLayout()
         self.table = QTableView()
         self.model = ItemsModel(self.items)
+        self.model.set_code_edit_handler(self._replace_row_item_by_code)
         self.table.setModel(self.model)
 
         self.table.installEventFilter(self)
@@ -1048,22 +1540,34 @@ class UiMixin:
 
         self.qty_delegate = QuantityDelegate(self.table)
         self.table.setItemDelegateForColumn(3, self.qty_delegate)
+        self.inline_text_delegate = InlineTextDelegate(self.table)
+        self.table.setItemDelegateForColumn(0, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(1, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(2, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(4, self.inline_text_delegate)
         try:
             self.qty_delegate.closeEditor.connect(self._on_qty_editor_closed)
         except Exception:
             pass
 
-        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # Doble clic se maneja manualmente en _double_click_tabla para evitar
+        # que, tras abrir un modal, Qt abra además el editor inline.
+        self.table.setEditTriggers(QAbstractItemView.EditKeyPressed)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(3, 96)
 
         self.act_edit = QAction("Editar observación…", self)
         self.act_edit.triggered.connect(self.editar_observacion)
@@ -1084,27 +1588,43 @@ class UiMixin:
         self.table.customContextMenuRequested.connect(self.mostrar_menu_tabla)
         self.table.doubleClicked.connect(self._double_click_tabla)
         QShortcut(QKeySequence.Delete, self.table, activated=self.eliminar_producto)
+        self._excel_table = ExcelTableController(
+            self.table,
+            allow_copy=True,
+            allow_paste=True,
+            allow_cut=True,
+            clear_on_delete=False,
+            move_on_enter=False,
+            move_on_tab=True,
+            skip_enter_preview_rows=True,
+        )
 
         vtab.addWidget(self.table)
         grp_tab.setLayout(vtab)
-        main.addWidget(grp_tab)
+        main.addWidget(grp_tab, 1)
 
         hact = QHBoxLayout()
+        hact.setContentsMargins(0, 2, 0, 0)
+        hact.setSpacing(8)
 
         btn_prev = QPushButton("Previsualizar")
         self._apply_btn_responsive(btn_prev, 120, 36)
         btn_prev.clicked.connect(self.previsualizar_datos)
 
         btn_gen = QPushButton("Generar Cotización")
+        btn_gen.setProperty("variant", "primary")
         self._apply_btn_responsive(btn_gen, 140, 36)
         btn_gen.clicked.connect(self.generar_cotizacion)
 
         btn_lim = QPushButton("Limpiar")
+        btn_lim.setProperty("variant", "danger")
         self._apply_btn_responsive(btn_lim, 110, 36)
         btn_lim.clicked.connect(self.limpiar_formulario)
 
+        hact.addStretch(1)
         for w in (btn_prev, btn_gen, btn_lim):
             hact.addWidget(w)
         main.addLayout(hact)
 
         self._schedule_refresh_recs_preview()
+        QTimer.singleShot(0, self._go_doc)

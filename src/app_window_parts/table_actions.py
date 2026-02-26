@@ -15,6 +15,29 @@ from .models import CAN_EDIT_UNIT_PRICE
 
 
 class TableActionsMixin:
+    def _selected_item_rows(self) -> list[int]:
+        sm = self.table.selectionModel()
+        if sm is None:
+            return []
+
+        rows = sorted(
+            {
+                int(ix.row())
+                for ix in (sm.selectedIndexes() or [])
+                if 0 <= int(ix.row()) < len(self.items)
+            }
+        )
+        if rows:
+            return rows
+
+        try:
+            cur = sm.currentIndex()
+        except Exception:
+            cur = QModelIndex()
+        if cur.isValid() and 0 <= int(cur.row()) < len(self.items):
+            return [int(cur.row())]
+        return []
+
     def mostrar_menu_tabla(self, pos):
         index = self.table.indexAt(pos)
         if not index.isValid():
@@ -34,13 +57,10 @@ class TableActionsMixin:
         can_edit_price = (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE
         if can_edit_price:
             menu.addAction(self.act_edit_price)
-            self.act_clear_price.setEnabled(item.get("precio_override") is not None)
-            menu.addAction(self.act_clear_price)
 
-        if cat in ("BOTELLAS", "SERVICIO"):
-            if menu.actions():
-                menu.addSeparator()
-            menu.addAction(self.act_edit)
+        if menu.actions():
+            menu.addSeparator()
+        menu.addAction(self.act_edit)
 
         if menu.actions():
             menu.addSeparator()
@@ -67,8 +87,7 @@ class TableActionsMixin:
             return
 
         if col in (0, 1):  # Código o Producto → Observación
-            if cat in ("BOTELLAS", "SERVICIO"):
-                self._abrir_dialogo_observacion(row, item)
+            self._abrir_dialogo_observacion(row, item)
 
     def _abrir_dialogo_descuento(self, row: int):
         if row < 0 or row >= len(self.items):
@@ -85,10 +104,10 @@ class TableActionsMixin:
     def editar_descuento_item(self):
         row = self._ctx_row
         if row is None:
-            sel = self.table.selectionModel().selectedRows()
-            if not sel:
+            rows = self._selected_item_rows()
+            if not rows:
                 return
-            row = sel[0].row()
+            row = rows[0]
         self._abrir_dialogo_descuento(row)
 
     def _abrir_selector_precio(self, row: int):
@@ -116,24 +135,22 @@ class TableActionsMixin:
         )
 
     def editar_observacion(self):
-        sel = self.table.selectionModel().selectedRows()
-        if not sel:
+        rows = self._selected_item_rows()
+        if not rows:
             return
-        row = sel[0].row()
+        row = rows[0]
         if row < 0 or row >= len(self.items):
             return
         item = self.items[row]
-        if (item.get("categoria") or "").upper() not in ("BOTELLAS", "SERVICIO"):
-            return
         self._abrir_dialogo_observacion(row, item)
 
     def editar_precio_unitario(self):
         row = self._ctx_row
         if row is None:
-            sel = self.table.selectionModel().selectedRows()
-            if not sel:
+            rows = self._selected_item_rows()
+            if not rows:
                 return
-            row = sel[0].row()
+            row = rows[0]
         self._abrir_selector_precio(row)
 
     def _recalc_price_from_rules(self, item: dict):
@@ -141,24 +158,40 @@ class TableActionsMixin:
         (Mantenido tal cual) Recalcula precio/subtotal/descuento/total en base.
         """
         from .models import _price_from_tier
-        from ..pricing import precio_unitario_por_categoria
+        from ..pricing import precio_unitario_por_categoria, default_price_id_for_product
 
         cat = (item.get("categoria") or "").upper()
         qty = float(nz(item.get("cantidad"), 0.0))
         base_prod = item.get("_prod") or {}
 
         override = item.get("precio_override", None)
+        if cat != "SERVICIO":
+            override = None
+            item["precio_override"] = None
         if override is not None:
             unit_price = float(override)
+            item["id_precioventa"] = 4
         elif item.get("precio_tier"):
             unit_price = float(_price_from_tier(base_prod, item["precio_tier"]) or 0.0)
             if unit_price <= 0:
                 unit_price = float(
                     precio_unitario_por_categoria(cat, base_prod, qty) or 0.0
                 )
+            tier_l = str(item.get("precio_tier") or "").strip().lower()
+            if "min" in tier_l:
+                item["id_precioventa"] = 2
+            elif "oferta" in tier_l or "promo" in tier_l:
+                item["id_precioventa"] = 3
+            elif "base" in tier_l:
+                item["id_precioventa"] = int(default_price_id_for_product(base_prod))
+            else:
+                item["id_precioventa"] = 1
         else:
             unit_price = float(
                 precio_unitario_por_categoria(cat, base_prod, qty) or 0.0
+            )
+            item["id_precioventa"] = (
+                int(default_price_id_for_product(base_prod)) if cat != "SERVICIO" else 4
             )
 
         item["precio"] = unit_price
@@ -183,18 +216,28 @@ class TableActionsMixin:
         item["total"] = total
 
     def quitar_reescritura_precio(self):
-        sel = self.table.selectionModel().selectedRows()
-        if not sel:
+        from ..pricing import default_price_id_for_product
+
+        rows = self._selected_item_rows()
+        if not rows:
             return
-        rows = [ix.row() for ix in sel if 0 <= ix.row() < len(self.items)]
 
         for r in rows:
             idx = self.model.index(r, 4)
-            self.model.setData(idx, {"mode": "tier", "tier": "base"}, Qt.EditRole)
+            item = self.items[r]
+            cat = (item.get("categoria") or "").upper()
+            if cat == "SERVICIO":
+                continue
+            pid = int(default_price_id_for_product(item.get("_prod") or {}))
+            tier = "unitario"
+            if pid == 2:
+                tier = "minimo"
+            elif pid == 3:
+                tier = "oferta"
+            self.model.setData(idx, {"mode": "tier", "tier": tier}, Qt.EditRole)
 
     def eliminar_producto(self):
-        sel = self.table.selectionModel().selectedRows()
-        if not sel:
+        rows = self._selected_item_rows()
+        if not rows:
             return
-        rows = [ix.row() for ix in sel]
         self.model.remove_rows(rows)

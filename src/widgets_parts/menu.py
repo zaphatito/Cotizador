@@ -27,9 +27,15 @@ from ..config import APP_CURRENCY, get_secondary_currencies
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.rates_repo import load_rates, set_rate
 
-from ..catalog_sync import sync_catalog_from_excel_path, load_catalog_from_db
+from ..catalog_sync import (
+    sync_catalog_from_excel_path,
+    load_catalog_from_db,
+    validate_products_catalog_df,
+    products_update_required_message,
+)
 
 from .rates_history_dialog import RatesHistoryDialog
+from .clients_editor_dialog import ClientsEditorDialog
 
 log = get_logger(__name__)
 
@@ -38,7 +44,7 @@ class RatesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Tasas de cambio (DB)")
-        self.resize(420, 220)
+        self.setMinimumWidth(380)
 
         self._edits: dict[str, QLineEdit] = {}
 
@@ -64,6 +70,7 @@ class RatesDialog(QDialog):
 
         btns = QHBoxLayout()
         btn_save = QPushButton("Guardar")
+        btn_save.setProperty("variant", "primary")
         btn_close = QPushButton("Cerrar")
         btn_save.clicked.connect(self._save)
         btn_close.clicked.connect(self.reject)
@@ -71,6 +78,7 @@ class RatesDialog(QDialog):
         btns.addWidget(btn_save)
         btns.addWidget(btn_close)
         layout.addLayout(btns)
+        self.adjustSize()
 
     def _save(self):
         db_path = resolve_db_path()
@@ -155,8 +163,10 @@ class MainMenuWindow(QMainWindow):
         lay = QVBoxLayout(w)
 
         self.btn_new = QPushButton("➕ Crear nueva cotización")
+        self.btn_new.setProperty("variant", "primary")
         btn_config = QPushButton("⚙️ Configuración")
         btn_rates_hist = QPushButton("📈 Ver histórico de tasas")
+        btn_clients = QPushButton("👥 Editar clientes")
         btn_update = QPushButton("📦 Actualizar productos")
         btn_open_quotes = QPushButton("📁 Abrir carpeta cotizaciones")
         btn_close = QPushButton("Cerrar menú")
@@ -164,6 +174,7 @@ class MainMenuWindow(QMainWindow):
         self.btn_new.clicked.connect(self._open_new_quote)
         btn_config.clicked.connect(self._open_config_dialog)
         btn_rates_hist.clicked.connect(self._open_rates_history)
+        btn_clients.clicked.connect(self._open_clients_editor)
         btn_update.clicked.connect(self._update_products_choose_excel)
         btn_open_quotes.clicked.connect(self._open_quotes_folder)
         btn_close.clicked.connect(self.close)
@@ -172,6 +183,7 @@ class MainMenuWindow(QMainWindow):
         lay.addWidget(btn_config)
         lay.addSpacing(6)
         lay.addWidget(btn_rates_hist)
+        lay.addWidget(btn_clients)
         lay.addWidget(btn_update)
         lay.addSpacing(10)
         lay.addWidget(btn_open_quotes)
@@ -182,6 +194,14 @@ class MainMenuWindow(QMainWindow):
         self._apply_catalog_gate()
 
     def closeEvent(self, event):
+        try:
+            p = self.parentWidget()
+            if p is not None and p.isVisible():
+                self.hide()
+                event.ignore()
+                return
+        except Exception:
+            pass
         try:
             MainMenuWindow._instance = None
         except Exception:
@@ -195,17 +215,36 @@ class MainMenuWindow(QMainWindow):
         self._apply_catalog_gate()
         self._rebuild_ai_index_soon()
 
-    def _has_products(self) -> bool:
+    def _catalog_health(self) -> tuple[bool, str]:
         try:
-            df = getattr(self.catalog_manager, "df_productos", None)
-            return (df is not None) and (not df.empty)
+            mgr = self.catalog_manager
         except Exception:
-            return False
+            return False, "No se pudo leer el catalogo de productos."
+        try:
+            if mgr is not None and hasattr(mgr, "catalog_health"):
+                return mgr.catalog_health()
+        except Exception:
+            pass
+        try:
+            df = getattr(mgr, "df_productos", None)
+        except Exception:
+            return False, "No se pudo leer el catalogo de productos."
+        return validate_products_catalog_df(df)
+
+    def _has_products(self) -> bool:
+        ok, _reason = self._catalog_health()
+        return bool(ok)
 
     def _apply_catalog_gate(self):
-        ok = self._has_products()
+        ok, reason = self._catalog_health()
         self.btn_new.setEnabled(ok)
-        tip = "Primero importa/actualiza productos para poder crear cotizaciones."
+        tip = (
+            "Primero importa/actualiza productos para poder crear cotizaciones."
+            if ok
+            else products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+        )
+        if (not ok) and (not tip.strip()):
+            tip = reason or "Debes actualizar productos."
         self.btn_new.setToolTip("" if ok else tip)
 
     def _rebuild_ai_index_soon(self):
@@ -221,11 +260,15 @@ class MainMenuWindow(QMainWindow):
         QTimer.singleShot(0, _run)
 
     def _open_new_quote(self):
-        if not self._has_products():
+        ok, reason = self._catalog_health()
+        if not ok:
+            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            if not msg.strip():
+                msg = reason or "Debes actualizar productos."
             QMessageBox.warning(
                 self,
-                "Sin productos",
-                "No puedes crear cotizaciones sin productos.\n\nUsa Actualizar productos.",
+                "Catalogo invalido",
+                msg,
             )
             self._apply_catalog_gate()
             return
@@ -244,6 +287,11 @@ class MainMenuWindow(QMainWindow):
 
     def _open_rates_history(self):
         dlg = RatesHistoryDialog(self, base_currency=APP_CURRENCY, quote_events=self.quote_events)
+        dlg.exec()
+        self._close_soon()
+
+    def _open_clients_editor(self):
+        dlg = ClientsEditorDialog(self, app_icon=self._app_icon)
         dlg.exec()
         self._close_soon()
 
@@ -288,8 +336,12 @@ class MainMenuWindow(QMainWindow):
             df_productos, df_presentaciones = load_catalog_from_db(con)
             con.close()
 
-            if df_productos is None or df_productos.empty:
-                raise RuntimeError("products_current quedo vacio luego de actualizar.")
+            ok, reason = validate_products_catalog_df(df_productos)
+            if not ok:
+                raise RuntimeError(
+                    "El catalogo quedo invalido luego de actualizar: "
+                    f"{reason}. Revisa el Excel e intenta de nuevo."
+                )
 
             self.catalog_manager.set_catalog(df_productos, df_presentaciones)
 

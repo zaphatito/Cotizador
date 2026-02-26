@@ -9,6 +9,7 @@ from typing import Dict, Any, Tuple, List
 from .currency import normalize_currency_code
 from .paths import DATA_DIR, user_docs_dir
 from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.api_identity import API_LOGIN_PASSWORD, build_api_settings
 from sqlModels.settings_repo import (
     get_setting,
     ensure_defaults,
@@ -23,6 +24,9 @@ DEFAULT_CONFIG_STR: dict[str, str] = {
     "company_type": "LA CASA DEL PERFUME",
     "store_id": "",
     "username": "",
+    "id_user_api": "",
+    "user_api": "",
+    "password_api_hash": "",
     "allow_no_stock": "0",
     "enable_ai": "0",
     "enable_recommendations": "1",
@@ -32,6 +36,15 @@ DEFAULT_CONFIG_STR: dict[str, str] = {
     "update_flags": "/CLOSEAPPLICATIONS",
     "log_dir": "",
     "log_level": "INFO",
+    "status_color_pagado": "#06863B",
+    "status_color_por_pagar": "#ECD060",
+    "status_color_pendiente": "#E67E22",
+    "status_color_reenviado": "#BF0DE3",
+    "status_color_no_aplica": "#811307",
+    "chat_theme_mode": "auto",
+    "chat_bubble_user_bg": "",
+    "chat_bubble_assist_bg": "",
+    "chat_send_bg": "",
 }
 
 # Categorías granel
@@ -254,6 +267,17 @@ def _seed_settings_once(con) -> None:
         for k, v in (seed_from_json or {}).items():
             set_setting(con, k, v)
 
+        # Calcula credenciales API en base a pais + compania seleccionados.
+        country_now = get_setting(con, "country", DEFAULT_CONFIG_STR["country"]).strip().upper()
+        company_now = get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]).strip().upper()
+        api_vals = build_api_settings(
+            country=country_now,
+            company_type=company_now,
+            password_plain=API_LOGIN_PASSWORD,
+        )
+        for k, v in api_vals.items():
+            set_setting(con, k, v)
+
         _set_meta(con, "settings_seeded", "1")
 
         if seed_from_json:
@@ -279,6 +303,9 @@ def _load_db_config() -> Dict[str, Any]:
     company_type = get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]).strip().upper()
     store_id = get_setting(con, "store_id", DEFAULT_CONFIG_STR["store_id"]).strip()
     username = get_setting(con, "username", DEFAULT_CONFIG_STR["username"]).strip()
+    id_user_api = get_setting(con, "id_user_api", DEFAULT_CONFIG_STR["id_user_api"]).strip()
+    user_api = get_setting(con, "user_api", DEFAULT_CONFIG_STR["user_api"]).strip()
+    password_api_hash = get_setting(con, "password_api_hash", DEFAULT_CONFIG_STR["password_api_hash"]).strip()
     allow_no_stock = get_setting(con, "allow_no_stock", DEFAULT_CONFIG_STR["allow_no_stock"]).strip()
     enable_ai = get_setting(con, "enable_ai", DEFAULT_CONFIG_STR["enable_ai"]).strip()
     enable_recs = get_setting(
@@ -303,6 +330,9 @@ def _load_db_config() -> Dict[str, Any]:
         "company_type": company_type if company_type in ALLOWED_COMPANY_TYPES else DEFAULT_CONFIG_STR["company_type"],
         "store_id": store_id,
         "username": username,
+        "id_user_api": id_user_api,
+        "user_api": user_api,
+        "password_api_hash": password_api_hash,
         "allow_no_stock": (allow_no_stock == "1"),
         "enable_ai": (enable_ai != "0"),
         "enable_recommendations": (enable_recs != "0"),
@@ -491,10 +521,10 @@ COUNTRY_CODE: str = _country_suffix(APP_COUNTRY)
 def id_label_for_country(country: str) -> str:
     c = (country or "").upper()
     if c == "PERU":
-        return "DNI/RUC"
+        return "DNI/CE/RUC/P"
     if c == "VENEZUELA":
-        return "CEDULA / RIF"
-    return "CEDULA / RUC"
+        return "V/E/J/P/G"
+    return "CI/RUC/P"
 
 
 def listing_allows_products() -> bool:

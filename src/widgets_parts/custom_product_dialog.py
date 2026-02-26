@@ -17,7 +17,7 @@ class CustomProductDialog(QDialog):
     def __init__(self, parent=None, app_icon: QIcon = QIcon()):
         super().__init__(parent)
         self.setWindowTitle("Agregar producto personalizado o servicio")
-        self.resize(420, 260)
+        self.setMinimumWidth(360)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
         self.resultado = None
@@ -43,8 +43,10 @@ class CustomProductDialog(QDialog):
         form.addRow("Cantidad:", self.edCant)
 
         btnGuardar = QPushButton("Guardar")
+        btnGuardar.setProperty("variant", "primary")
         btnGuardar.clicked.connect(self._guardar)
         form.addRow(btnGuardar)
+        self.adjustSize()
 
     def _guardar(self):
         from ..utils import to_float

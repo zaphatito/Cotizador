@@ -39,7 +39,7 @@ def upsert_presentations_snapshot(
       DEPARTAMENTO, GENERO, P_MAX, P_MIN, P_OFERTA
 
     Compat:
-      PRECIO_PRESENT, REQUIERE_BOTELLA
+      REQUIERE_BOTELLA
     """
     if df is None or df.empty:
         return
@@ -63,13 +63,9 @@ def upsert_presentations_snapshot(
         depto = _to_text(r.get("DEPARTAMENTO") or r.get("departamento")).upper()
         genero = _to_text(r.get("GENERO") or r.get("genero")).lower()
 
-        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("precio_present"), 0.0)
-        p_min = _to_float(r.get("P_MIN"), 0.0)
-        p_oferta = _to_float(r.get("P_OFERTA"), 0.0)
-
-        precio_present = _to_float(r.get("PRECIO_PRESENT"), p_max)
-        if precio_present <= 0:
-            precio_present = p_max
+        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("p_max"), 0.0)
+        p_min = _to_float(r.get("P_MIN") if "P_MIN" in r else r.get("p_min"), 0.0)
+        p_oferta = _to_float(r.get("P_OFERTA") if "P_OFERTA" in r else r.get("p_oferta"), 0.0)
 
         req = 1 if bool(r.get("REQUIERE_BOTELLA")) else 0
         fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
@@ -117,7 +113,6 @@ def upsert_presentations_snapshot(
                 float(p_max),
                 float(p_min),
                 float(p_oferta),
-                float(precio_present),
                 int(req),
                 0.0,
                 "",
@@ -135,7 +130,6 @@ def upsert_presentations_snapshot(
                 float(p_max),
                 float(p_min),
                 float(p_oferta),
-                float(precio_present),
                 int(req),
                 0.0,
                 "",
@@ -191,11 +185,11 @@ def upsert_presentations_snapshot(
                 import_id, codigo_norm, codigo, nombre, descripcion,
                 departamento, genero,
                 p_max, p_min, p_oferta,
-                precio_present, requiere_botella,
+                requiere_botella,
                 stock_disponible, codigos_producto,
                 fuente
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             rows_hist,
         )
@@ -207,11 +201,11 @@ def upsert_presentations_snapshot(
                 codigo_norm, codigo, nombre, descripcion,
                 departamento, genero,
                 p_max, p_min, p_oferta,
-                precio_present, requiere_botella,
+                requiere_botella,
                 stock_disponible, codigos_producto,
                 fuente, updated_at
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(codigo_norm, departamento, genero) DO UPDATE SET
                 codigo=excluded.codigo,
                 nombre=excluded.nombre,
@@ -221,7 +215,6 @@ def upsert_presentations_snapshot(
                 p_max=excluded.p_max,
                 p_min=excluded.p_min,
                 p_oferta=excluded.p_oferta,
-                precio_present=excluded.precio_present,
                 requiere_botella=excluded.requiere_botella,
                 stock_disponible=excluded.stock_disponible,
                 codigos_producto=excluded.codigos_producto,

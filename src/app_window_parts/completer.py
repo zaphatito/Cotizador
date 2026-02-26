@@ -122,7 +122,7 @@ class CompleterMixin:
             if w is getattr(self, "entry_cliente", None):
                 self._go_doc()
             elif w is getattr(self, "entry_cedula", None):
-                self._go_phone()
+                self._go_name()
             elif w is getattr(self, "entry_telefono", None):
                 self._go_product_search()
 

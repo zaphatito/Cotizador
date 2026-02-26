@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 
 from ..config import (
     APP_CURRENCY,
+    APP_COUNTRY,
     get_currency_context,
     set_currency_context,
     get_secondary_currencies,
@@ -72,6 +73,11 @@ class CurrencyMixin:
         cur, _sec_principal, rate_ctx = get_currency_context()
         base = self.base_currency
         cur = (cur or "").upper()
+
+        if APP_COUNTRY == "PARAGUAY":
+            shown = cur if cur else base
+            self.lbl_moneda.setText(shown)
+            return
 
         if cur == base:
             if getattr(self, "_rates", None):

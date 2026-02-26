@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QMessageBox, QDialog
 
 from ..config import ALLOW_NO_STOCK, CATS
+from ..pricing import price_for_price_id, default_price_id_for_product
 from ..utils import nz
 from ..presentations import map_pc_to_bottle_code, extract_ml_from_text, ml_from_pres_code_norm
 from ..widgets import SelectorTablaSimple
@@ -133,25 +134,25 @@ class PresentationsMixin:
 
         precio_max = float(
             nz(
-                pres.get("P_MAX", pres.get("p_max", pres.get("PRECIO_PRESENT", pres.get("precio_present", 0.0)))),
+                pres.get("P_MAX", pres.get("p_max", 0.0)),
                 0.0,
             )
         )
         precio_oferta = float(
             nz(
-                pres.get("P_OFERTA", pres.get("p_oferta", pres.get("precio_oferta", pres.get("precio_oferta_base", 0.0)))),
+                pres.get("P_OFERTA", pres.get("p_oferta", 0.0)),
                 0.0,
             )
         )
         precio_min = float(
             nz(
-                pres.get("P_MIN", pres.get("p_min", pres.get("precio_minimo", pres.get("precio_minimo_base", 0.0)))),
+                pres.get("P_MIN", pres.get("p_min", 0.0)),
                 0.0,
             )
         )
-        precio_pres = precio_max if precio_max > 0 else float(nz(pres.get("PRECIO_PRESENT"), 0.0))
+        precio_pres = precio_max if precio_max > 0 else 0.0
         precio_bot = (
-            float(nz(botella.get("precio_unitario"), 0.0)) if botella else 0.0
+            float(price_for_price_id(botella, default_price_id_for_product(botella))) if botella else 0.0
         )
         unit_price = precio_pres + precio_bot
         precio_oferta_total = (precio_oferta if precio_oferta > 0 else precio_pres) + precio_bot
@@ -215,12 +216,10 @@ class PresentationsMixin:
         item = {
             "_prod": {
                 "categoria": "PRESENTACION",
-                "precio_unitario": unit_price,
-                "precio_venta": unit_price,
-                "precio_oferta": precio_oferta_total,
-                "precio_oferta_base": precio_oferta_total,
-                "precio_minimo": precio_min_total,
-                "precio_minimo_base": precio_min_total,
+                "p_max": unit_price,
+                "p_oferta": precio_oferta_total,
+                "p_min": precio_min_total,
+                "precio_venta": 1,
             },
             "codigo": codigo_final,
             "producto": nombre_final,
@@ -236,6 +235,7 @@ class PresentationsMixin:
             "stock_disponible": float(stock_ref),
             "precio_override": None,
             "precio_tier": None,
+            "id_precioventa": 1,
         }
         self.model.add_item(item)
         return True
@@ -324,9 +324,22 @@ class PresentationsMixin:
             return
 
         pres_final = pres_candidates[0]
-        precio_pres = float(nz(pres_final.get("PRECIO_PRESENT"), 0.0))
-        precio_pc = float(nz(pc.get("precio_unitario", pc.get("precio_venta")), 0.0))
+        precio_pres = float(nz(pres_final.get("P_MAX", pres_final.get("p_max", 0.0)), 0.0))
+        precio_pres_oferta = float(
+            nz(pres_final.get("P_OFERTA", pres_final.get("p_oferta", 0.0)), 0.0)
+        )
+        precio_pres_min = float(
+            nz(pres_final.get("P_MIN", pres_final.get("p_min", 0.0)), 0.0)
+        )
+        precio_pc = float(price_for_price_id(pc, default_price_id_for_product(pc)))
         unit_price = precio_pres + precio_pc
+        oferta_price = (
+            (precio_pres_oferta if precio_pres_oferta > 0 else precio_pres) + precio_pc
+        )
+        min_price = (
+            (precio_pres_min if precio_pres_min > 0 else (precio_pres_oferta if precio_pres_oferta > 0 else precio_pres))
+            + precio_pc
+        )
 
         nombre_pres = (
             pres_final.get("NOMBRE") or pres_final.get("CODIGO_NORM") or pres_final.get("CODIGO")
@@ -352,7 +365,13 @@ class PresentationsMixin:
             stock_ref = stock_base if stock_base > 0 else 0.0
 
         item = {
-            "_prod": {"precio_unitario": unit_price},
+            "_prod": {
+                "categoria": "PRESENTACION",
+                "p_max": unit_price,
+                "p_oferta": oferta_price,
+                "p_min": min_price,
+                "precio_venta": 1,
+            },
             "codigo": codigo_final,
             "producto": nombre_final,
             "categoria": "PRESENTACION",
@@ -367,6 +386,7 @@ class PresentationsMixin:
             "stock_disponible": float(stock_ref),
             "precio_override": None,
             "precio_tier": None,
+            "id_precioventa": 1,
         }
         self.model.add_item(item)
 
@@ -376,28 +396,31 @@ class PresentationsMixin:
         essence_cats = {c.upper() for c in CATS}
         dep_is_presentation = dep in {"", "PRESENTACION", "PRESENTACIONES"}
         rel_codes = self._presentation_base_codes(pres)
-        base_candidates = [
+        base_pool = [
             p
             for p in self.productos
-            if (
-                (
-                    str(p.get("categoria", "")).strip().upper() in essence_cats
-                    if dep_is_presentation
-                    else (str(p.get("categoria", "")).strip().upper() == dep)
-                )
-            )
-            and ((not gen) or (str(p.get("genero", "")).strip().lower() == gen))
-            and (ALLOW_NO_STOCK or float(nz(p.get("cantidad_disponible"), 0.0)) > 0.0)
+            if (ALLOW_NO_STOCK or float(nz(p.get("cantidad_disponible"), 0.0)) > 0.0)
             and (not self._is_generic_category_row(p))
         ]
 
-        if rel_codes and base_candidates:
-            base_candidates.sort(
-                key=lambda p: (
-                    0 if str(p.get("id", "")).strip().upper() in rel_codes else 1,
-                    str(p.get("id", "")).strip().upper(),
-                )
-            )
+        def _matches_dep_and_gen(p: dict) -> bool:
+            cat = str(p.get("categoria", "")).strip().upper()
+            p_gen = str(p.get("genero", "")).strip().lower()
+            dep_ok = (cat in essence_cats) if dep_is_presentation else (cat == dep)
+            gen_ok = (not gen) or (p_gen == gen)
+            return dep_ok and gen_ok
+
+        base_candidates = [p for p in base_pool if _matches_dep_and_gen(p)]
+
+        if rel_codes:
+            rel_candidates = [
+                p
+                for p in base_pool
+                if str(p.get("id", "")).strip().upper() in rel_codes
+            ]
+            rel_filtered = [p for p in rel_candidates if _matches_dep_and_gen(p)]
+            if rel_filtered:
+                base_candidates = rel_filtered
 
         if not base_candidates:
             QMessageBox.warning(

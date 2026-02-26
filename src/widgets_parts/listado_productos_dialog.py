@@ -23,6 +23,7 @@ from ..config import (
 from ..pricing import precio_base_para_listado
 from ..utils import fmt_money_ui, nz
 from .helpers import _fmt_trim_decimal
+from .excel_table_behavior import ExcelTableController
 
 
 class ListadoProductosDialog(QDialog):
@@ -54,6 +55,8 @@ class ListadoProductosDialog(QDialog):
 
         self._rows_prod: list[dict] = []
         self._rows_pres: list[dict] = []
+        self._rows_pres_view: list[dict] = []
+        self._excel_tables: list[ExcelTableController] = []
 
         v = QVBoxLayout(self)
 
@@ -81,7 +84,23 @@ class ListadoProductosDialog(QDialog):
             )
             self.tabla_prod.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             self.tabla_prod.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            self.tabla_prod.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.tabla_prod.setSelectionBehavior(QAbstractItemView.SelectItems)
+            self.tabla_prod.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            self.tabla_prod.setAlternatingRowColors(True)
+            self.tabla_prod.setShowGrid(False)
+            self.tabla_prod.verticalHeader().setVisible(False)
+            self._excel_tables.append(
+                ExcelTableController(
+                    self.tabla_prod,
+                    allow_copy=True,
+                    allow_paste=False,
+                    allow_cut=False,
+                    clear_on_delete=False,
+                    move_on_enter=True,
+                    move_on_tab=True,
+                    skip_enter_preview_rows=False,
+                )
+            )
             layout_prod.addWidget(self.tabla_prod)
 
             self.tabs.addTab(self.tab_prod, "Productos")
@@ -133,7 +152,23 @@ class ListadoProductosDialog(QDialog):
             )
             self.tabla_pres.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             self.tabla_pres.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            self.tabla_pres.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.tabla_pres.setSelectionBehavior(QAbstractItemView.SelectItems)
+            self.tabla_pres.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            self.tabla_pres.setAlternatingRowColors(True)
+            self.tabla_pres.setShowGrid(False)
+            self.tabla_pres.verticalHeader().setVisible(False)
+            self._excel_tables.append(
+                ExcelTableController(
+                    self.tabla_pres,
+                    allow_copy=True,
+                    allow_paste=False,
+                    allow_cut=False,
+                    clear_on_delete=False,
+                    move_on_enter=True,
+                    move_on_tab=True,
+                    skip_enter_preview_rows=False,
+                )
+            )
             layout_pres.addWidget(self.tabla_pres)
 
             self.tabs.addTab(self.tab_pres, "Presentaciones")
@@ -170,7 +205,7 @@ class ListadoProductosDialog(QDialog):
                 precio = precio_base_para_listado(pr)
                 if not precio:
                     precio = nz(
-                        pr.get("PRECIO_PRESENT") or pr.get("precio_present") or pr.get("p_venta"),
+                        pr.get("P_MAX") or pr.get("p_max"),
                         0.0,
                     )
 
@@ -214,6 +249,7 @@ class ListadoProductosDialog(QDialog):
     def _pintar_tabla_pres(self, rows):
         if not self.tabla_pres:
             return
+        self._rows_pres_view = list(rows or [])
         self.tabla_pres.setRowCount(0)
         for r in rows:
             i = self.tabla_pres.rowCount()
@@ -282,4 +318,12 @@ class ListadoProductosDialog(QDialog):
 
         codigo = item_cod.text().strip()
         if self._on_select:
+            if source == "pres":
+                payload = (
+                    self._rows_pres_view[row]
+                    if 0 <= row < len(self._rows_pres_view)
+                    else {"codigo": codigo}
+                )
+                self._on_select(payload)
+                return
             self._on_select(codigo)

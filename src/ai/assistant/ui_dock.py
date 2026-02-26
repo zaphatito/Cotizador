@@ -14,9 +14,17 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QLineEdit, QColorDialog, QMessageBox,
     QSizePolicy, QLayout, QLayoutItem
 )
-from PySide6.QtCore import QSettings
+
+from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.settings_repo import set_setting
+from ...db_path import resolve_db_path
 
 AI_NAME = "Samuelito"
+
+CHAT_THEME_MODE_KEY = "chat_theme_mode"
+CHAT_BUBBLE_USER_BG_KEY = "chat_bubble_user_bg"
+CHAT_BUBBLE_ASSIST_BG_KEY = "chat_bubble_assist_bg"
+CHAT_SEND_BG_KEY = "chat_send_bg"
 
 
 @dataclass
@@ -437,7 +445,7 @@ class _TitleBar(QWidget):
 
 
 class ChatAppearanceDialog(QDialog):
-    """Dialog de personalización. Guarda en QSettings (por dispositivo)."""
+    """Dialog de personalización. Guarda en SQLite local."""
     def __init__(self, dock: "AssistantDock", parent=None):
         super().__init__(parent)
         self.dock = dock
@@ -685,20 +693,115 @@ class AssistantDock(QDockWidget):
                 except Exception:
                     pass
 
-    # ---------- QSettings ----------
-    def _settings(self) -> QSettings:
-        return QSettings("SistemaCotizaciones", "AssistantChat")
+    # ---------- SQLite settings ----------
+    def _db_conn(self):
+        con = connect(resolve_db_path())
+        ensure_schema(con)
+        return con
+
+    def _read_chat_prefs_from_db_raw(self) -> tuple[dict[str, str], dict[str, bool]]:
+        out = {
+            "theme_mode": "auto",
+            "bubble_user_bg": "",
+            "bubble_assist_bg": "",
+            "send_bg": "",
+        }
+        exists = {k: False for k in out.keys()}
+
+        con = None
+        try:
+            con = self._db_conn()
+
+            def _read_key(db_key: str) -> tuple[str, bool]:
+                row = con.execute("SELECT value FROM settings WHERE key = ?", (db_key,)).fetchone()
+                if row is None:
+                    return "", False
+                val = row["value"]
+                return ("" if val is None else str(val).strip(), True)
+
+            mode, mode_exists = _read_key(CHAT_THEME_MODE_KEY)
+            user_bg, user_exists = _read_key(CHAT_BUBBLE_USER_BG_KEY)
+            assist_bg, assist_exists = _read_key(CHAT_BUBBLE_ASSIST_BG_KEY)
+            send_bg, send_exists = _read_key(CHAT_SEND_BG_KEY)
+
+            out["theme_mode"] = mode or "auto"
+            out["bubble_user_bg"] = user_bg
+            out["bubble_assist_bg"] = assist_bg
+            out["send_bg"] = send_bg
+
+            exists["theme_mode"] = mode_exists
+            exists["bubble_user_bg"] = user_exists
+            exists["bubble_assist_bg"] = assist_exists
+            exists["send_bg"] = send_exists
+        except Exception:
+            pass
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        return out, exists
+
+    def _read_chat_prefs_from_qsettings_legacy(self) -> dict[str, str]:
+        try:
+            from PySide6.QtCore import QSettings
+        except Exception:
+            return {}
+
+        s = QSettings("SistemaCotizaciones", "AssistantChat")
+        return {
+            "theme_mode": str(s.value("theme_mode", "auto") or "auto").strip(),
+            "bubble_user_bg": str(s.value("bubble_user_bg", "") or "").strip(),
+            "bubble_assist_bg": str(s.value("bubble_assist_bg", "") or "").strip(),
+            "send_bg": str(s.value("send_bg", "") or "").strip(),
+        }
+
+    def _save_chat_prefs_to_db(self, prefs: dict[str, str]) -> None:
+        con = None
+        try:
+            con = self._db_conn()
+            with tx(con):
+                set_setting(con, CHAT_THEME_MODE_KEY, str(prefs.get("theme_mode", "auto") or "auto").strip().lower())
+                set_setting(con, CHAT_BUBBLE_USER_BG_KEY, str(prefs.get("bubble_user_bg", "") or "").strip())
+                set_setting(con, CHAT_BUBBLE_ASSIST_BG_KEY, str(prefs.get("bubble_assist_bg", "") or "").strip())
+                set_setting(con, CHAT_SEND_BG_KEY, str(prefs.get("send_bg", "") or "").strip())
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     def load_preferences(self):
-        s = self._settings()
-        mode = str(s.value("theme_mode", "auto") or "auto").strip().lower()
+        db_vals, exists = self._read_chat_prefs_from_db_raw()
+        legacy = self._read_chat_prefs_from_qsettings_legacy()
+
+        merged = {
+            "theme_mode": db_vals.get("theme_mode", "auto"),
+            "bubble_user_bg": db_vals.get("bubble_user_bg", ""),
+            "bubble_assist_bg": db_vals.get("bubble_assist_bg", ""),
+            "send_bg": db_vals.get("send_bg", ""),
+        }
+
+        migrated = False
+        for k in ("theme_mode", "bubble_user_bg", "bubble_assist_bg", "send_bg"):
+            if not exists.get(k, False):
+                lv = str(legacy.get(k, "") or "").strip()
+                if lv:
+                    merged[k] = lv
+                    migrated = True
+
+        mode = str(merged.get("theme_mode", "auto") or "auto").strip().lower()
         if mode not in ("auto", "light", "dark"):
             mode = "auto"
         self._theme_mode = mode
+        merged["theme_mode"] = mode
 
-        user_bg = str(s.value("bubble_user_bg", "") or "").strip()
-        assist_bg = str(s.value("bubble_assist_bg", "") or "").strip()
-        send_bg = str(s.value("send_bg", "") or "").strip()
+        user_bg = str(merged.get("bubble_user_bg", "") or "").strip()
+        assist_bg = str(merged.get("bubble_assist_bg", "") or "").strip()
+        send_bg = str(merged.get("send_bg", "") or "").strip()
 
         if user_bg:
             self._theme_overrides["bubble_user_bg"] = user_bg
@@ -707,14 +810,21 @@ class AssistantDock(QDockWidget):
         if send_bg:
             self._theme_overrides["send_bg"] = send_bg
 
+        if migrated:
+            try:
+                self._save_chat_prefs_to_db(merged)
+            except Exception:
+                pass
+
     def save_preferences(self):
-        s = self._settings()
-        s.setValue("theme_mode", self._theme_mode)
-        s.setValue("bubble_user_bg", self._theme_overrides.get("bubble_user_bg", ""))
-        s.setValue("bubble_assist_bg", self._theme_overrides.get("bubble_assist_bg", ""))
-        s.setValue("send_bg", self._theme_overrides.get("send_bg", ""))
+        prefs = {
+            "theme_mode": self._theme_mode,
+            "bubble_user_bg": self._theme_overrides.get("bubble_user_bg", ""),
+            "bubble_assist_bg": self._theme_overrides.get("bubble_assist_bg", ""),
+            "send_bg": self._theme_overrides.get("send_bg", ""),
+        }
         try:
-            s.sync()
+            self._save_chat_prefs_to_db(prefs)
         except Exception:
             pass
 
