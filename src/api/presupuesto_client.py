@@ -175,6 +175,7 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
     for it in (items_base or []):
         tipo_prod = _tipo_prod_from_item(it)
         nombre = str(it.get("nombre") or it.get("producto") or "").strip()
+        observacion = str(it.get("observacion") or "").strip()
         if not nombre:
             nombre = str(it.get("codigo") or "").strip()
         if not nombre:
@@ -189,6 +190,7 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
                 "cantidad": _quantity_for_api(it, cod_pais=cod_pais),
                 "id_precioventa": int(_price_id_from_item(it, tipo_prod)),
                 "tipo_prod": tipo_prod,
+                "observacion": observacion,
             }
         )
     return out
@@ -557,6 +559,7 @@ def build_presupuesto_payload(
     cedula: str,
     telefono: str,
     metodo_pago: str,
+    estado: str = "",
     tipo_documento: str = "",
     cod_pais: str,
     empresa: str,
@@ -580,6 +583,7 @@ def build_presupuesto_payload(
             "tipo_documento": str(tipo_documento or "").strip().upper(),
             "tlf_cliente": str(telefono or ""),
             "pago": (str(metodo_pago or "").strip() or None),
+            "estado": (str(estado or "").strip() or None),
             "cod_pais": str(cod_pais or ""),
             "empresa": str(empresa or ""),
             "cantidad_items": int(len(presupuesto_items)),
@@ -597,6 +601,7 @@ def login_and_send_presupuesto(
     cedula: str,
     telefono: str,
     metodo_pago: str,
+    estado: str = "",
     tipo_documento: str = "",
     items_base: list[dict],
     adjuntos: list[dict[str, str]] | None = None,
@@ -623,6 +628,7 @@ def login_and_send_presupuesto(
         cedula=cedula,
         telefono=telefono,
         metodo_pago=metodo_pago,
+        estado=estado,
         tipo_documento=tipo_documento_norm,
         cod_pais=cod_pais,
         empresa=(str(company_type or "").strip() or "LA CASA DEL PERFUME"),
@@ -922,6 +928,7 @@ def send_quote_from_history_once(
             cedula=str(header.get("cedula") or ""),
             telefono=str(header.get("telefono") or ""),
             metodo_pago=str(header.get("metodo_pago") or ""),
+            estado=str(header.get("estado") or ""),
             tipo_documento=tipo_documento_api,
             items_base=items_base,
             login_password=login_password,

@@ -150,6 +150,7 @@ def test_login_and_send_presupuesto_sends_wrapped_presupuesto_payload(monkeypatc
         {
             "codigo": "SKU-001",
             "producto": "Producto Demo",
+            "observacion": "Color ambar",
             "cantidad": 1,
             "precio": 10.0,
         }
@@ -177,6 +178,7 @@ def test_login_and_send_presupuesto_sends_wrapped_presupuesto_payload(monkeypatc
         cedula="DNI-12345678",
         telefono="555",
         metodo_pago="EFECTIVO",
+        estado="PENDIENTE",
         items_base=items,
         adjuntos=[
             {
@@ -213,8 +215,10 @@ def test_login_and_send_presupuesto_sends_wrapped_presupuesto_payload(monkeypatc
     pres = body.get("presupuesto") or {}
     assert pres.get("id_cotizador") == "001"
     assert pres.get("tipo_documento") == "DNI"
+    assert pres.get("estado") == "PENDIENTE"
     assert isinstance(pres.get("presupuesto_prod"), list)
     assert len(pres.get("presupuesto_prod")) == 1
+    assert pres["presupuesto_prod"][0].get("observacion") == "Color ambar"
 
 
 def test_login_and_send_presupuesto_retries_with_flat_payload_when_wrapper_is_not_allowed(monkeypatch):
