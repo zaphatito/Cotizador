@@ -521,10 +521,10 @@ COUNTRY_CODE: str = _country_suffix(APP_COUNTRY)
 def id_label_for_country(country: str) -> str:
     c = (country or "").upper()
     if c == "PERU":
-        return "DNI/CE/RUC/P"
+        return "Documento"
     if c == "VENEZUELA":
-        return "V/E/J/P/G"
-    return "CI/RUC/P"
+        return "Documento"
+    return "Documento"
 
 
 def listing_allows_products() -> bool:

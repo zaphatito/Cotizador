@@ -181,8 +181,10 @@ class PdfActionsMixin:
         # ✅ BD: solo Paraguay y Perú guardan metodo_pago (Perú puede ser vacío)
         metodo_pago_db = metodo_pago_pdf if APP_COUNTRY in ("PARAGUAY", "PERU") else ""
 
+        emission_dt = datetime.datetime.now()
+
         datos = {
-            "fecha": datetime.datetime.now().strftime("%d/%m/%Y"),
+            "fecha": emission_dt,
             "cliente": c,
             "cedula": ci,
             "telefono": t,
@@ -252,7 +254,7 @@ class PdfActionsMixin:
                 con.close()
                 return
 
-            created_at = datetime.datetime.now().isoformat(timespec="seconds")
+            created_at = emission_dt.isoformat(timespec="seconds")
             curr, _sec, rate = get_currency_context()
 
             with tx(con):

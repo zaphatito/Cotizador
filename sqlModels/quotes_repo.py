@@ -902,11 +902,21 @@ def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: st
 
         raise RuntimeError("La columna 'metodo_pago' no existe en la tabla 'quotes'.")
 
+    sets = ["metodo_pago = ?"]
+    params: list[Any] = [str(metodo_pago or "")]
+
+    if _has_column(con, "quotes", "api_sent_at"):
+        sets.append("api_sent_at = ''")
+    if _has_column(con, "quotes", "api_error_at"):
+        sets.append("api_error_at = ''")
+    if _has_column(con, "quotes", "api_error_message"):
+        sets.append("api_error_message = ''")
+
     con.execute(
 
-        "UPDATE quotes SET metodo_pago = ? WHERE id = ?",
+        f"UPDATE quotes SET {', '.join(sets)} WHERE id = ?",
 
-        (str(metodo_pago or ""), int(quote_id)),
+        tuple(params + [int(quote_id)]),
 
     )
 
@@ -922,11 +932,21 @@ def update_quote_status(con: sqlite3.Connection, quote_id: int, estado: str | No
 
     st = normalize_status(estado) or ""
 
+    sets = ["estado = ?"]
+    params: list[Any] = [st]
+
+    if _has_column(con, "quotes", "api_sent_at"):
+        sets.append("api_sent_at = ''")
+    if _has_column(con, "quotes", "api_error_at"):
+        sets.append("api_error_at = ''")
+    if _has_column(con, "quotes", "api_error_message"):
+        sets.append("api_error_message = ''")
+
     con.execute(
 
-        "UPDATE quotes SET estado = ? WHERE id = ?",
+        f"UPDATE quotes SET {', '.join(sets)} WHERE id = ?",
 
-        (st, int(quote_id)),
+        tuple(params + [int(quote_id)]),
 
     )
 

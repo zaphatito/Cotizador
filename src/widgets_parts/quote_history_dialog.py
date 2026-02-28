@@ -1661,6 +1661,8 @@ class QuoteHistoryWindow(QMainWindow):
             return
 
         new_status = dlg.status()
+        if (str(new_status or "").strip()) == current:
+            return
 
         con = None
         try:
@@ -1669,6 +1671,7 @@ class QuoteHistoryWindow(QMainWindow):
                 update_quote_status(con, qid, new_status)
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
+            self._wake_background_api_sync()
         except Exception as e:
             log.exception("Error actualizando estado")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el estado:\n{e}")
@@ -1716,6 +1719,8 @@ class QuoteHistoryWindow(QMainWindow):
             return
 
         new_mp = (text or "").strip()
+        if new_mp == current_mp:
+            return
 
         con = None
         try:
@@ -1724,6 +1729,7 @@ class QuoteHistoryWindow(QMainWindow):
                 update_quote_payment(con, qid, new_mp)
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
+            self._wake_background_api_sync()
         except Exception as e:
             log.exception("Error actualizando pago")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el pago:\n{e}")

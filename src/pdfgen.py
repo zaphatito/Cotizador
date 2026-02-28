@@ -288,6 +288,44 @@ def _draw_right_multiline(c: canvas.Canvas, x_right: float, y_top: float, lines:
     for i, ln in enumerate(lines):
         c.drawRightString(x_right, y_top - i * line_h, ln)
 
+
+def _issue_date_text(datos: dict) -> str:
+    for raw in (
+        datos.get("fecha_emision"),
+        datos.get("created_at"),
+        datos.get("fecha"),
+    ):
+        if raw is None:
+            continue
+
+        if isinstance(raw, datetime.datetime):
+            return raw.strftime("%d/%m/%Y")
+        if isinstance(raw, datetime.date):
+            return datetime.datetime.combine(raw, datetime.time.min).strftime("%d/%m/%Y")
+
+        s = str(raw).strip()
+        if not s:
+            continue
+
+        if re.fullmatch(r"\d{2}/\d{2}/\d{4}", s[:10]):
+            return s[:10]
+
+        iso_raw = s[:-1] + "+00:00" if s.endswith("Z") else s
+        try:
+            dt = datetime.datetime.fromisoformat(iso_raw)
+            return dt.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.datetime.strptime(s[:19], fmt)
+                return dt.strftime("%d/%m/%Y")
+            except Exception:
+                continue
+
+    return datetime.datetime.now().strftime("%d/%m/%Y")
+
 # =====================================================
 # Generación de PDF
 # =====================================================
@@ -339,7 +377,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         c.drawString(colon_x + pad_r, y, value)
 
     def draw_header():
-        fecha_str = datetime.datetime.now().strftime("%d/%m/%Y")
+        fecha_str = _issue_date_text(datos)
         id_lbl    = id_label_for_country(APP_COUNTRY)
 
         c.setFont(FONT_REG, 10)
