@@ -4,19 +4,21 @@ from __future__ import annotations
 import sqlite3
 
 
-def get_setting(con: sqlite3.Connection, key: str, default: str = "") -> str:
+def get_setting(con: sqlite3.Connection, key: str, default: str | None = "") -> str | None:
     k = str(key or "").strip()
     if not k:
         return default
     r = con.execute("SELECT value FROM settings WHERE key = ?", (k,)).fetchone()
-    return str(r["value"]) if r and r["value"] is not None else default
+    if not r:
+        return default
+    return str(r["value"]) if r["value"] is not None else default
 
 
-def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
+def set_setting(con: sqlite3.Connection, key: str, value: str | None) -> None:
     k = str(key or "").strip()
     if not k:
         return
-    v = "" if value is None else str(value)
+    v = None if value is None else str(value)
     con.execute(
         """
         INSERT INTO settings(key, value) VALUES(?,?)
@@ -26,11 +28,11 @@ def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def ensure_defaults(con: sqlite3.Connection, defaults: dict[str, str]) -> None:
+def ensure_defaults(con: sqlite3.Connection, defaults: dict[str, str | None]) -> None:
     for k, v in (defaults or {}).items():
         con.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
-            (str(k), "" if v is None else str(v)),
+            (str(k), None if v is None else str(v)),
         )
 
 
@@ -42,8 +44,8 @@ def settings_is_empty(con: sqlite3.Connection) -> bool:
 def seed_settings_if_empty(
     con: sqlite3.Connection,
     *,
-    defaults: dict[str, str],
-    overrides: dict[str, str] | None = None,
+    defaults: dict[str, str | None],
+    overrides: dict[str, str | None] | None = None,
 ) -> bool:
     """
     Si settings está vacío:

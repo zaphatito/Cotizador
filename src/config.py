@@ -17,13 +17,14 @@ from sqlModels.settings_repo import (
     set_setting,
 )
 
-# Defaults (DB) como strings (solo se usan si NO hay config.json o para completar keys faltantes)
-DEFAULT_CONFIG_STR: dict[str, str] = {
+# Defaults (DB) como strings/None (solo se usan si NO hay config.json o para completar keys faltantes)
+DEFAULT_CONFIG_STR: dict[str, str | None] = {
     "country": "PARAGUAY",
     "listing_type": "AMBOS",
     "company_type": "LA CASA DEL PERFUME",
     "store_id": "",
     "username": "",
+    "tienda": None,
     "id_user_api": "",
     "user_api": "",
     "password_api_hash": "",
@@ -150,10 +151,10 @@ def _candidate_config_paths() -> list[str]:
     return out
 
 
-def _load_seed_overrides_from_json() -> dict[str, str]:
+def _load_seed_overrides_from_json() -> dict[str, str | None]:
     """
     Lee config.json/app_config.json SOLO para sembrar LA PRIMERA VEZ.
-    Devuelve overrides en formato string compatible con settings.
+    Devuelve overrides en formato string/None compatible con settings.
 
     OJO: si no hay json, devuelve {} (y ahí se usan DEFAULT_CONFIG_STR).
     """
@@ -185,7 +186,12 @@ def _load_seed_overrides_from_json() -> dict[str, str]:
         except Exception:
             return "0"
 
-    out: dict[str, str] = {}
+    def b01_or_none(x) -> str | None:
+        if x is None:
+            return None
+        return b01(x)
+
+    out: dict[str, str | None] = {}
 
     if "country" in raw:
         out["country"] = str(raw["country"]).strip().upper()
@@ -201,6 +207,8 @@ def _load_seed_overrides_from_json() -> dict[str, str]:
         out["username"] = str(raw["username"]).strip()
     elif "user_name" in raw:
         out["username"] = str(raw["user_name"]).strip()
+    if "tienda" in raw:
+        out["tienda"] = b01_or_none(raw["tienda"])
     if "allow_no_stock" in raw:
         out["allow_no_stock"] = b01(raw["allow_no_stock"])
     if "enable_ai" in raw:
@@ -288,6 +296,20 @@ def _seed_settings_once(con) -> None:
             ensure_defaults(con, DEFAULT_CONFIG_STR)
 
 
+def _parse_optional_bool_setting(value: str | None) -> bool | None:
+    if value is None:
+        return None
+
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in ("1", "true", "yes", "on", "si"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def _load_db_config() -> Dict[str, Any]:
     db_path = _resolve_db_path_for_config()
     con = connect(db_path)
@@ -303,6 +325,7 @@ def _load_db_config() -> Dict[str, Any]:
     company_type = get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]).strip().upper()
     store_id = get_setting(con, "store_id", DEFAULT_CONFIG_STR["store_id"]).strip()
     username = get_setting(con, "username", DEFAULT_CONFIG_STR["username"]).strip()
+    tienda = _parse_optional_bool_setting(get_setting(con, "tienda", DEFAULT_CONFIG_STR["tienda"]))
     id_user_api = get_setting(con, "id_user_api", DEFAULT_CONFIG_STR["id_user_api"]).strip()
     user_api = get_setting(con, "user_api", DEFAULT_CONFIG_STR["user_api"]).strip()
     password_api_hash = get_setting(con, "password_api_hash", DEFAULT_CONFIG_STR["password_api_hash"]).strip()
@@ -330,6 +353,7 @@ def _load_db_config() -> Dict[str, Any]:
         "company_type": company_type if company_type in ALLOWED_COMPANY_TYPES else DEFAULT_CONFIG_STR["company_type"],
         "store_id": store_id,
         "username": username,
+        "tienda": tienda,
         "id_user_api": id_user_api,
         "user_api": user_api,
         "password_api_hash": password_api_hash,
@@ -355,6 +379,7 @@ APP_LISTING_TYPE: str = APP_CONFIG["listing_type"]
 APP_COMPANY_TYPE: str = APP_CONFIG["company_type"]
 STORE_ID: str = APP_CONFIG["store_id"]
 APP_USERNAME: str = APP_CONFIG["username"]
+APP_TIENDA: bool | None = APP_CONFIG["tienda"]
 ALLOW_NO_STOCK: bool = bool(APP_CONFIG["allow_no_stock"])
 ENABLE_AI: bool = bool(APP_CONFIG["enable_ai"])
 ENABLE_RECOMMENDATIONS: bool = bool(APP_CONFIG["enable_recommendations"])
@@ -606,7 +631,7 @@ CONFIG_PATH = ""
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",
     "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "APP_COMPANY_TYPE", "STORE_ID",
-    "APP_USERNAME",
+    "APP_USERNAME", "APP_TIENDA",
     "ALLOW_NO_STOCK", "ENABLE_AI", "ENABLE_RECOMMENDATIONS", "ALLOWED_COMPANY_TYPES",
     "is_ai_enabled", "set_ai_enabled", "is_recommendations_enabled", "set_recommendations_enabled",
     "APP_CURRENCY", "SECONDARY_CURRENCY", "SECONDARY_CURRENCIES", "COUNTRY_CODE",

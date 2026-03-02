@@ -294,6 +294,8 @@ class HistoryConfigDialog(QDialog):
 
         self.ed_username = QLineEdit()
         self.ed_username.setPlaceholderText("Nombre de usuario")
+        self.chk_tienda = QCheckBox("Este equipo es tienda")
+        self.chk_tienda.setToolTip("Marcado: si. Desmarcado: no.")
 
         form.addRow("País:", self.cmb_country)
         form.addRow("Tipo de listado:", self.cmb_listing_type)
@@ -301,6 +303,7 @@ class HistoryConfigDialog(QDialog):
         form.addRow("Store ID:", self.ed_store_id)
         form.addRow("Compañía:", self.cmb_company_type)
         form.addRow("Nombre de usuario:", self.ed_username)
+        form.addRow("Tienda:", self.chk_tienda)
 
         row_actions = QHBoxLayout()
         self.btn_save_app_values = QPushButton("Guardar valores de aplicación")
@@ -410,6 +413,30 @@ class HistoryConfigDialog(QDialog):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    @staticmethod
+    def _parse_optional_bool(value) -> bool | None:
+        if value is None:
+            return None
+
+        s = str(value).strip().lower()
+        if not s:
+            return None
+        if s in ("1", "true", "yes", "on", "si"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+        return None
+
+    @staticmethod
+    def _optional_bool_to_check_state(value: bool | None) -> Qt.CheckState:
+        if value is None:
+            return Qt.CheckState.Unchecked
+        return Qt.CheckState.Checked if value else Qt.CheckState.Unchecked
+
+    @staticmethod
+    def _check_state_to_optional_bool(state: Qt.CheckState) -> bool:
+        return state == Qt.CheckState.Checked
+
     def _load_app_values(self) -> None:
         country = str(APP_CONFIG.get("country", "PARAGUAY")).strip().upper()
         listing_type = str(APP_CONFIG.get("listing_type", "AMBOS")).strip().upper()
@@ -417,6 +444,7 @@ class HistoryConfigDialog(QDialog):
         store_id = str(APP_CONFIG.get("store_id", "")).strip()
         company_type = str(APP_CONFIG.get("company_type", ALLOWED_COMPANY_TYPES[0])).strip().upper()
         username = str(APP_CONFIG.get("username", "")).strip()
+        tienda = self._parse_optional_bool(APP_CONFIG.get("tienda"))
 
         con = None
         try:
@@ -429,6 +457,8 @@ class HistoryConfigDialog(QDialog):
             store_id = get_setting(con, "store_id", store_id).strip()
             company_type = get_setting(con, "company_type", company_type).strip().upper()
             username = get_setting(con, "username", username).strip()
+            tienda_default = None if tienda is None else ("1" if tienda else "0")
+            tienda = self._parse_optional_bool(get_setting(con, "tienda", tienda_default))
         except Exception:
             log.exception("No se pudieron cargar los valores protegidos de configuracion.")
         finally:
@@ -444,6 +474,7 @@ class HistoryConfigDialog(QDialog):
         self.ed_store_id.setText(store_id)
         self._set_combo_value(self.cmb_company_type, company_type)
         self.ed_username.setText(username)
+        self.chk_tienda.setCheckState(self._optional_bool_to_check_state(tienda))
 
     def _load_theme_setting(self):
         mode = "system"
@@ -523,6 +554,7 @@ class HistoryConfigDialog(QDialog):
         store_id = str(self.ed_store_id.text() or "").strip().upper()
         company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
         username = str(self.ed_username.text() or "").strip()
+        tienda = self._check_state_to_optional_bool(self.chk_tienda.checkState())
 
         if country not in allowed_countries:
             QMessageBox.warning(self, "Validación", "País inválido.")
@@ -552,6 +584,7 @@ class HistoryConfigDialog(QDialog):
                 set_setting(con, "store_id", store_id)
                 set_setting(con, "company_type", company_type)
                 set_setting(con, "username", username)
+                set_setting(con, "tienda", "1" if tienda else "0")
                 api_vals = build_api_settings(
                     country=country,
                     company_type=company_type,
@@ -576,18 +609,20 @@ class HistoryConfigDialog(QDialog):
         APP_CONFIG["store_id"] = store_id
         APP_CONFIG["company_type"] = company_type
         APP_CONFIG["username"] = username
+        APP_CONFIG["tienda"] = tienda
         APP_CONFIG["id_user_api"] = str(api_vals.get("id_user_api", ""))
         APP_CONFIG["user_api"] = str(api_vals.get("user_api", ""))
         APP_CONFIG["password_api_hash"] = str(api_vals.get("password_api_hash", ""))
 
         log.info(
-            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s",
+            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s tienda=%s",
             country,
             listing_type,
             allow_no_stock,
             store_id,
             company_type,
             username,
+            tienda,
         )
         try:
             if self._history is not None and hasattr(self._history, "_wake_background_api_sync"):

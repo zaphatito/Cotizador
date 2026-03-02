@@ -205,6 +205,16 @@ begin
   if B then Result := 'true' else Result := 'false';
 end;
 
+function NullableBoolToJson(const HasValue, B: Boolean): string;
+begin
+  if not HasValue then
+    Result := 'null'
+  else if B then
+    Result := 'true'
+  else
+    Result := 'false';
+end;
+
 function NormalizeCompanyType(const S: string): string;
 var U: string;
 begin
@@ -251,6 +261,7 @@ end;
 var
   HaveOldConfig: Boolean;
   OldCountry, OldListing, OldCompanyType, OldStoreId, OldUsername: string;
+  OldTiendaKnown, OldTienda: Boolean;
   OldAllow: Boolean;
   PrevDir: string;
   PrevVersion: string;
@@ -270,6 +281,7 @@ var
   txtStoreId: TNewEdit;
   lblUsername: TNewStaticText;
   txtUsername: TNewEdit;
+  chkTienda: TNewCheckBox;
   chkNoStock: TNewCheckBox;
 
 function TryGetPrevAppDir(): Boolean;
@@ -418,9 +430,9 @@ procedure BackupPreviousConfig();
 var
   PrevCfg, J: string;
   BackupDir, Tag, FullPath, MiniPath, LastPath: string;
-  AllowStr: string;
+  AllowStr, TiendaStr: string;
   C, L, CT, SID, UN: string;
-  A: Boolean;
+  A, HasT, T: Boolean;
 begin
   if (not IsReinstall) or (PrevDir = '') then Exit;
 
@@ -444,12 +456,14 @@ begin
 
   C := OldCountry; L := OldListing; A := OldAllow;
   CT := OldCompanyType; SID := OldStoreId; UN := OldUsername;
+  HasT := OldTiendaKnown; T := OldTienda;
 
   if C = '' then JsonExtractStr(J, 'country', C);
   if L = '' then JsonExtractStr(J, 'listing_type', L);
   if CT = '' then JsonExtractStr(J, 'company_type', CT);
   if SID = '' then JsonExtractStr(J, 'store_id', SID);
   if UN = '' then JsonExtractStr(J, 'username', UN);
+  if not HasT then HasT := JsonExtractBool(J, 'tienda', T);
   if not JsonExtractBool(J, 'allow_no_stock', A) then A := False;
 
   C := UpperCase(Trim(C));
@@ -465,6 +479,7 @@ begin
   UN := Trim(UN);
 
   AllowStr := BoolToJson(A);
+  TiendaStr := NullableBoolToJson(HasT, T);
 
   MiniPath := BackupDir + '\config_settings_' + Tag + '.json';
   SaveStringToFile(
@@ -475,6 +490,7 @@ begin
     '  "company_type": "' + JsonEscape(CT) + '",' + #13#10 +
     '  "store_id": "' + JsonEscape(SID) + '",' + #13#10 +
     '  "username": "' + JsonEscape(UN) + '",' + #13#10 +
+    '  "tienda": ' + TiendaStr + ',' + #13#10 +
     '  "allow_no_stock": ' + AllowStr + #13#10 +
     '}',
     False
@@ -490,6 +506,8 @@ begin
   OldCompanyType := '';
   OldStoreId := '';
   OldUsername := '';
+  OldTiendaKnown := False;
+  OldTienda := False;
   OldAllow := False;
   PrevDir := '';
   PrevVersion := '';
@@ -509,6 +527,7 @@ begin
       if JsonExtractStr(J, 'company_type', OldCompanyType) then ;
       if JsonExtractStr(J, 'store_id', OldStoreId) then ;
       if JsonExtractStr(J, 'username', OldUsername) then ;
+      OldTiendaKnown := JsonExtractBool(J, 'tienda', OldTienda);
       if not JsonExtractBool(J, 'allow_no_stock', OldAllow) then OldAllow := False;
       OldCompanyType := NormalizeCompanyType(OldCompanyType);
       OldStoreId := Trim(OldStoreId);
@@ -652,11 +671,20 @@ begin
   txtUsername.Top := lblUsername.Top + lblUsername.Height + ScaleY(4);
   txtUsername.Width := TiendaUsuarioPage.SurfaceWidth;
   txtUsername.Text := '';
+
+  chkTienda := TNewCheckBox.Create(TiendaUsuarioPage.Surface);
+  chkTienda.Parent := TiendaUsuarioPage.Surface;
+  chkTienda.Caption := 'Es tienda (sin definir / sí / no)';
+  chkTienda.Left := ScaleX(0);
+  chkTienda.Top := txtUsername.Top + txtUsername.Height + ScaleY(12);
+  chkTienda.Width := TiendaUsuarioPage.SurfaceWidth;
+  chkTienda.AllowGrayed := True;
+  chkTienda.State := cbGrayed;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, UsernameSel, AllowStr: string;
+  PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, UsernameSel, TiendaStr, AllowStr: string;
   ConfigFolder, FJson, ConfJson, OldConfigPath: string;
 begin
   try
@@ -680,6 +708,7 @@ begin
         CompanySel := NormalizeCompanyType(OldCompanyType);
         StoreIdSel := Trim(OldStoreId);
         UsernameSel := Trim(OldUsername);
+        TiendaStr := NullableBoolToJson(OldTiendaKnown, OldTienda);
         AllowStr := BoolToJson(OldAllow);
       end
       else
@@ -708,6 +737,10 @@ begin
 
           StoreIdSel := Trim(txtStoreId.Text);
           UsernameSel := Trim(txtUsername.Text);
+          if chkTienda.State = cbGrayed then
+            TiendaStr := 'null'
+          else
+            TiendaStr := BoolToJson(chkTienda.Checked);
           AllowStr := BoolToJson(chkNoStock.Checked);
         end
         else
@@ -717,6 +750,7 @@ begin
           CompanySel := 'LA CASA DEL PERFUME';
           StoreIdSel := '';
           UsernameSel := '';
+          TiendaStr := 'null';
           AllowStr := 'false';
         end;
       end;
@@ -744,6 +778,7 @@ begin
         '  "company_type": "' + JsonEscape(CompanySel) + '",' + #13#10 +
         '  "store_id": "' + JsonEscape(StoreIdSel) + '",' + #13#10 +
         '  "username": "' + JsonEscape(UsernameSel) + '",' + #13#10 +
+        '  "tienda": ' + TiendaStr + ',' + #13#10 +
         '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
         '  "update_mode": "SILENT",' + #13#10 +
         '  "update_check_on_startup": true,' + #13#10 +

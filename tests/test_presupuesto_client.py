@@ -52,6 +52,7 @@ def test_build_presupuesto_payload_includes_adjuntos():
         cod_pais="PE",
         empresa="LA CASA DEL PERFUME",
         user_api="user_demo",
+        tienda=True,
         id_cotizador="001",
         items_base=[],
         adjuntos=adjuntos,
@@ -60,6 +61,7 @@ def test_build_presupuesto_payload_includes_adjuntos():
     assert payload["adjuntos"] == adjuntos
     assert payload["presupuesto"]["codigo"] == "PE-001-0000001"
     assert payload["presupuesto"]["tipo_documento"] == "DNI"
+    assert payload["presupuesto"]["tienda"] is True
     assert payload["presupuesto"]["cantidad_items"] == 0
 
 
@@ -216,6 +218,7 @@ def test_login_and_send_presupuesto_sends_wrapped_presupuesto_payload(monkeypatc
     assert pres.get("id_cotizador") == "001"
     assert pres.get("tipo_documento") == "DNI"
     assert pres.get("estado") == "PENDIENTE"
+    assert pres.get("tienda") is False
     assert isinstance(pres.get("presupuesto_prod"), list)
     assert len(pres.get("presupuesto_prod")) == 1
     assert pres["presupuesto_prod"][0].get("observacion") == "Color ambar"

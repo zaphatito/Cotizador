@@ -78,7 +78,7 @@ def _refresh_api_settings_from_store_config(con: sqlite3.Connection) -> None:
         _upsert_setting_value(con, k, v)
 
 
-def _upsert_setting_value(con: sqlite3.Connection, key: str, value: str) -> None:
+def _upsert_setting_value(con: sqlite3.Connection, key: str, value: str | None) -> None:
     if not _table_exists(con, "settings"):
         return
     con.execute(
@@ -86,7 +86,7 @@ def _upsert_setting_value(con: sqlite3.Connection, key: str, value: str) -> None
         INSERT INTO settings(key, value) VALUES(?, ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value
         """,
-        (str(key), "" if value is None else str(value)),
+        (str(key), None if value is None else str(value)),
     )
 
 
@@ -1917,6 +1917,58 @@ def mig_29(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_quotes_api_error_at ON quotes(api_error_at)")
 
 
+def mig_30(con: sqlite3.Connection) -> None:
+    """
+    v30: settings.value acepta NULL y agrega settings.tienda triestado.
+    - Rebuild de settings para permitir value NULL.
+    - Garantiza settings.tienda = NULL si no existe.
+    """
+    if not _table_exists(con, "settings"):
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+    else:
+        rows = con.execute("PRAGMA table_info(settings)").fetchall()
+        value_not_null = True
+        for row in rows:
+            if str(row["name"]).lower() == "value":
+                value_not_null = bool(row["notnull"])
+                break
+
+        if value_not_null:
+            bak = "settings__bak_v30"
+            con.execute(f"DROP TABLE IF EXISTS {bak}")
+            con.execute(f"ALTER TABLE settings RENAME TO {bak}")
+            con.execute(
+                """
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+                """
+            )
+            con.execute(
+                f"""
+                INSERT INTO settings(key, value)
+                SELECT key, value
+                FROM {bak}
+                """
+            )
+            con.execute(f"DROP TABLE IF EXISTS {bak}")
+
+    if _table_exists(con, "settings"):
+        con.execute(
+            """
+            INSERT OR IGNORE INTO settings(key, value) VALUES('tienda', NULL)
+            """
+        )
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -1947,4 +1999,5 @@ MIGRATIONS: dict[int, callable] = {
     27: mig_27,
     28: mig_28,
     29: mig_29,
+    30: mig_30,
 }

@@ -4,6 +4,7 @@
   "company_type": "LA CASA DEL PERFUME",
   "store_id": "",
   "username": "",
+  "tienda": null,
   "allow_no_stock": false,
   "enable_ai": false,
   "update_mode": "ASK",

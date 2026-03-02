@@ -61,6 +61,20 @@ def _has_column(con, table: str, col: str) -> bool:
         return False
 
 
+def _parse_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in ("1", "true", "yes", "on", "si"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def _normalize_tipo_prod(value: Any) -> str:
     t = str(value or "").strip().lower()
     if t in ("serv", "servicio", "service"):
@@ -325,7 +339,7 @@ def _api_rejects_wrapped_presupuesto_payload(err: ApiRequestError) -> bool:
     )
 
 
-def _load_api_identity() -> tuple[int, str, str, str, str, str]:
+def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
     db_path = resolve_db_path()
     con = connect(db_path)
     _ensure_schema_once(con)
@@ -333,6 +347,7 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str]:
         country = get_setting(con, "country", "PARAGUAY")
         company = get_setting(con, "company_type", "LA CASA DEL PERFUME")
         store_id = get_setting(con, "store_id", "").strip().upper()
+        tienda_raw = get_setting(con, "tienda", None)
         default_id, default_user = resolve_api_identity(country, company)
 
         id_raw = get_setting(con, "id_user_api", str(default_id)).strip()
@@ -348,6 +363,9 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str]:
         user_id = int(default_id)
     api_username = user_raw or default_user
     app_username = app_user_raw or api_username
+    tienda_cfg = _parse_optional_bool(tienda_raw)
+    if tienda_cfg is None:
+        tienda_cfg = _parse_optional_bool(APP_CONFIG.get("tienda"))
 
     if pass_hash:
         expected_secret = str(API_LOGIN_PASSWORD or "").strip()
@@ -366,6 +384,7 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str]:
         str(country or ""),
         str(company or ""),
         str(store_id or ""),
+        bool(tienda_cfg),
     )
 
 
@@ -567,6 +586,7 @@ def build_presupuesto_payload(
     items_base: list[dict],
     app_username: str = "",
     user_api: str = "",
+    tienda: bool = False,
     adjuntos: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     presupuesto_items = _build_presupuesto_items(items_base, cod_pais=cod_pais)
@@ -586,6 +606,7 @@ def build_presupuesto_payload(
             "estado": (str(estado or "").strip() or None),
             "cod_pais": str(cod_pais or ""),
             "empresa": str(empresa or ""),
+            "tienda": bool(tienda),
             "cantidad_items": int(len(presupuesto_items)),
             "presupuesto_prod": presupuesto_items,
         },
@@ -609,7 +630,10 @@ def login_and_send_presupuesto(
     login_password: str | None = None,
 ) -> dict[str, Any]:
     identity = _load_api_identity()
-    if len(identity) >= 6:
+    tienda = False
+    if len(identity) >= 7:
+        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
+    elif len(identity) >= 6:
         user_id, api_username, app_username, country, company_type, store_id = identity[:6]
     else:
         # Compatibilidad con versiones/mocks antiguos de _load_api_identity.
@@ -634,6 +658,7 @@ def login_and_send_presupuesto(
         empresa=(str(company_type or "").strip() or "LA CASA DEL PERFUME"),
         app_username=app_username,
         user_api=api_username,
+        tienda=bool(tienda),
         id_cotizador=_extract_id_cotizador(quote_code, store_id),
         items_base=items_base,
         adjuntos=adjuntos,

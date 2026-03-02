@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 DDL = [
     # =========================
@@ -20,7 +20,7 @@ DDL = [
     """
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
+        value TEXT
     )
     """,
 
