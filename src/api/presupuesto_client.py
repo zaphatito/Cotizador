@@ -179,6 +179,8 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
     # Paraguay: para categorías CATS, el API espera gramos enteros.
     if country == "PY" and cat in _CATS_UPPER:
         grams = int(round(qty * 50.0))
+        if qty > 0 and grams <= 0:
+            return 1
         return max(0, grams)
 
     return qty

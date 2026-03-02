@@ -26,6 +26,11 @@ def test_infer_tipo_documento_for_api_enforces_validation_pad():
     assert pc._infer_tipo_documento_for_api("12345678901", "PE") == "RUC"
 
 
+def test_quantity_for_api_keeps_py_cats_positive_values_above_zero():
+    assert pc._quantity_for_api({"categoria": "ESENCIAS", "cantidad": 0.001}, cod_pais="PY") == 1
+    assert pc._quantity_for_api({"categoria": "ESENCIAS", "cantidad": 0.0}, cod_pais="PY") == 0
+
+
 def test_build_presupuesto_payload_includes_adjuntos():
     adjuntos = [
         {

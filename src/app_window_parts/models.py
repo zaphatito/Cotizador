@@ -366,9 +366,10 @@ class ItemsModel(QAbstractTableModel):
                 subtotal = self._compute_subtotal_base(it, unit_price=unit)
                 it["subtotal_base"] = subtotal
 
+            mode = (it.get("descuento_mode") or "").lower()
             d_pct = float(nz(it.get("descuento_pct"), 0.0))
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
-            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+            cur_total_pct = self._effective_discount_pct(subtotal, mode, d_pct, d_monto)
 
             user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
             user_pct = self._clamp_pct(user_pct)
@@ -437,12 +438,23 @@ class ItemsModel(QAbstractTableModel):
         factor = self._get_factor_total(it)
         return round(float(unit_price) * qty * factor, 2)
 
-    def _effective_discount_pct(self, subtotal: float, d_pct: float, d_monto: float) -> float:
+    def _effective_discount_pct(self, subtotal: float, mode: str, d_pct: float, d_monto: float) -> float:
         if subtotal <= 0:
             return 0.0
+
+        mode_u = str(mode or "").strip().lower()
+        if mode_u == "amount":
+            if d_monto > 0:
+                return (float(d_monto) / float(subtotal)) * 100.0
+            return 0.0
+
+        if d_pct > 0:
+            return float(d_pct)
+
         if d_monto > 0:
             return (float(d_monto) / float(subtotal)) * 100.0
-        return float(d_pct)
+
+        return 0.0
 
     def _clamp_pct(self, pct: float) -> float:
         try:
@@ -513,9 +525,10 @@ class ItemsModel(QAbstractTableModel):
             unit = float(nz(it.get("precio"), 0.0))
             subtotal = self._compute_subtotal_base(it, unit_price=unit)
 
+            mode = (it.get("descuento_mode") or "").lower()
             d_pct = float(nz(it.get("descuento_pct"), 0.0))
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
-            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+            cur_total_pct = self._effective_discount_pct(subtotal, mode, d_pct, d_monto)
 
             user_pct = self._clamp_pct(cur_total_pct)
             it["_py_user_disc_pct"] = user_pct
@@ -537,9 +550,10 @@ class ItemsModel(QAbstractTableModel):
             unit = float(nz(it.get("precio"), 0.0))
             subtotal = self._compute_subtotal_base(it, unit_price=unit)
 
+            mode = (it.get("descuento_mode") or "").lower()
             d_pct = float(nz(it.get("descuento_pct"), 0.0))
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
-            cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+            cur_total_pct = self._effective_discount_pct(subtotal, mode, d_pct, d_monto)
 
             user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
             user_pct = self._clamp_pct(user_pct)
@@ -590,7 +604,7 @@ class ItemsModel(QAbstractTableModel):
                 user_pct = None
 
             if user_pct is None:
-                cur_total_pct = self._effective_discount_pct(subtotal, d_pct, d_monto)
+                cur_total_pct = self._effective_discount_pct(subtotal, mode, d_pct, d_monto)
                 user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
 
             user_pct = self._clamp_pct(user_pct)

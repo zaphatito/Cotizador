@@ -369,22 +369,8 @@ class SistemaCotizaciones(
             item.setdefault("descuento_pct", 0.0)
             item.setdefault("descuento_monto", 0.0)
 
+            # Al reabrir desde histórico, conservamos el snapshot guardado.
             self.model.add_item(item)
-
-            # Al abrir desde histórico, no-servicios deben tomar el precio
-            # según id_precioventa (p_max/p_min/p_oferta) del quote_item.
-            try:
-                loaded = self.items[-1] if self.items else None
-                cat_u = str((loaded or {}).get("categoria") or "").upper()
-                has_prod = bool((loaded or {}).get("_prod"))
-                if loaded is not None and has_prod and cat_u != "SERVICIO":
-                    self.model._recalc_price_for_qty(loaded)
-                    row = len(self.items) - 1
-                    top = self.model.index(row, 0)
-                    bottom = self.model.index(row, self.model.columnCount() - 1)
-                    self.model.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
-            except Exception:
-                pass
 
     @staticmethod
     def _parse_int(value, default: int = 0) -> int:

@@ -1,43 +1,43 @@
 {
-    "version":  "2.0.1",
+    "version":  "2.0.2",
     "type":  "files",
-    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/2.0.1/",
-    "from_version":  "2.0.0",
+    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/2.0.2/",
+    "from_version":  "2.0.1",
     "files":  [
                   {
                       "path":  "_internal/base_library.zip",
-                      "sha256":  "79591f7b709708615acca1141c9028bd79063136d06d47fa6850c65006cdc2c2"
+                      "sha256":  "9aa131475029495569cfaf3d9912f37a64249ab036f6e6af61aadc4c89db792e"
                   },
                   {
                       "path":  "_internal/changelog.txt",
-                      "sha256":  "e8dcf21acffeddc7c00dee2e92d70ec11faa545065322a81c01113a176050c1f"
+                      "sha256":  "524c407071536e865dd93a3b9b8c14973fdc9d8da25dc13234e44cb44ae48c37"
                   },
                   {
                       "path":  "_internal/config/cotizador.json",
-                      "sha256":  "6b16d14236d8a16aaa5ef37f03bc21fc5512ab34d64ca4feeff2dd23a5d35b19"
+                      "sha256":  "572eb35c5e1c8caf8363d8076e6c9efaf2e0034df5b49c32c98f65ec4ce53b85"
                   },
                   {
                       "path":  "changelog.txt",
-                      "sha256":  "e8dcf21acffeddc7c00dee2e92d70ec11faa545065322a81c01113a176050c1f"
+                      "sha256":  "524c407071536e865dd93a3b9b8c14973fdc9d8da25dc13234e44cb44ae48c37"
                   },
                   {
                       "path":  "SistemaCotizaciones.exe",
-                      "sha256":  "517d7ba4aa6bb607b55019cca71b095867b6cc011ab8311646da020c8050a546"
+                      "sha256":  "70cfbe648b6f80cf74d56c2cd8ab94be273dae0800ae57ea0a3160eb31fe7a65"
                   },
                   {
                       "path":  "updater/apply_update.exe",
-                      "sha256":  "4a228fe2ad7aec7e651e4443bea124621d45b5a9ea2c24e4c34cc6a06e251d18"
+                      "sha256":  "49e2e23a2a967000a7d4b0d532cf9c6aeea20f54d7df0925a46b369ae90c4d5d"
                   },
                   {
                       "path":  "version.txt",
-                      "sha256":  "03467489b8fb6205988b0a529f9445b67a8cf51049beea3b2ae1ddc725b3d254"
+                      "sha256":  "31186721be50d1033545dfeee9d6ee118b54fb1b974ea909ab2e960e0b7c049b"
                   }
               ],
     "delete":  [
 
                ],
     "mandatory":  false,
-    "notes":  "Release 2.0.1",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_2.0.1.exe",
-    "sha256":  "0F909292F5E6707988CCB8C0B8EE62BF090CD57D8CFFC3D9636DB76202EA5D9A"
+    "notes":  "Release 2.0.2",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_2.0.2.exe",
+    "sha256":  "3D0E7B63EFE6D86D3AE47E7FC3884B20194A1CDB80EAAFA11FA3B180D5E3C3FF"
 }
