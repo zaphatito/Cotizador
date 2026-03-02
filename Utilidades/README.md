@@ -12,6 +12,11 @@ pip freeze > Utilidades/requirements.txt
 # iniciar
 python main.py
 
+# abrir app en modo dev
+# ejecutar desde la raiz del proyecto, con el entorno virtual activo
+# en modo dev la app usa el endpoint local: http://localhost:3000/service
+python main.py
+
 
 # ejecutable
 powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
