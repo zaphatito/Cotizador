@@ -1,41 +1,47 @@
-SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-
-Versión: 2.0
-Fecha: 2026-02-24
+﻿SISTEMA DE COTIZACIONES - REGISTRO DE CAMBIOS
+Versión: 2.0.0
+Fecha: 2026-03-02
 
 Resumen
-- Nueva versión enfocada en envío al API, control de estados, experiencia visual y mayor seguridad en el flujo de cotización.
+- La version 2.0.0 concentra el salto funcional completo desde la 1.2.13: nuevo flujo comercial con API, asistente IA offline, mejor gestion de clientes, cambios de historial, mejoras visuales y una base de datos mas solida.
 
-Cambios y mejoras
-- [Mejora] Se agregó el envío de cotizaciones al API desde el historial, con adjuntos PDF y CMD.
-- [Mejora] Si el código de una cotización no es válido para el API, ahora se regenera automáticamente el PDF/CMD antes de reenviar.
-- [Mejora] Se agregó el nuevo estado "Reenviado" y su gestión completa en historial.
-- [Mejora] Ahora puedes personalizar los colores de estado (Pagado, Por pagar, Pendiente, Reenviado y No aplica).
-- [Mejora] Se incorporó tema de interfaz configurable: Sistema, Claro u Oscuro.
-- [Mejora] Se renovó la interfaz principal e historial para mejorar legibilidad y navegación.
-- [Mejora] Se guarda el tamaño y posición de las ventanas (historial y cotizador) entre sesiones.
-- [Mejora] Se actualizó la lógica de precios a P. Máx / P. Min / P. Oferta, incluyendo selector visual de precio.
-- [Mejora] Mejoró la selección de presentaciones para elegir la variante correcta según contexto.
-- [Mejora] En Perú, el ticket ahora muestra totales de botellas/esencias y el total general de la cotización.
-- [Mejora] En PDF se mejoró el bloque de observaciones para evitar cruces con el área de totales.
-- [Mejora] Se añadieron validadores y ejemplos de formato para documento y teléfono por país.
-- [Mejora] Se optimizó el autocompletado/búsqueda para respuestas más rápidas.
+Cambios principales
+- [Nuevo] Asistente IA offline integrado como panel lateral con Ollama, disponible en historial y cotizador, con apertura rapida por `Ctrl+K`.
+- [Nuevo] El asistente puede ayudar a preparar cotizaciones, consultar historial, listar cotizaciones, mostrar top de clientes y responder reportes basados en datos locales.
+- [Nuevo] Motor de recomendaciones y autocompletado inteligente para sugerir clientes y productos segun historial de uso.
+- [Nuevo] Editor de clientes con base maestra en SQLite, clientes genericos por pais, validacion de datos y sincronizacion automatica desde las cotizaciones guardadas.
+- [Nuevo] Nuevo formato de numeracion de cotizaciones con codigo de pais + Store ID + correlativo, manteniendo compatibilidad con codigos historicos.
+- [Nuevo] Configuracion ampliada dentro de la app para pais, tipo de listado, Store ID, compania, usuario, modo tienda, stock, IA, recomendaciones, tasas y colores de estado.
+- [Nuevo] Catalogo de estados en base de datos con cambio manual de estado desde historial y personalizacion visual por cada estado.
+- [Nuevo] Tema de interfaz configurable (sistema, claro u oscuro) y personalizacion visual del chat del asistente.
 
-Correcciones
-- [Fix] Se corrigió la reapertura de cotizaciones históricas para respetar correctamente el tipo de precio guardado.
-- [Fix] Se evitó el reenvío duplicado al API sin confirmación explícita del usuario.
-- [Fix] Se reforzó la validación del catálogo para evitar crear/abrir cotizaciones con datos incompletos o inválidos.
-- [Fix] Se ajustaron migraciones de base de datos para mayor compatibilidad en actualizaciones y bases nuevas.
+Flujo comercial y documentos
+- [Mejora] Envio de cotizaciones al API desde el historial con autenticacion integrada y soporte de adjuntos PDF y CMD.
+- [Mejora] Normalizacion del codigo de cotizacion para el API y regeneracion de PDF/ticket cuando se necesita reenviar una cotizacion compatible.
+- [Mejora] Sincronizacion automatica en segundo plano de cotizaciones pendientes hacia el API cuando hay credenciales configuradas.
+- [Mejora] Selector visual de precio para trabajar con P. Max, P. Min, P. Oferta o precio personalizado.
+- [Mejora] Al reabrir cotizaciones se conserva mejor el tipo de precio aplicado y el contexto del item.
+- [Mejora] Seleccion de presentaciones y combinacion con productos afinada para respetar mejor stock, categoria, precio y contexto de la cotizacion.
+- [Mejora] Tickets y PDF actualizados con mejor distribucion visual, observaciones mas seguras, numeracion nueva y totales mas claros.
+- [Mejora] En Peru se mejoro la salida del ticket con informacion de cantidades y totales mas detallada.
+
+Datos, historial y estabilidad
+- [Mejora] Nueva estructura de base de datos (schema 30) con migraciones para clientes, estados, referencias de cotizacion y mayor compatibilidad con bases existentes.
+- [Mejora] Historial de cotizaciones mas completo: filtro global, mejor lectura de columnas, acceso rapido a PDF, ticket, regeneracion, cambio de estado y reapertura.
+- [Mejora] Indice local de busqueda para clientes, catalogo e historial con respuestas mas rapidas y menos sugerencias obsoletas.
+- [Mejora] Validaciones mas estrictas para catalogo, documentos, telefonos y datos antes de crear, guardar, reabrir o enviar cotizaciones.
+- [Mejora] Mejor separacion interna entre UI, API, IA, persistencia y utilidades para facilitar mantenimiento y futuras ampliaciones.
+
+Actualizacion e instalacion
+- [Mejora] Flujo de actualizacion reforzado con mejor soporte para paquetes incrementales y por instalador, mas logs y mejor tolerancia a fallos.
+- [Mejora] Preparacion de releases ajustada para un despliegue mas seguro en la linea 2.0.
 
 Notas importantes
-- Si aparece "Catálogo inválido", usa "Actualizar productos" antes de crear o abrir cotizaciones.
-- Después de un envío exitoso al API, la cotización puede cambiar automáticamente al estado "Reenviado".
-- El tema visual y los colores de estado quedan guardados para próximas sesiones.
+- Si aparece "Catalogo invalido", usa "Actualizar productos" antes de crear o abrir cotizaciones.
+- Para aprovechar el nuevo formato de numeracion y el envio al API, configura correctamente Store ID, compania y usuario desde Configuracion.
+- La IA y las recomendaciones se pueden activar o desactivar por separado desde Configuracion.
+- Las bases existentes se migran automaticamente; la informacion local y la configuracion del usuario se conservan.
 
 Compatibilidad
-- No se requieren acciones adicionales para continuar usando el sistema.
-- La base de datos local y la configuración del usuario se conservan.
-
-Soporte
-- Si notas algún comportamiento inesperado después de actualizar, reinicia la aplicación y vuelve a intentar.
-- Si el problema persiste, llama al soporte técnico.
+- Este changelog resume el resultado final de la version 2.0.0 respecto a la 1.2.13.
+- Los ajustes intermedios entre commits de la rama 2.0 ya estan absorbidos en este resumen y no se listan por separado.
