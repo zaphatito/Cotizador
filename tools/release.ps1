@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("major","minor","patch")]
+  [ValidateSet("major","mayor","minor","patch")]
   [string]$Bump = "patch",
   [string]$RepoUser = "zaphatito",
   [string]$RepoName = "Cotizador",
@@ -15,6 +15,17 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
+
+function Normalize-BumpKind([string]$kind) {
+  if ($null -eq $kind) { $kind = "" }
+
+  switch ($kind.Trim().ToLowerInvariant()) {
+    "major" { return "major" }
+    "minor" { return "minor" }
+    "patch" { return "patch" }
+    default { throw "Bump invalido '$kind' (use major/minor/patch)" }
+  }
+}
 
 function Parse-Semver([string]$v) {
   if ($null -eq $v) { $v = "" }
@@ -33,8 +44,7 @@ function Parse-Semver([string]$v) {
 
 function Bump-Version([string]$v, [string]$kind) {
   $pv = Parse-Semver $v
-  if ($null -eq $kind) { $kind = "" }
-  $kind = $kind.ToLowerInvariant()
+  $kind = Normalize-BumpKind $kind
 
   switch ($kind) {
     "major" { return "{0}.{1}.{2}" -f ($pv.Major + 1), 0, 0 }
@@ -181,12 +191,13 @@ $verTxt  = Get-Content -Raw $verFile
 if ($verTxt -notmatch '__version__\s*=\s*"([^"]+)"') { throw "No se encontró __version__ en src\version.py" }
 $cur = $Matches[1]
 $prev = $cur
-$next = Bump-Version $cur $Bump
+$normalizedBump = Normalize-BumpKind $Bump
+$next = Bump-Version $cur $normalizedBump
 Write-Host "Versión actual: $cur  ->  Nueva versión: $next"
 $curV  = Parse-Semver $cur
 $nextV = Parse-Semver $next
 
-switch ($Bump.ToLowerInvariant()) {
+switch ($normalizedBump) {
   "minor" {
     if ($nextV.Major -ne $curV.Major) { throw "BUG: minor cambió major ($cur -> $next). Abortando." }
     if ($nextV.Minor -ne ($curV.Minor + 1)) { throw "BUG: minor no incrementó correctamente ($cur -> $next). Abortando." }
@@ -203,7 +214,7 @@ switch ($Bump.ToLowerInvariant()) {
   }
 }
 
-Write-Host "Bump='$Bump' OK. ($cur -> $next)"
+Write-Host "Bump='$Bump' -> '$normalizedBump' OK. ($cur -> $next)"
 
 $verTxt = $verTxt -replace '__version__\s*=\s*"[^"]+"', "__version__ = `"$next`""
 Set-Content -Path $verFile -Value $verTxt -Encoding UTF8
@@ -397,19 +408,23 @@ foreach ($it in $prevEntries) {
 }
 $deleteList = @($deleteList | Sort-Object -Unique)
 
-$isDeltaManifest = $hasPrevUpdate
+$isMajorRelease = $normalizedBump -eq "major"
+$isDeltaManifest = $hasPrevUpdate -and -not $isMajorRelease
 
 # 6.4 manifest cotizador.json
 $manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
 $baseUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Output/updates/$next/"
+$manifestType = if ($isMajorRelease) { "installer" } else { "files" }
 
 $manifestObj = [ordered]@{}
 $manifestObj["version"] = $next
-$manifestObj["type"] = "files"
-$manifestObj["base_url"] = $baseUrl
-if ($isDeltaManifest) { $manifestObj["from_version"] = $prev }
-$manifestObj["files"] = $filesList
-$manifestObj["delete"] = $deleteList
+$manifestObj["type"] = $manifestType
+if ($manifestType -eq "files") {
+  $manifestObj["base_url"] = $baseUrl
+  if ($isDeltaManifest) { $manifestObj["from_version"] = $prev }
+  $manifestObj["files"] = $filesList
+  $manifestObj["delete"] = $deleteList
+}
 $manifestObj["mandatory"] = [bool]$Mandatory
 $manifestObj["notes"] = "Release $next"
 $manifestObj["url"] = $exeUrl
@@ -417,12 +432,17 @@ $manifestObj["sha256"] = $setupSha
 Set-ContentUtf8NoBOM -Path $manifestPath -Text ($manifestObj | ConvertTo-Json -Depth 10)
 
 Write-Host "Manifest actualizado: $manifestPath"
-Write-Host "  files  = $($filesList.Count) (cambiados de $($newEntries.Count))"
-Write-Host "  delete = $($deleteList.Count)"
-if ($isDeltaManifest) {
-  Write-Host "  from_version = $prev"
+Write-Host "  type   = $manifestType"
+if ($manifestType -eq "files") {
+  Write-Host "  files  = $($filesList.Count) (cambiados de $($newEntries.Count))"
+  Write-Host "  delete = $($deleteList.Count)"
+  if ($isDeltaManifest) {
+    Write-Host "  from_version = $prev"
+  } else {
+    Write-Host "  from_version = (sin base, se publica paquete completo)"
+  }
 } else {
-  Write-Host "  from_version = (sin base, se publica paquete completo)"
+  Write-Host "  compat  = instalador completo (release mayor)"
 }
 
 # 7) git lfs + commit
@@ -453,6 +473,7 @@ $filesToAdd = @(
 )
 
 git -C $ProjectRoot add -- $filesToAdd
-git -C $ProjectRoot commit -m ("Release {0}: silent files-updater" -f $next)
+$commitMode = if ($manifestType -eq "installer") { "full-installer-updater" } else { "silent files-updater" }
+git -C $ProjectRoot commit -m ("Release {0}: {1}" -f $next, $commitMode)
 
 Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)

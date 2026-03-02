@@ -19,6 +19,9 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 # bash
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch
 
+# release -Bump major
+powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump major
+
 
 # Desactivar entorno virtual
 deactivate
