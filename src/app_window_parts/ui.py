@@ -400,10 +400,38 @@ class UiMixin:
             self.table.setCurrentIndex(idx_qty)
             self.table.scrollTo(idx_qty, QAbstractItemView.PositionAtBottom)
 
-            if QApplication.activeModalWidget() is None:
-                self.table.setFocus()
+            def _qty_editor_is_active() -> bool:
+                try:
+                    if self.table.state() != QAbstractItemView.EditingState:
+                        return False
+                    cur = self.table.currentIndex()
+                    if (not cur.isValid()) or cur.row() != r or cur.column() != 3:
+                        return False
+                    fw = QApplication.focusWidget()
+                    if fw is None or fw is getattr(self, "entry_producto", None):
+                        return False
+                    return bool(self.table.isAncestorOf(fw))
+                except Exception:
+                    return False
 
-            QTimer.singleShot(0, lambda: self.table.edit(idx_qty))
+            def _start_qty_edit(retries: int = 6):
+                try:
+                    self.table.setCurrentIndex(idx_qty)
+                    self.table.scrollTo(idx_qty, QAbstractItemView.PositionAtBottom)
+                    if QApplication.activeModalWidget() is None:
+                        self.table.setFocus()
+                    self.table.edit(idx_qty)
+                    if _qty_editor_is_active():
+                        fw = QApplication.focusWidget()
+                        if isinstance(fw, QLineEdit):
+                            fw.selectAll()
+                        return
+                    if retries > 0:
+                        QTimer.singleShot(30, lambda: _start_qty_edit(retries - 1))
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _start_qty_edit)
 
         except Exception:
             pass
@@ -412,7 +440,13 @@ class UiMixin:
         try:
             if hint == QAbstractItemDelegate.RevertModelCache:
                 return
-            QTimer.singleShot(0, lambda: self._focus_product_search(clear=True))
+
+            def _return_to_product_input():
+                self._focus_product_search(clear=True)
+                if QApplication.focusWidget() is not getattr(self, "entry_producto", None):
+                    QTimer.singleShot(25, lambda: self._focus_product_search(clear=True))
+
+            QTimer.singleShot(0, _return_to_product_input)
         except Exception:
             pass
 
@@ -1041,14 +1075,14 @@ class UiMixin:
 
             if col == 4:
                 try:
-                    self.editar_precio_unitario()
+                    self._abrir_selector_precio(row)
                 except Exception:
                     pass
                 return
 
             if col == 2:
                 try:
-                    self.editar_descuento_item()
+                    self._abrir_dialogo_descuento(row)
                 except Exception:
                     pass
                 return
@@ -1062,7 +1096,7 @@ class UiMixin:
 
             if col == 1:
                 try:
-                    self.editar_observacion()
+                    self._abrir_dialogo_observacion(row, self.items[row])
                 except Exception:
                     pass
                 return
@@ -1157,6 +1191,23 @@ class UiMixin:
                 pass
             return
 
+    def _quantity_editor_is_active(self) -> bool:
+        try:
+            table = getattr(self, "table", None)
+            if table is None:
+                return False
+            if table.state() != QAbstractItemView.EditingState:
+                return False
+            idx = table.currentIndex()
+            if (not idx.isValid()) or idx.column() != 3:
+                return False
+            fw = QApplication.focusWidget()
+            if fw is None:
+                return False
+            return bool(table.isAncestorOf(fw))
+        except Exception:
+            return False
+
     def _schedule_refresh_recs_preview(self):
         if bool(getattr(self, "_suppress_recs_preview_refresh", False)):
             return
@@ -1183,6 +1234,13 @@ class UiMixin:
             if getattr(self, "model", None) is None:
                 return
             if not hasattr(self.model, "set_recommendations_preview"):
+                return
+            if self._quantity_editor_is_active():
+                try:
+                    if getattr(self, "_rec_prev_timer", None) is not None:
+                        self._rec_prev_timer.start(180)
+                except Exception:
+                    pass
                 return
 
             eng = getattr(self, "_rec_engine", None)

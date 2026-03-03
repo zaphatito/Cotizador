@@ -70,6 +70,22 @@ class QuoteStatusDialog(QDialog):
                     break
         self._update_preview()
 
+    def reload_statuses(self) -> None:
+        current = normalize_status(self.cbo.currentData())
+        self._statuses = self._load_statuses()
+
+        self.cbo.blockSignals(True)
+        try:
+            self.cbo.clear()
+            self.cbo.addItem("Sin estado", "")
+            for st in self._statuses:
+                self.cbo.addItem(str(st.get("label") or ""), str(st.get("code") or ""))
+        finally:
+            self.cbo.blockSignals(False)
+
+        self._current = current
+        self._set_initial()
+
     def _update_preview(self):
         st = normalize_status(self.cbo.currentData())
         if not st:

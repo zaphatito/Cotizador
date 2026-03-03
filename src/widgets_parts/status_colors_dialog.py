@@ -6,8 +6,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QColorDialog,
     QDialog,
+    QDialogButtonBox,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -23,7 +25,11 @@ from sqlModels.quote_statuses_repo import replace_quote_statuses, list_quote_sta
 
 from ..db_path import resolve_db_path
 from ..app_window_parts.delegates import InlineTextDelegate
-from .status_colors import best_text_color_for_bg, reload_status_colors_from_db
+from .status_colors import (
+    best_text_color_for_bg,
+    get_default_status_color_hex_map,
+    reload_status_colors_from_db,
+)
 
 
 class StatusColorsDialog(QDialog):
@@ -41,6 +47,7 @@ class StatusColorsDialog(QDialog):
         self.setMinimumHeight(430)
 
         self._rows: list[dict] = self._load_rows()
+        self._default_colors = get_default_status_color_hex_map()
 
         layout = QVBoxLayout(self)
 
@@ -76,18 +83,21 @@ class StatusColorsDialog(QDialog):
         self.btn_up = QPushButton("Subir")
         self.btn_down = QPushButton("Bajar")
         self.btn_pick = QPushButton("Elegir color")
+        self.btn_reset_defaults = QPushButton("Restablecer predeterminados")
 
         self.btn_add.clicked.connect(self._add_status)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_up.clicked.connect(lambda: self._move_selected(-1))
         self.btn_down.clicked.connect(lambda: self._move_selected(1))
         self.btn_pick.clicked.connect(self._pick_selected_color)
+        self.btn_reset_defaults.clicked.connect(self._reset_default_colors_in_table)
 
         row_tools.addWidget(self.btn_add)
         row_tools.addWidget(self.btn_delete)
         row_tools.addWidget(self.btn_up)
         row_tools.addWidget(self.btn_down)
         row_tools.addWidget(self.btn_pick)
+        row_tools.addWidget(self.btn_reset_defaults)
         row_tools.addStretch(1)
         layout.addLayout(row_tools)
 
@@ -171,11 +181,73 @@ class StatusColorsDialog(QDialog):
             f"background-color: {hx}; color: {fg.name()};"
         )
 
+    def _default_color_for_code(self, code: str, *, fallback: str = "#5B708E") -> str:
+        code_u = str(code or "").strip().upper()
+        hx = str(self._default_colors.get(code_u) or "").strip()
+        if hx:
+            return self._normalize_hex(hx, fallback=fallback)
+        return self._normalize_hex(fallback, fallback="#5B708E")
+
     def _selected_row(self) -> int:
         r = int(self.tbl.currentRow())
         if r < 0 or r >= self.tbl.rowCount():
             return -1
         return r
+
+    def _status_code_for_row(self, row_index: int) -> str:
+        if row_index < 0 or row_index >= self.tbl.rowCount():
+            return ""
+        it = self.tbl.item(row_index, 0)
+        if it is None:
+            return ""
+        return str(it.data(Qt.UserRole) or "").strip().upper()
+
+    def _show_color_picker_dialog(
+        self,
+        *,
+        current_hex: str,
+        default_hex: str = "",
+    ) -> str | None:
+        picker = QColorDialog(QColor(current_hex), self)
+        picker.setWindowTitle("Color del estado")
+        picker.setOption(QColorDialog.DontUseNativeDialog, True)
+        picker.setCurrentColor(QColor(current_hex))
+
+        default_hex_norm = self._normalize_hex(default_hex, fallback=current_hex) if default_hex else ""
+        btn_reset = QPushButton("Restablecer predeterminado", picker)
+        btn_reset.clicked.connect(lambda: picker.setCurrentColor(QColor(default_hex_norm)))
+
+        buttons = picker.findChild(QDialogButtonBox)
+        if buttons is not None:
+            buttons.addButton(btn_reset, QDialogButtonBox.ResetRole)
+            for btn in buttons.buttons():
+                try:
+                    role = buttons.buttonRole(btn)
+                except Exception:
+                    role = None
+                if role == QDialogButtonBox.AcceptRole:
+                    btn.setProperty("variant", "primary")
+        else:
+            layout = picker.layout()
+            if layout is not None:
+                row = QHBoxLayout()
+                row.addStretch(1)
+                row.addWidget(btn_reset)
+                layout.addLayout(row)
+
+        if default_hex_norm:
+            pass
+        else:
+            btn_reset.setEnabled(False)
+            btn_reset.setToolTip("Este estado no tiene un color predeterminado del sistema.")
+
+        if picker.exec() != QDialog.Accepted:
+            return None
+
+        picked = picker.currentColor()
+        if not picked.isValid():
+            return None
+        return picked.name(QColor.HexRgb).upper()
 
     def _pick_color_from_button(self) -> None:
         btn = self.sender()
@@ -197,11 +269,41 @@ class StatusColorsDialog(QDialog):
         btn = self.tbl.cellWidget(r, 1)
         if not isinstance(btn, QPushButton):
             return
+        code = self._status_code_for_row(r)
         cur_hex = self._normalize_hex(btn.text(), fallback="#5B708E")
-        picked = QColorDialog.getColor(QColor(cur_hex), self, "Color del estado")
-        if not picked.isValid():
+        picked_hex = self._show_color_picker_dialog(
+            current_hex=cur_hex,
+            default_hex=(self._default_colors.get(code) or ""),
+        )
+        if not picked_hex:
             return
-        self._paint_color_button(btn, picked.name(QColor.HexRgb).upper())
+        self._paint_color_button(btn, picked_hex)
+
+    def _reset_default_colors_in_table(self) -> None:
+        selected_row = self._selected_row()
+        changed = False
+        for r in range(self.tbl.rowCount()):
+            code = self._status_code_for_row(r)
+            if not code or code not in self._default_colors:
+                continue
+            btn = self.tbl.cellWidget(r, 1)
+            if not isinstance(btn, QPushButton):
+                continue
+            default_hex = self._default_color_for_code(code)
+            if self._normalize_hex(btn.text(), fallback="#5B708E") == default_hex:
+                continue
+            self._paint_color_button(btn, default_hex)
+            changed = True
+
+        if selected_row >= 0 and selected_row < self.tbl.rowCount():
+            self.tbl.selectRow(selected_row)
+
+        if not changed:
+            QMessageBox.information(
+                self,
+                "Sin cambios",
+                "Los estados predeterminados ya usan sus colores originales.",
+            )
 
     def _add_status(self) -> None:
         self._rows = self._collect_rows_from_table()
@@ -310,6 +412,19 @@ class StatusColorsDialog(QDialog):
         try:
             if callable(self._on_colors_applied):
                 self._on_colors_applied()
+        except Exception:
+            pass
+
+        try:
+            for w in QApplication.topLevelWidgets():
+                if w is self:
+                    continue
+                fn = getattr(w, "refresh_status_colors", None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
         except Exception:
             pass
 

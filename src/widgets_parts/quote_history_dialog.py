@@ -1248,12 +1248,37 @@ class QuoteHistoryWindow(QMainWindow):
 
     def refresh_status_colors(self):
         try:
-            rows = int(self.model.rowCount())
-            cols = int(self.model.columnCount())
-            if rows > 0 and cols > 0:
-                top = self.model.index(0, 0)
-                bottom = self.model.index(rows - 1, cols - 1)
-                self.model.dataChanged.emit(top, bottom, [Qt.BackgroundRole, Qt.ForegroundRole])
+            current_qid = self._selected_quote_id()
+        except Exception:
+            current_qid = None
+
+        try:
+            get_quote_statuses_cached(db_path=self._db_path, force_reload=True)
+        except Exception:
+            pass
+
+        try:
+            self._reload_current_page()
+        except Exception:
+            pass
+
+        try:
+            if current_qid:
+                self._select_row_by_quote_id(current_qid)
+        except Exception:
+            pass
+
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, QuoteStatusDialog):
+                    try:
+                        w.reload_statuses()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
             self.table.viewport().update()
         except Exception:
             pass

@@ -38,6 +38,50 @@ class TableActionsMixin:
             return [int(cur.row())]
         return []
 
+    def _consume_ctx_row(self) -> int | None:
+        row = self._ctx_row
+        self._ctx_row = None
+        if row is None:
+            return None
+        try:
+            row = int(row)
+        except Exception:
+            return None
+        if 0 <= row < len(self.items):
+            return row
+        return None
+
+    def _current_item_row(self) -> int | None:
+        try:
+            cur = self.table.currentIndex()
+        except Exception:
+            cur = QModelIndex()
+        if cur.isValid() and 0 <= int(cur.row()) < len(self.items):
+            return int(cur.row())
+
+        try:
+            sm = self.table.selectionModel()
+            cur = sm.currentIndex() if sm is not None else QModelIndex()
+        except Exception:
+            cur = QModelIndex()
+        if cur.isValid() and 0 <= int(cur.row()) < len(self.items):
+            return int(cur.row())
+        return None
+
+    def _single_item_action_row(self) -> int | None:
+        row = self._consume_ctx_row()
+        if row is not None:
+            return row
+
+        row = self._current_item_row()
+        if row is not None:
+            return row
+
+        rows = self._selected_item_rows()
+        if rows:
+            return rows[0]
+        return None
+
     def mostrar_menu_tabla(self, pos):
         index = self.table.indexAt(pos)
         if not index.isValid():
@@ -65,7 +109,10 @@ class TableActionsMixin:
         if menu.actions():
             menu.addSeparator()
         menu.addAction(self.act_del)
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+        try:
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+        finally:
+            self._ctx_row = None
 
     def _double_click_tabla(self, index: QModelIndex):
         if not index.isValid():
@@ -102,12 +149,9 @@ class TableActionsMixin:
         self.model.setData(idx, payload, Qt.EditRole)
 
     def editar_descuento_item(self):
-        row = self._ctx_row
+        row = self._single_item_action_row()
         if row is None:
-            rows = self._selected_item_rows()
-            if not rows:
-                return
-            row = rows[0]
+            return
         self._abrir_dialogo_descuento(row)
 
     def _abrir_selector_precio(self, row: int):
@@ -135,22 +179,18 @@ class TableActionsMixin:
         )
 
     def editar_observacion(self):
-        rows = self._selected_item_rows()
-        if not rows:
+        row = self._single_item_action_row()
+        if row is None:
             return
-        row = rows[0]
         if row < 0 or row >= len(self.items):
             return
         item = self.items[row]
         self._abrir_dialogo_observacion(row, item)
 
     def editar_precio_unitario(self):
-        row = self._ctx_row
+        row = self._single_item_action_row()
         if row is None:
-            rows = self._selected_item_rows()
-            if not rows:
-                return
-            row = rows[0]
+            return
         self._abrir_selector_precio(row)
 
     def _recalc_price_from_rules(self, item: dict):
