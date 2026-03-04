@@ -270,10 +270,10 @@ class HistoryConfigDialog(QDialog):
         self.btn_status_colors = QPushButton("Configurar estados")
         self.btn_status_colors.clicked.connect(self._open_status_colors)
 
-        self.btn_unlock_app_values = QPushButton("Modificar valores de la aplicación")
+        self.btn_unlock_app_values = QPushButton("Modificar valores del sistema")
         self.btn_unlock_app_values.clicked.connect(self._unlock_app_values)
 
-        self.grp_app_values = QGroupBox("Valores de la aplicación")
+        self.grp_app_values = QGroupBox("Valores del sistema")
         self.grp_app_values.setVisible(False)
         self.grp_app_values.setEnabled(False)
 
@@ -297,6 +297,7 @@ class HistoryConfigDialog(QDialog):
         self.chk_tienda = QCheckBox("Este equipo es tienda")
         self.chk_tienda.setToolTip("Marcado: si. Desmarcado: no.")
 
+        form.addRow("", self.chk_ai)
         form.addRow("País:", self.cmb_country)
         form.addRow("Tipo de listado:", self.cmb_listing_type)
         form.addRow("", self.chk_allow_no_stock)
@@ -306,7 +307,7 @@ class HistoryConfigDialog(QDialog):
         form.addRow("Tienda:", self.chk_tienda)
 
         row_actions = QHBoxLayout()
-        self.btn_save_app_values = QPushButton("Guardar valores de aplicación")
+        self.btn_save_app_values = QPushButton("Guardar valores del sistema")
         self.btn_save_app_values.setProperty("variant", "primary")
         self.btn_save_app_values.clicked.connect(self._save_app_values)
         row_actions.addStretch(1)
@@ -316,7 +317,6 @@ class HistoryConfigDialog(QDialog):
         btn_close = QPushButton("Cerrar")
         btn_close.clicked.connect(self.accept)
 
-        layout.addWidget(self.chk_ai)
         layout.addWidget(self.chk_recs)
         theme_row = QHBoxLayout()
         theme_row.addWidget(QLabel("Tema de la interfaz:"))
@@ -540,7 +540,7 @@ class HistoryConfigDialog(QDialog):
         self.grp_app_values.setVisible(True)
         self.grp_app_values.setEnabled(True)
         self.btn_unlock_app_values.setEnabled(False)
-        self.btn_unlock_app_values.setText("Valores de la aplicación habilitados")
+        self.btn_unlock_app_values.setText("Valores del sistema habilitados")
         log.info("Se habilitaron los valores protegidos de configuración.")
 
     def _save_app_values(self) -> None:
