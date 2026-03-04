@@ -4,8 +4,63 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, QStringListModel
 from PySide6.QtWidgets import QCompleter, QApplication
 
-from ..config import listing_allows_products, listing_allows_presentations, ALLOW_NO_STOCK
+from ..config import listing_allows_products, listing_allows_presentations, ALLOW_NO_STOCK, CATS
 from ..utils import nz
+
+
+def _is_generic_category_product(prod: dict) -> bool:
+    pid = str(prod.get("id", "")).strip().upper()
+    name = str(prod.get("nombre", "")).strip().upper()
+    cat = str(prod.get("categoria", "")).strip().upper()
+    dept = str(prod.get("departamento", "") or prod.get("categoria", "")).strip().upper()
+    return bool(pid and ((pid == cat and name == cat) or (pid == dept and name == dept)))
+
+
+def _generic_relation_categories(productos) -> set[str]:
+    cats = {str(c or "").strip().upper() for c in (CATS or []) if str(c or "").strip()}
+    for p in productos or []:
+        if _is_generic_category_product(p):
+            dept = str(p.get("departamento", "") or p.get("categoria", "")).strip().upper()
+            if dept:
+                cats.add(dept)
+    return cats
+
+
+def _split_relation_tokens(raw: str, *, generic_categories: set[str]) -> tuple[list[str], list[str]]:
+    exact_codes: list[str] = []
+    wildcard_categories: list[str] = []
+    seen_exact: set[str] = set()
+    seen_wild: set[str] = set()
+
+    for tok in str(raw or "").split(","):
+        code = str(tok or "").strip().upper()
+        if not code:
+            continue
+        if code in generic_categories:
+            if code not in seen_wild:
+                seen_wild.add(code)
+                wildcard_categories.append(code)
+            continue
+        if code not in seen_exact:
+            seen_exact.add(code)
+            exact_codes.append(code)
+
+    return exact_codes, wildcard_categories
+
+
+def _global_fixed_component_codes(presentaciones, *, generic_categories: set[str]) -> set[str]:
+    fixed_codes: set[str] = set()
+    for pr in presentaciones or []:
+        raw = str(pr.get("CODIGOS_PRODUCTO") or pr.get("codigos_producto") or "").strip()
+        if not raw:
+            continue
+        exact_codes, wildcard_categories = _split_relation_tokens(
+            raw,
+            generic_categories=generic_categories,
+        )
+        if wildcard_categories:
+            fixed_codes.update(exact_codes)
+    return fixed_codes
 
 
 def build_completer_strings(productos, botellas_pc, presentaciones=None):
@@ -16,6 +71,11 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
         for p in (productos or [])
         if str(p.get("id", "")).strip()
     }
+    generic_categories = _generic_relation_categories(productos or [])
+    fixed_component_codes = _global_fixed_component_codes(
+        presentaciones or [],
+        generic_categories=generic_categories,
+    )
 
     def _add_sug(s: str):
         t = str(s or "").strip()
@@ -66,17 +126,41 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
             if not rel_codes:
                 continue
 
-            for tok in rel_codes.split(","):
-                base_code = str(tok or "").strip().upper()
-                if not base_code:
-                    continue
+            exact_codes, wildcard_categories = _split_relation_tokens(
+                rel_codes,
+                generic_categories=generic_categories,
+            )
 
-                base = prod_map.get(base_code)
-                if not base:
+            base_candidates = []
+            if wildcard_categories:
+                for base in productos or []:
+                    if _is_generic_category_product(base):
+                        continue
+                    base_code = str(base.get("id") or "").strip().upper()
+                    if base_code in fixed_component_codes or base_code in set(exact_codes):
+                        continue
+                    base_dep = str(base.get("departamento") or base.get("categoria") or "").strip().upper()
+                    if base_dep not in set(wildcard_categories):
+                        continue
+                    base_candidates.append(base)
+            else:
+                for base_code in exact_codes:
+                    base = prod_map.get(base_code)
+                    if not base or _is_generic_category_product(base):
+                        continue
+                    base_candidates.append(base)
+
+            for base in base_candidates:
+                base_code = str(base.get("id") or "").strip().upper()
+                if not base_code:
                     continue
 
                 base_stock = float(nz(base.get("cantidad_disponible"), 0.0))
                 if (not ALLOW_NO_STOCK) and base_stock <= 0.0:
+                    continue
+
+                base_gen = str(base.get("genero") or "").strip().lower()
+                if gen and base_gen and base_gen != str(gen).strip().lower():
                     continue
 
                 base_name = str(base.get("nombre") or "").strip()

@@ -66,20 +66,50 @@ def _tier_to_price_id(tier: str) -> int:
 
 
 class AddItemsMixin:
-    def _presentation_base_codes(self, pres: dict) -> set[str]:
+    def _presentation_relation_parts(self, pres: dict) -> tuple[set[str], set[str]]:
         raw = str(
             pres.get("CODIGOS_PRODUCTO")
             or pres.get("codigos_producto")
             or ""
         ).strip()
         if not raw:
-            return set()
-        out = set()
+            return set(), set()
+
+        generic_categories = {str(c or "").strip().upper() for c in (CATS or []) if str(c or "").strip()}
+        for p in (self.productos or []):
+            if hasattr(self, "_is_generic_category_row") and self._is_generic_category_row(p):
+                dept = str(p.get("departamento", "") or p.get("categoria", "")).strip().upper()
+                if dept:
+                    generic_categories.add(dept)
+
+        exact_codes: set[str] = set()
+        wildcard_categories: set[str] = set()
         for tok in raw.split(","):
             t = str(tok or "").strip().upper()
-            if t:
-                out.add(t)
-        return out
+            if not t:
+                continue
+            if t in generic_categories:
+                wildcard_categories.add(t)
+            else:
+                exact_codes.add(t)
+
+        return exact_codes, wildcard_categories
+
+    def _presentation_base_codes(self, pres: dict) -> set[str]:
+        exact_codes, _wildcard_categories = self._presentation_relation_parts(pres)
+        return exact_codes
+
+    def _presentation_wildcard_categories(self, pres: dict) -> set[str]:
+        _exact_codes, wildcard_categories = self._presentation_relation_parts(pres)
+        return wildcard_categories
+
+    def _presentation_global_fixed_component_codes(self) -> set[str]:
+        fixed_codes: set[str] = set()
+        for pr in (self.presentaciones or []):
+            exact_codes, wildcard_categories = self._presentation_relation_parts(pr)
+            if wildcard_categories:
+                fixed_codes.update(exact_codes)
+        return fixed_codes
 
     def _find_presentacion_combo_match(self, cod_u: str):
         """
@@ -118,9 +148,11 @@ class AddItemsMixin:
                     continue
 
                 base_codes_rel = self._presentation_base_codes(pres)
+                wildcard_cats = self._presentation_wildcard_categories(pres)
+                fixed_component_codes = self._presentation_global_fixed_component_codes()
                 dep = str(pres.get("DEPARTAMENTO") or pres.get("departamento") or "").strip().upper()
                 gen = str(pres.get("GENERO") or pres.get("genero") or "").strip().lower()
-                base_dep = str(base.get("categoria") or "").strip().upper()
+                base_dep = str(base.get("departamento") or base.get("categoria") or "").strip().upper()
                 base_gen = str(base.get("genero") or "").strip().lower()
                 essence_cats = {c.upper() for c in CATS}
                 dep_is_presentation = dep in {"", "PRESENTACION", "PRESENTACIONES"}
@@ -132,7 +164,16 @@ class AddItemsMixin:
                 if dep_is_presentation and gen_match and (base_dep in essence_cats):
                     return pres, base
 
-                if base_codes_rel and base_code in base_codes_rel and gen_match:
+                if (
+                    wildcard_cats
+                    and (base_dep in wildcard_cats)
+                    and (base_code not in base_codes_rel)
+                    and (base_code not in fixed_component_codes)
+                    and gen_match
+                ):
+                    return pres, base
+
+                if (not wildcard_cats) and base_codes_rel and base_code in base_codes_rel and gen_match:
                     return pres, base
 
                 dep_match = (not dep) or (dep == base_dep)

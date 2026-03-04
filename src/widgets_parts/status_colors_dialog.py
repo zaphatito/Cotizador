@@ -61,7 +61,7 @@ class StatusColorsDialog(QDialog):
         self.tbl = QTableWidget(self)
         self.tbl.setColumnCount(2)
         self.tbl.setHorizontalHeaderLabels(["Estado", "Color"])
-        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.verticalHeader().setVisible(True)
         self.tbl.verticalHeader().setDefaultSectionSize(34)
         self.tbl.setSelectionBehavior(QTableWidget.SelectRows)
         self.tbl.setSelectionMode(QTableWidget.SingleSelection)

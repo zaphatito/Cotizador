@@ -1032,7 +1032,7 @@ class QuoteHistoryWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)

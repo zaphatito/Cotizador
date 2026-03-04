@@ -207,7 +207,7 @@ class RatesHistoryDialog(QDialog):
         self.table.setSelectionMode(QTableView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
         self._excel_table = ExcelTableController(
             self.table,
             allow_copy=True,

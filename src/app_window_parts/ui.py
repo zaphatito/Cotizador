@@ -305,6 +305,7 @@ class UiMixin:
                 index=self._ai_index,
                 kind="product",
                 parent=self,
+                debounce_ms=0,
             )
             self._ai_prod.picked.connect(self._on_ai_product_picked)
 
@@ -1615,7 +1616,7 @@ class UiMixin:
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
         self.table.verticalHeader().setDefaultSectionSize(34)
 
         header = self.table.horizontalHeader()

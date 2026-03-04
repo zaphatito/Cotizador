@@ -17,7 +17,7 @@ from rapidfuzz import fuzz, process
 _FTS_PRODUCTS = "ai_products_fts"
 _FTS_CLIENTS = "ai_clients_fts"
 _SEARCH_CACHE_TABLE = "ai_search_cache"
-_CACHE_KEY_FUZZY_PRODUCTS = "fuzzy_products_v2"
+_CACHE_KEY_FUZZY_PRODUCTS = "fuzzy_products_v4"
 
 
 def _strip_accents(s: str) -> str:
@@ -921,6 +921,7 @@ class LocalSearchIndex:
                         UPPER(COALESCE(id, '')) AS codigo,
                         COALESCE(nombre, '') AS nombre,
                         UPPER(COALESCE(categoria, '')) AS categoria,
+                        UPPER(COALESCE(departamento, '')) AS departamento,
                         COALESCE(genero, '') AS genero,
                         COALESCE(ml, '') AS ml,
                         COALESCE(fuente, '') AS fuente
@@ -931,16 +932,18 @@ class LocalSearchIndex:
                 products: List[Tuple[str, str]] = []
                 product_meta: List[Dict[str, Any]] = []
                 product_rows: List[Dict[str, Any]] = []
-                products_by_cat: Dict[str, List[Dict[str, Any]]] = {}
-                products_by_cat_no_gen: Dict[str, List[Dict[str, Any]]] = {}
-                products_by_cat_gen: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+                products_by_dep: Dict[str, List[Dict[str, Any]]] = {}
+                products_by_dep_no_gen: Dict[str, List[Dict[str, Any]]] = {}
+                products_by_dep_gen: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
                 essence_products: List[Dict[str, Any]] = []
                 essence_products_no_gen: List[Dict[str, Any]] = []
                 essence_products_by_gen: Dict[str, List[Dict[str, Any]]] = {}
+                generic_categories: set[str] = set(essence_cats)
                 for r in prows:
                     codigo = str(r["codigo"] or "")
                     nombre = str(r["nombre"] or "")
                     categoria = str(r["categoria"] or "")
+                    departamento = str(r["departamento"] or "")
                     genero = str(r["genero"] or "")
                     ml = str(r["ml"] or "")
                     fuente = str(r["fuente"] or "")
@@ -965,6 +968,7 @@ class LocalSearchIndex:
                         }
                     )
                     cat_u = str(categoria or "").strip().upper()
+                    dep_u = str(departamento or "").strip().upper() or cat_u
                     gen_l = str(genero or "").strip().lower()
                     pm = {
                         "codigo": codigo,
@@ -973,18 +977,22 @@ class LocalSearchIndex:
                         "genero": genero,
                         "fuente": fuente,
                         "_cat_u": cat_u,
+                        "_dep_u": dep_u,
                         "_gen_l": gen_l,
                     }
                     product_meta.append(pm)
 
-                    if cat_u:
-                        products_by_cat.setdefault(cat_u, []).append(pm)
-                        if gen_l:
-                            products_by_cat_gen.setdefault((cat_u, gen_l), []).append(pm)
-                        else:
-                            products_by_cat_no_gen.setdefault(cat_u, []).append(pm)
+                    if codigo and dep_u and (codigo == dep_u) and (str(nombre or "").strip().upper() == dep_u):
+                        generic_categories.add(dep_u)
 
-                    if cat_u in essence_cats:
+                    if dep_u:
+                        products_by_dep.setdefault(dep_u, []).append(pm)
+                        if gen_l:
+                            products_by_dep_gen.setdefault((dep_u, gen_l), []).append(pm)
+                        else:
+                            products_by_dep_no_gen.setdefault(dep_u, []).append(pm)
+
+                    if dep_u in essence_cats:
                         essence_products.append(pm)
                         if gen_l:
                             essence_products_by_gen.setdefault(gen_l, []).append(pm)
@@ -1028,13 +1036,18 @@ class LocalSearchIndex:
                         COALESCE(p.categoria, '') AS base_categoria,
                         COALESCE(NULLIF(pr.genero, ''), pp.genero, p.genero, '') AS genero,
                         COALESCE(pr.departamento, '') AS departamento,
+                        COALESCE(pr.codigos_producto, '') AS rel_tokens,
                         COALESCE(pr.fuente, p.fuente, '') AS fuente
                     FROM presentacion_prod_current pp
                     JOIN products_current p
                         ON UPPER(p.id) = UPPER(pp.cod_producto)
                     LEFT JOIN presentations_current pr
-                        ON UPPER(pr.codigo_norm) = UPPER(pp.cod_presentacion)
-                        OR UPPER(pr.codigo) = UPPER(pp.cod_presentacion)
+                        ON (
+                            UPPER(pr.codigo_norm) = UPPER(pp.cod_presentacion)
+                            OR UPPER(pr.codigo) = UPPER(pp.cod_presentacion)
+                        )
+                        AND UPPER(COALESCE(pr.departamento, '')) = UPPER(COALESCE(pp.departamento, ''))
+                        AND LOWER(COALESCE(pr.genero, '')) = LOWER(COALESCE(pp.genero, ''))
                     WHERE TRIM(COALESCE(pp.cod_producto, '')) <> ''
                       AND TRIM(COALESCE(pp.cod_presentacion, '')) <> ''
                     """
@@ -1042,10 +1055,49 @@ class LocalSearchIndex:
 
                 combos: List[Dict[str, Any]] = []
                 seen_combo = set()
+
+                def _split_rel_tokens(raw_tokens: str) -> tuple[set[str], set[str]]:
+                    exact_codes: set[str] = set()
+                    wildcard_categories: set[str] = set()
+                    for tok in str(raw_tokens or "").split(","):
+                        code = str(tok or "").strip().upper()
+                        if not code:
+                            continue
+                        if code in generic_categories:
+                            wildcard_categories.add(code)
+                        else:
+                            exact_codes.add(code)
+                    return exact_codes, wildcard_categories
+
+                fixed_component_codes: set[str] = set()
+                rel_token_rows = con.execute(
+                    """
+                    SELECT COALESCE(codigos_producto, '') AS rel_tokens
+                    FROM presentations_current
+                    WHERE TRIM(COALESCE(codigos_producto, '')) <> ''
+                    """
+                ).fetchall()
+                for rr in rel_token_rows:
+                    rel_exact_codes, rel_wildcard_categories = _split_rel_tokens(str(rr["rel_tokens"] or ""))
+                    if rel_wildcard_categories:
+                        fixed_component_codes.update(rel_exact_codes)
+
                 for r in combo_rows:
                     base_code = str(r["base_codigo"] or "").strip().upper()
                     pres_code = str(r["pres_codigo"] or "").strip().upper()
                     if not base_code or not pres_code:
+                        continue
+
+                    base_name = str(r["base_nombre"] or "").strip()
+                    base_cat = str(r["base_categoria"] or "").strip().upper()
+                    if base_code == base_cat and base_name.strip().upper() == base_cat:
+                        # Marcador dummy de categoria (ej: ESENCIAS), no combo real.
+                        continue
+
+                    rel_exact_codes, rel_wildcard_categories = _split_rel_tokens(str(r["rel_tokens"] or ""))
+                    if rel_wildcard_categories and (
+                        base_code in rel_exact_codes or base_code in fixed_component_codes
+                    ):
                         continue
 
                     combo_code = f"{base_code}{pres_code}"
@@ -1053,7 +1105,6 @@ class LocalSearchIndex:
                         continue
                     seen_combo.add(combo_code)
 
-                    base_name = str(r["base_nombre"] or "").strip()
                     pres_name = str(r["pres_nombre"] or "").strip()
                     depto = str(r["departamento"] or "").strip().upper()
                     genero = str(r["genero"] or "").strip()
@@ -1097,6 +1148,7 @@ class LocalSearchIndex:
                         COALESCE(nombre, '') AS nombre,
                         COALESCE(departamento, '') AS departamento,
                         COALESCE(genero, '') AS genero,
+                        COALESCE(codigos_producto, '') AS rel_tokens,
                         COALESCE(fuente, '') AS fuente
                     FROM presentations_current
                     WHERE TRIM(COALESCE(codigo_norm, codigo, '')) <> ''
@@ -1153,6 +1205,7 @@ class LocalSearchIndex:
 
                     # Combos sintéticos: base(esencia)+presentación cuando
                     # el departamento de presentación no discrimina base.
+                    rel_exact_codes, rel_wildcard_categories = _split_rel_tokens(str(r["rel_tokens"] or ""))
                     dep_is_presentation = depto in {"", "PRESENTACION", "PRESENTACIONES"}
                     if dep_is_presentation:
                         candidates: List[Dict[str, Any]] = (
@@ -1162,15 +1215,30 @@ class LocalSearchIndex:
                         )
                     else:
                         candidates = (
-                            products_by_cat.get(depto, [])
+                            products_by_dep.get(depto, [])
                             if not genero_l
-                            else (products_by_cat_gen.get((depto, genero_l), []) + products_by_cat_no_gen.get(depto, []))
+                            else (products_by_dep_gen.get((depto, genero_l), []) + products_by_dep_no_gen.get(depto, []))
                         )
+
+                    if rel_wildcard_categories:
+                        candidates = [
+                            pm
+                            for pm in candidates
+                            if str(pm.get("_dep_u") or "").strip().upper() in rel_wildcard_categories
+                            and str(pm.get("codigo") or "").strip().upper() not in rel_exact_codes
+                            and str(pm.get("codigo") or "").strip().upper() not in fixed_component_codes
+                        ]
+                    elif rel_exact_codes:
+                        candidates = [
+                            pm
+                            for pm in candidates
+                            if str(pm.get("codigo") or "").strip().upper() in rel_exact_codes
+                        ]
 
                     for pm in candidates:
                         base_code = str(pm.get("codigo") or "").strip().upper()
                         base_name = str(pm.get("nombre") or "").strip()
-                        base_cat = str(pm.get("_cat_u") or "").strip().upper()
+                        base_cat = str(pm.get("_dep_u") or "").strip().upper()
                         base_gen = str(pm.get("_gen_l") or "").strip().lower()
                         if not base_code:
                             continue
@@ -1368,45 +1436,8 @@ class LocalSearchIndex:
             if len(out) >= limit:
                 return out
 
-        if out:
-            # Para texto libre ya tenemos coincidencias directas; evita fuzzy pesado
-            # en cada tecla para mantener respuesta instantanea.
-            if (" " in qn) and (not has_digits):
-                return out[:limit]
-            if len(out) >= max(4, (limit + 1) // 2):
-                return out[:limit]
-
-        # Fuzzy adicional en RAM para consultas de texto (sin tocar SQLite).
-        choices = cache.choices if (has_digits or (" " not in qn)) else cache.choices_text
-        if choices:
-            best: Dict[str, int] = {}
-            for qv, _qv_ns in variants:
-                hits = process.extract(
-                    qv,
-                    choices,
-                    scorer=fuzz.WRatio,
-                    limit=max(limit * 6, 60),
-                    score_cutoff=50,
-                )
-                for _val, score, key in hits:
-                    k = str(key or "").strip().upper()
-                    if not k:
-                        continue
-                    s = int(score or 0)
-                    if s > best.get(k, 0):
-                        best[k] = s
-
-            for code, _score in sorted(best.items(), key=lambda kv: kv[1], reverse=True):
-                if code in seen_codes:
-                    continue
-                row = cache.search_rows_by_code.get(code)
-                if row is None:
-                    continue
-                out.append(self._product_result_from_search_row(row))
-                seen_codes.add(code)
-                if len(out) >= limit:
-                    break
-
+        # Sin fallback fuzzy: en la UI se busca por cada tecla y priorizamos
+        # respuesta inmediata por encima de coincidencias aproximadas.
         return out[:limit]
 
     def search_products(self, q: str, limit: int = 15) -> List[Dict[str, Any]]:

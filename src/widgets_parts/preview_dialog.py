@@ -76,7 +76,7 @@ def show_preview_dialog(
     tbl.setSelectionMode(QAbstractItemView.NoSelection)
     tbl.setAlternatingRowColors(True)
     tbl.setShowGrid(False)
-    tbl.verticalHeader().setVisible(False)
+    tbl.verticalHeader().setVisible(True)
 
     subtotal_bruto_base = 0.0
     descuento_total_base = 0.0

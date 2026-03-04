@@ -275,7 +275,7 @@ class ClientsEditorDialog(QDialog):
         self.table.setSelectionMode(QTableView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
         self.table.setSortingEnabled(False)
         self.table.setEditTriggers(
             QTableView.DoubleClicked | QTableView.SelectedClicked | QTableView.EditKeyPressed

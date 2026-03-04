@@ -37,7 +37,7 @@ class SelectorTablaSimple(QDialog):
         self.tabla.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tabla.setAlternatingRowColors(True)
         self.tabla.setShowGrid(False)
-        self.tabla.verticalHeader().setVisible(False)
+        self.tabla.verticalHeader().setVisible(True)
         self._excel_table = ExcelTableController(
             self.tabla,
             allow_copy=True,
@@ -51,16 +51,18 @@ class SelectorTablaSimple(QDialog):
         v.addWidget(self.tabla)
 
         self._rows = filas[:]
+        self._rows_view = list(self._rows)
 
         def pintar(rows):
-            self.tabla.setRowCount(0)
-            for r in rows:
-                i = self.tabla.rowCount()
-                self.tabla.insertRow(i)
+            self._rows_view = list(rows or [])
+            self.tabla.setUpdatesEnabled(False)
+            self.tabla.setRowCount(len(self._rows_view))
+            for i, r in enumerate(self._rows_view):
                 self.tabla.setItem(i, 0, QTableWidgetItem(str(r.get("codigo", ""))))
                 self.tabla.setItem(i, 1, QTableWidgetItem(str(r.get("nombre", ""))))
                 self.tabla.setItem(i, 2, QTableWidgetItem(str(r.get("categoria", ""))))
                 self.tabla.setItem(i, 3, QTableWidgetItem(str(r.get("genero", ""))))
+            self.tabla.setUpdatesEnabled(True)
 
         self._pintar = pintar
         self._pintar(self._rows)
@@ -92,6 +94,16 @@ class SelectorTablaSimple(QDialog):
 
     def _guardar(self, row):
         if row < 0:
+            return
+        if 0 <= row < len(getattr(self, "_rows_view", [])):
+            r = self._rows_view[row]
+            self.seleccion = {
+                "codigo": str(r.get("codigo", "")),
+                "nombre": str(r.get("nombre", "")),
+                "categoria": str(r.get("categoria", "")),
+                "genero": str(r.get("genero", "")),
+            }
+            self.accept()
             return
         item = {
             "codigo": self.tabla.item(row, 0).text() if self.tabla.item(row, 0) else "",

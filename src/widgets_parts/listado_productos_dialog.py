@@ -88,7 +88,7 @@ class ListadoProductosDialog(QDialog):
             self.tabla_prod.setSelectionMode(QAbstractItemView.ExtendedSelection)
             self.tabla_prod.setAlternatingRowColors(True)
             self.tabla_prod.setShowGrid(False)
-            self.tabla_prod.verticalHeader().setVisible(False)
+            self.tabla_prod.verticalHeader().setVisible(True)
             self._excel_tables.append(
                 ExcelTableController(
                     self.tabla_prod,
@@ -156,7 +156,7 @@ class ListadoProductosDialog(QDialog):
             self.tabla_pres.setSelectionMode(QAbstractItemView.ExtendedSelection)
             self.tabla_pres.setAlternatingRowColors(True)
             self.tabla_pres.setShowGrid(False)
-            self.tabla_pres.verticalHeader().setVisible(False)
+            self.tabla_pres.verticalHeader().setVisible(True)
             self._excel_tables.append(
                 ExcelTableController(
                     self.tabla_pres,
@@ -230,10 +230,10 @@ class ListadoProductosDialog(QDialog):
     def _pintar_tabla_prod(self, rows):
         if not self.tabla_prod:
             return
-        self.tabla_prod.setRowCount(0)
-        for r in rows:
-            i = self.tabla_prod.rowCount()
-            self.tabla_prod.insertRow(i)
+        rows_view = list(rows or [])
+        self.tabla_prod.setUpdatesEnabled(False)
+        self.tabla_prod.setRowCount(len(rows_view))
+        for i, r in enumerate(rows_view):
             self.tabla_prod.setItem(i, 0, QTableWidgetItem(str(r["codigo"])))
             self.tabla_prod.setItem(i, 1, QTableWidgetItem(str(r["nombre"])))
             self.tabla_prod.setItem(i, 2, QTableWidgetItem(str(r["categoria"])))
@@ -245,15 +245,15 @@ class ListadoProductosDialog(QDialog):
             stock_txt = _fmt_trim_decimal(r.get("stock", 0.0))
             self.tabla_prod.setItem(i, 4, QTableWidgetItem(stock_txt))
             self.tabla_prod.setItem(i, 5, QTableWidgetItem(str(r["tipo"])))
+        self.tabla_prod.setUpdatesEnabled(True)
 
     def _pintar_tabla_pres(self, rows):
         if not self.tabla_pres:
             return
         self._rows_pres_view = list(rows or [])
-        self.tabla_pres.setRowCount(0)
-        for r in rows:
-            i = self.tabla_pres.rowCount()
-            self.tabla_pres.insertRow(i)
+        self.tabla_pres.setUpdatesEnabled(False)
+        self.tabla_pres.setRowCount(len(self._rows_pres_view))
+        for i, r in enumerate(self._rows_pres_view):
             self.tabla_pres.setItem(i, 0, QTableWidgetItem(str(r["codigo"])))
             self.tabla_pres.setItem(i, 1, QTableWidgetItem(str(r["nombre"])))
             self.tabla_pres.setItem(i, 2, QTableWidgetItem(str(r["categoria"])))
@@ -265,6 +265,7 @@ class ListadoProductosDialog(QDialog):
             stock_txt = _fmt_trim_decimal(r.get("stock", 0.0))
             self.tabla_pres.setItem(i, 4, QTableWidgetItem(stock_txt))
             self.tabla_pres.setItem(i, 5, QTableWidgetItem(str(r["tipo"])))
+        self.tabla_pres.setUpdatesEnabled(True)
 
     def _filtrar_prod(self, txt):
         t = (txt or "").lower().strip()

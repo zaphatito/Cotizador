@@ -68,6 +68,10 @@ class SistemaCotizaciones(
 
         self.productos = df_productos.to_dict("records") if df_productos is not None else []
         self.presentaciones = df_presentaciones.to_dict("records") if df_presentaciones is not None else []
+        self._presentation_rel_cache = {}
+        self._presentation_product_map_cache = None
+        self._presentation_generic_categories_cache = None
+        self._presentation_fixed_component_codes_cache = None
         self.items: list[dict] = []
         self._suppress_next_return = False
         self._ignore_completer = False
@@ -160,6 +164,10 @@ class SistemaCotizaciones(
         try:
             self.productos = df_productos.to_dict("records") if df_productos is not None else []
             self.presentaciones = df_presentaciones.to_dict("records") if df_presentaciones is not None else []
+            self._presentation_rel_cache = {}
+            self._presentation_product_map_cache = None
+            self._presentation_generic_categories_cache = None
+            self._presentation_fixed_component_codes_cache = None
             self._botellas_pc = [
                 p
                 for p in (self.productos or [])
@@ -215,7 +223,23 @@ class SistemaCotizaciones(
             log.exception("Error aplicando actualización de catálogo")
 
     def load_from_history_payload(self, payload: dict):
-        self.limpiar_formulario()
+        prev_focus_suppressed = bool(getattr(self, "_suppress_focus_last_row", False))
+        prev_recs_suppressed = bool(getattr(self, "_suppress_recs_preview_refresh", False))
+        self._suppress_focus_last_row = True
+        self._suppress_recs_preview_refresh = True
+        try:
+            self.limpiar_formulario()
+            self._load_from_history_payload_impl(payload)
+        finally:
+            self._suppress_focus_last_row = prev_focus_suppressed
+            self._suppress_recs_preview_refresh = prev_recs_suppressed
+
+        try:
+            self._schedule_refresh_recs_preview()
+        except Exception:
+            pass
+
+    def _load_from_history_payload_impl(self, payload: dict):
 
         self.entry_cliente.setText(payload.get("cliente", "") or "")
         doc_value = str(payload.get("cedula", "") or "").strip()

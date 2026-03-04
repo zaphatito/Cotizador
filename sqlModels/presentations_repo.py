@@ -26,6 +26,39 @@ def _to_float(v, default: float = 0.0) -> float:
         return float(default)
 
 
+def _is_generic_category_row(row: sqlite3.Row | dict | None) -> bool:
+    if not row:
+        return False
+
+    try:
+        pid = _to_text(row["id"]).upper()
+    except Exception:
+        pid = _to_text(getattr(row, "get", lambda *_: "")("id")).upper()
+
+    try:
+        name = _to_text(row["nombre"]).upper()
+    except Exception:
+        name = _to_text(getattr(row, "get", lambda *_: "")("nombre")).upper()
+
+    try:
+        cat = _to_text(row["categoria"]).upper()
+    except Exception:
+        cat = _to_text(getattr(row, "get", lambda *_: "")("categoria")).upper()
+
+    try:
+        depto = _to_text(row["departamento"]).upper()
+    except Exception:
+        depto = _to_text(getattr(row, "get", lambda *_: "")("departamento")).upper()
+
+    if not pid:
+        return False
+    if pid == cat and name == cat:
+        return True
+    if pid == depto and name == depto:
+        return True
+    return False
+
+
 def upsert_presentations_snapshot(
     con: sqlite3.Connection,
     import_id: int,
@@ -316,6 +349,26 @@ def rebuild_presentations_rollup(con: sqlite3.Connection) -> None:
     Calcula stock_disponible y codigos_producto para presentations_current
     usando presentacion_prod_current + products_current.
     """
+    service_markers = {"ESENCIA", "ESENCIAS", "AROMATERAPIA"}
+    marker_rows = con.execute(
+        """
+        SELECT
+            COALESCE(id, '') AS id,
+            COALESCE(nombre, '') AS nombre,
+            COALESCE(categoria, '') AS categoria,
+            COALESCE(departamento, '') AS departamento
+        FROM products_current
+        """
+    ).fetchall()
+    for mr in marker_rows:
+        if _is_generic_category_row(mr):
+            cat = _to_text(mr["categoria"]).upper()
+            depto = _to_text(mr["departamento"]).upper()
+            if cat:
+                service_markers.add(cat)
+            if depto:
+                service_markers.add(depto)
+
     pres_rows = con.execute(
         """
         SELECT
@@ -371,15 +424,55 @@ def rebuild_presentations_rollup(con: sqlite3.Connection) -> None:
             if need_qty <= 0:
                 continue
 
+            if cod_prod in service_markers:
+                cand_rows = con.execute(
+                    """
+                    SELECT
+                        COALESCE(id, '') AS id,
+                        COALESCE(nombre, '') AS nombre,
+                        COALESCE(categoria, '') AS categoria,
+                        COALESCE(departamento, '') AS departamento,
+                        LOWER(COALESCE(genero, '')) AS genero,
+                        COALESCE(cantidad_disponible, 0) AS s
+                    FROM products_current
+                    WHERE UPPER(COALESCE(departamento, '')) = ?
+                    """,
+                    (cod_prod,),
+                ).fetchall()
+
+                best_ratio = 0.0
+                for c in cand_rows:
+                    if _is_generic_category_row(c):
+                        continue
+                    cand_gen = _to_text(c["genero"]).lower()
+                    if rel_gen and cand_gen != rel_gen:
+                        continue
+                    stock_prod = _to_float(c["s"], 0.0)
+                    best_ratio = max(best_ratio, stock_prod / need_qty)
+
+                ratios.append(best_ratio)
+                codigos_producto.append(cod_prod)
+                continue
+
             srow = con.execute(
                 """
-                SELECT COALESCE(cantidad_disponible, 0) AS s
+                SELECT
+                    COALESCE(id, '') AS id,
+                    COALESCE(nombre, '') AS nombre,
+                    COALESCE(categoria, '') AS categoria,
+                    COALESCE(departamento, '') AS departamento,
+                    COALESCE(cantidad_disponible, 0) AS s
                 FROM products_current
                 WHERE UPPER(id) = ?
                 LIMIT 1
                 """,
                 (cod_prod,),
             ).fetchone()
+
+            if srow and _is_generic_category_row(srow):
+                ratios.append(0.0)
+                codigos_producto.append(cod_prod)
+                continue
 
             stock_prod = _to_float(srow["s"], 0.0) if srow else 0.0
             ratios.append(stock_prod / need_qty)
