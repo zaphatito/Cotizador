@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlModels.db import connect, ensure_schema
+from sqlModels.schema import SCHEMA_VERSION
 from sqlModels.settings_repo import get_setting, set_setting
 
 
@@ -32,7 +33,7 @@ def test_settings_tienda_supports_null_and_migrates_existing_schema():
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()
     assert schema_version is not None
-    assert str(schema_version["value"]) == "30"
+    assert str(schema_version["value"]) == str(SCHEMA_VERSION)
 
     cols = con.execute("PRAGMA table_info(settings)").fetchall()
     value_col = next(row for row in cols if str(row["name"]).lower() == "value")

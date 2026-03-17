@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 DDL = [
     # =========================
@@ -297,6 +297,8 @@ DDL = [
         documento_norm TEXT NOT NULL DEFAULT '',
         nombre TEXT NOT NULL DEFAULT '',
         telefono TEXT NOT NULL DEFAULT '',
+        direccion TEXT NOT NULL DEFAULT '-',
+        email TEXT NOT NULL DEFAULT '-',
         source_quote_id INTEGER,
         source_created_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),

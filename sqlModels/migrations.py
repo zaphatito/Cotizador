@@ -1969,6 +1969,35 @@ def mig_30(con: sqlite3.Connection) -> None:
         )
 
 
+def mig_31(con: sqlite3.Connection) -> None:
+    """
+    v31: contacto extendido para clientes.
+    - Agrega clients.direccion
+    - Agrega clients.email
+    - Backfill de registros existentes vacios con '-'
+    """
+    if not _table_exists(con, "clients"):
+        return
+
+    _add_column_if_missing(con, "clients", "direccion", "TEXT NOT NULL DEFAULT '-'")
+    _add_column_if_missing(con, "clients", "email", "TEXT NOT NULL DEFAULT '-'")
+
+    con.execute(
+        """
+        UPDATE clients
+        SET direccion = '-'
+        WHERE TRIM(COALESCE(direccion, '')) = ''
+        """
+    )
+    con.execute(
+        """
+        UPDATE clients
+        SET email = '-'
+        WHERE TRIM(COALESCE(email, '')) = ''
+        """
+    )
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2000,4 +2029,5 @@ MIGRATIONS: dict[int, callable] = {
     28: mig_28,
     29: mig_29,
     30: mig_30,
+    31: mig_31,
 }

@@ -260,6 +260,10 @@ class SistemaCotizaciones(
             pass
         self.entry_cedula.setText(doc_value)
         self.entry_telefono.setText(payload.get("telefono", "") or "")
+        if getattr(self, "entry_direccion", None) is not None:
+            self.entry_direccion.setText(payload.get("direccion", "") or "")
+        if getattr(self, "entry_email", None) is not None:
+            self.entry_email.setText(payload.get("email", "") or "")
 
         prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
         pres_map = {}

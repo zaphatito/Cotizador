@@ -7,7 +7,7 @@ Actualizador automático para Sistema de Cotizaciones.
 - fallback legacy: url + sha256 (Setup_*.exe)
 
 Mejoras:
-- Cuando falla FILES, muestra el error en UI y hace fallback.
+- Cuando FILES no aplica o falla, cambia a instalador completo sin mensajes engañosos.
 - El instalador YA NO se ejecuta desde la app: se ejecuta desde apply_update.exe (después de cerrar).
 - Evita cache viejo agregando ?ts= a TODAS las descargas (incluye media.githubusercontent.com)
 - Ignora sqlModels/app.sqlite3 y updater/apply_update.exe
@@ -583,46 +583,50 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
 
         _emit(ui, "status", text=f"Actualización encontrada: {local_version} → {remote_version}")
         pkg_type = str(manifest.get("type", "") or "").strip().lower() or "installer"
+        installer_url = str(manifest.get("url", "") or "").strip()
+
+        def _start_installer_update(method: str) -> Dict[str, Any]:
+            _emit(ui, "status", text="Preparando actualización (installer)…")
+            plan = _plan_installer(manifest, app_config, log=log, ui=ui)
+            _spawn_apply(plan, app_config, ui=ui, log=log)
+            return {"status": "UPDATE_STARTED", "method": method, "remote": remote_version}
 
         try:
             if pkg_type == "files":
                 from_version = str(manifest.get("from_version", "") or "").strip()
                 if from_version and not _same_version(local_version, from_version):
                     msg = f"Paquete incremental requiere base {from_version}; local={local_version}"
-                    if log:
-                        log.warning("Updater: %s. Se usa fallback installer.", msg)
-                    _emit(ui, "status", text=f"{msg}. Usando instalador completo...")
+                    if installer_url:
+                        if log:
+                            log.info("Updater: %s. Se usa instalador completo.", msg)
+                        _emit(ui, "status", text=f"{msg}. Se usará instalador completo.")
+                        return _start_installer_update("installer_due_to_base_mismatch")
                     raise RuntimeError(msg)
-                _emit(ui, "status", text="Preparando actualización (files)…")
-                plan = _plan_files_update(manifest, app_config, log=log, ui=ui)
 
-                if not plan.get("files") and not plan.get("delete"):
-                    _clear_failure(state, log=log)
-                    _emit(ui, "status", text="No hay cambios que aplicar.")
-                    return {"status": "NO_CHANGES"}
+                try:
+                    _emit(ui, "status", text="Preparando actualización (files)…")
+                    plan = _plan_files_update(manifest, app_config, log=log, ui=ui)
 
-                _spawn_apply(plan, app_config, ui=ui, log=log)
-                return {"status": "UPDATE_STARTED", "method": "files", "remote": remote_version}
+                    if not plan.get("files") and not plan.get("delete"):
+                        _clear_failure(state, log=log)
+                        _emit(ui, "status", text="No hay cambios que aplicar.")
+                        return {"status": "NO_CHANGES"}
 
-            _emit(ui, "status", text="Preparando actualización (installer)…")
-            plan = _plan_installer(manifest, app_config, log=log, ui=ui)
-            _spawn_apply(plan, app_config, ui=ui, log=log)
-            return {"status": "UPDATE_STARTED", "method": "installer", "remote": remote_version}
+                    _spawn_apply(plan, app_config, ui=ui, log=log)
+                    return {"status": "UPDATE_STARTED", "method": "files", "remote": remote_version}
+                except Exception as e:
+                    if installer_url:
+                        if log:
+                            log.exception("Updater: fallo incremental; se usa instalador completo")
+                        _emit(ui, "status", text="La actualización incremental no pudo aplicarse. Cambiando a instalador completo…")
+                        return _start_installer_update("installer_fallback")
+                    raise
+
+            return _start_installer_update("installer")
 
         except Exception as e:
-            _emit(ui, "status", text=f"Error en actualización: {e}")
             if log:
-                log.exception("Updater: fallo; intentando fallback instalador")
-
-            try:
-                if str(manifest.get("url", "") or "").strip():
-                    _emit(ui, "status", text="Fallback: usando instalador…")
-                    plan = _plan_installer(manifest, app_config, log=log, ui=ui)
-                    _spawn_apply(plan, app_config, ui=ui, log=log)
-                    return {"status": "UPDATE_STARTED", "method": "installer_fallback", "remote": remote_version}
-            except Exception as e2:
-                if log:
-                    log.exception("Updater: fallback instalador también falló: %s", e2)
+                log.exception("Updater: fallo de actualización")
 
             delay = _mark_failure(app_config, state, remote_version, e, log=log)
             _emit(ui, "failed", error=str(e), retry_in=delay)

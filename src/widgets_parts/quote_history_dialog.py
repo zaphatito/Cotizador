@@ -1892,6 +1892,8 @@ class QuoteHistoryWindow(QMainWindow):
                 "cedula": header.get("cedula", ""),
                 "tipo_documento": header.get("tipo_documento", ""),
                 "telefono": header.get("telefono", ""),
+                "direccion": header.get("direccion", ""),
+                "email": header.get("email", ""),
                 "items_base": items_base,
             }
 

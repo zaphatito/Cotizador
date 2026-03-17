@@ -95,7 +95,7 @@ class SmartCompleter(QObject):
         limit: int = 12,
         debounce_ms: int = 60,
         min_chars: int = 1,
-        use_popup: bool = False,  # ✅ si quieres Qt.Popup explícito
+        use_popup: bool = False,  # set True to use Qt.Popup explicitly
     ):
         super().__init__(parent)
         self.line = line
@@ -117,7 +117,7 @@ class SmartCompleter(QObject):
         self._search_busy = False
         self._pending_query: Optional[str] = None
 
-        # ✅ ToolTip es estable en Windows; Popup se puede usar si desactivas el auto-hide por FocusOut
+        # Qt.ToolTip is stable on Windows; Qt.Popup can be used with FocusOut guard.
         flags = (Qt.Popup | Qt.FramelessWindowHint) if bool(use_popup) else (Qt.ToolTip | Qt.FramelessWindowHint)
         self._popup = QFrame(None, flags)
         self._popup.setObjectName("SmartCompleterPopup")
@@ -207,7 +207,8 @@ class SmartCompleter(QObject):
                         return True
 
             elif et == QEvent.FocusOut:
-                # ✅ FIX: con Qt.Popup, el line pierde foco al mostrar popup; NO lo ocultes en ese caso.
+                # With Qt.Popup, line edit can lose focus when popup opens.
+                # Do not hide if focus moved into the popup itself.
                 if bool(self._popup.windowFlags() & Qt.Popup) and self._popup.isVisible():
                     fw = QApplication.focusWidget()
                     if fw is not None and (fw is self._popup or self._popup.isAncestorOf(fw)):
@@ -289,8 +290,9 @@ class SmartCompleter(QObject):
                 cli = str(r.get("cliente") or "").strip()
                 doc = str(r.get("cedula") or "").strip()
                 tel = str(r.get("telefono") or "").strip()
-                # ✅ pedido: "nombre - documento - tlf"
-                title = " - ".join([x for x in [cli, doc, tel] if x]).strip()
+                addr = str(r.get("direccion") or "").strip()
+                mail = str(r.get("email") or "").strip()
+                title = " - ".join([x for x in [cli, doc, tel, addr, mail] if x]).strip()
                 subtitle = ""
                 items.append(SuggestItem(title=title, subtitle=subtitle, payload=dict(r)))
 
@@ -330,7 +332,7 @@ class SmartCompleter(QObject):
         text = str(self.line.text() or "").strip()
         if not text:
             return ""
-        for sep in (" - ", " — ", " – ", " â€” ", " â€“ "):
+        for sep in (" - ", "\u2014", "\u2013"):
             if sep in text:
                 text = text.split(sep, 1)[0].strip()
                 break
@@ -358,3 +360,4 @@ class SmartCompleter(QObject):
         idx = self._view.currentIndex()
         if idx.isValid():
             self._pick_index(idx)
+

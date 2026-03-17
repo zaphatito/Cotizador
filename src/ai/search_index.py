@@ -278,17 +278,26 @@ def ensure_ai_schema(con: sqlite3.Connection) -> bool:
         )
         """
     )
-    con.execute(
-        f"""
+    fts_clients_sql = f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS {_FTS_CLIENTS}
         USING fts5(
             cliente,
             cedula,
             telefono,
+            direccion,
+            email,
             tokenize='{tokenize}'
         )
         """
-    )
+    con.execute(fts_clients_sql)
+    try:
+        cols = {str(r["name"]).lower() for r in con.execute(f"PRAGMA table_info({_FTS_CLIENTS})").fetchall()}
+        required_cols = {"cliente", "cedula", "telefono", "direccion", "email"}
+        if cols and (not required_cols.issubset(cols)):
+            con.execute(f"DROP TABLE IF EXISTS {_FTS_CLIENTS}")
+            con.execute(fts_clients_sql)
+    except Exception:
+        pass
     con.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {_SEARCH_CACHE_TABLE} (
@@ -400,14 +409,18 @@ def rebuild_clients_index(con: sqlite3.Connection) -> None:
     con.execute(f"DELETE FROM {_FTS_CLIENTS}")
 
     if _clients_table_has_rows(con):
+        direccion_expr = "COALESCE(NULLIF(TRIM(direccion), ''), '-')" if _column_exists(con, "clients", "direccion") else "'-'"
+        email_expr = "COALESCE(NULLIF(TRIM(email), ''), '-')" if _column_exists(con, "clients", "email") else "'-'"
         deleted_filter = " AND deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
         con.execute(
             f"""
-            INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono)
+            INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono, direccion, email)
             SELECT
                 COALESCE(nombre, ''),
                 COALESCE(documento, ''),
-                COALESCE(telefono, '')
+                COALESCE(telefono, ''),
+                {direccion_expr},
+                {email_expr}
             FROM clients
             WHERE TRIM(COALESCE(nombre, '')) <> ''
               {deleted_filter}
@@ -418,11 +431,13 @@ def rebuild_clients_index(con: sqlite3.Connection) -> None:
 
     con.execute(
         f"""
-        INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono)
+        INSERT INTO {_FTS_CLIENTS}(cliente, cedula, telefono, direccion, email)
         SELECT
             COALESCE(t.cliente,''),
             COALESCE(t.cedula,''),
-            COALESCE(t.telefono,'')
+            COALESCE(t.telefono,''),
+            '-',
+            '-'
         FROM (
             SELECT
                 cliente, cedula, telefono,
@@ -473,6 +488,18 @@ def _search_clients_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Dic
     if not mq:
         return []
     if _clients_table_has_rows(con):
+        has_client_direccion = _column_exists(con, "clients", "direccion")
+        has_client_email = _column_exists(con, "clients", "email")
+        direccion_cmp = (
+            "AND LOWER(COALESCE(NULLIF(TRIM(c.direccion),''), '-')) = LOWER(COALESCE(NULLIF(TRIM(f.direccion),''), '-'))"
+            if has_client_direccion
+            else ""
+        )
+        email_cmp = (
+            "AND LOWER(COALESCE(NULLIF(TRIM(c.email),''), '-')) = LOWER(COALESCE(NULLIF(TRIM(f.email),''), '-'))"
+            if has_client_email
+            else ""
+        )
         active_client_filter = " AND c.deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
         rows = con.execute(
             f"""
@@ -480,6 +507,8 @@ def _search_clients_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Dic
                 f.cliente AS cliente,
                 f.cedula AS cedula,
                 f.telefono AS telefono,
+                COALESCE(NULLIF(TRIM(f.direccion), ''), '-') AS direccion,
+                COALESCE(NULLIF(TRIM(f.email), ''), '-') AS email,
                 bm25({_FTS_CLIENTS}) AS score
             FROM {_FTS_CLIENTS} AS f
             WHERE {_FTS_CLIENTS} MATCH ?
@@ -489,6 +518,8 @@ def _search_clients_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Dic
                   WHERE LOWER(TRIM(COALESCE(c.nombre,''))) = LOWER(TRIM(COALESCE(f.cliente,'')))
                     AND LOWER(TRIM(COALESCE(c.documento,''))) = LOWER(TRIM(COALESCE(f.cedula,'')))
                     AND LOWER(TRIM(COALESCE(c.telefono,''))) = LOWER(TRIM(COALESCE(f.telefono,'')))
+                    {direccion_cmp}
+                    {email_cmp}
                     {active_client_filter}
               )
             ORDER BY score
@@ -503,6 +534,8 @@ def _search_clients_fts(con: sqlite3.Connection, q: str, limit: int) -> List[Dic
                 f.cliente AS cliente,
                 f.cedula AS cedula,
                 f.telefono AS telefono,
+                COALESCE(NULLIF(TRIM(f.direccion), ''), '-') AS direccion,
+                COALESCE(NULLIF(TRIM(f.email), ''), '-') AS email,
                 bm25({_FTS_CLIENTS}) AS score
             FROM {_FTS_CLIENTS} AS f
             WHERE {_FTS_CLIENTS} MATCH ?
@@ -566,38 +599,61 @@ def _search_clients_like(con: sqlite3.Connection, q: str, limit: int) -> List[Di
     like_ns = f"%{qn.replace(' ', '')}%"
 
     if _clients_table_has_rows(con):
+        has_client_direccion = _column_exists(con, "clients", "direccion")
+        has_client_email = _column_exists(con, "clients", "email")
+        direccion_sel = "COALESCE(NULLIF(TRIM(direccion),''), '-')" if has_client_direccion else "'-'"
+        email_sel = "COALESCE(NULLIF(TRIM(email),''), '-')" if has_client_email else "'-'"
+        direccion_like = "OR LOWER(COALESCE(direccion,'')) LIKE ?" if has_client_direccion else ""
+        email_like = "OR LOWER(COALESCE(email,'')) LIKE ?" if has_client_email else ""
+        direccion_like_ns = "OR REPLACE(LOWER(COALESCE(direccion,'')), ' ', '') LIKE ?" if has_client_direccion else ""
+        email_like_ns = "OR REPLACE(LOWER(COALESCE(email,'')), ' ', '') LIKE ?" if has_client_email else ""
         deleted_filter = "deleted_at IS NULL AND" if _column_exists(con, "clients", "deleted_at") else ""
-        rows = con.execute(
-            """
+        params: list[Any] = [like, like, like]
+        if has_client_direccion:
+            params.append(like)
+        if has_client_email:
+            params.append(like)
+        params.extend([like_ns, like_ns, like_ns])
+        if has_client_direccion:
+            params.append(like_ns)
+        if has_client_email:
+            params.append(like_ns)
+        params.append(int(limit))
+        sql = f"""
             SELECT DISTINCT
                 COALESCE(nombre,'') AS cliente,
                 COALESCE(documento,'') AS cedula,
-                COALESCE(telefono,'') AS telefono
+                COALESCE(telefono,'') AS telefono,
+                {direccion_sel} AS direccion,
+                {email_sel} AS email
             FROM clients
             WHERE
-              """
-            + deleted_filter
-            + """
-              (
-                  LOWER(COALESCE(nombre,'')) LIKE ?
-                  OR LOWER(COALESCE(documento,'')) LIKE ?
-                  OR LOWER(COALESCE(telefono,'')) LIKE ?
-                  OR REPLACE(LOWER(COALESCE(nombre,'')), ' ', '') LIKE ?
-                  OR REPLACE(LOWER(COALESCE(documento,'')), ' ', '') LIKE ?
-                  OR REPLACE(LOWER(COALESCE(telefono,'')), ' ', '') LIKE ?
-              )
+                {deleted_filter}
+                (
+                    LOWER(COALESCE(nombre,'')) LIKE ?
+                    OR LOWER(COALESCE(documento,'')) LIKE ?
+                    OR LOWER(COALESCE(telefono,'')) LIKE ?
+                    {direccion_like}
+                    {email_like}
+                    OR REPLACE(LOWER(COALESCE(nombre,'')), ' ', '') LIKE ?
+                    OR REPLACE(LOWER(COALESCE(documento,'')), ' ', '') LIKE ?
+                    OR REPLACE(LOWER(COALESCE(telefono,'')), ' ', '') LIKE ?
+                    {direccion_like_ns}
+                    {email_like_ns}
+                )
             ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
             LIMIT ?
-            """,
-            (like, like, like, like_ns, like_ns, like_ns, int(limit)),
-        ).fetchall()
+            """
+        rows = con.execute(sql, tuple(params)).fetchall()
     else:
         rows = con.execute(
             """
             SELECT DISTINCT
                 COALESCE(cliente,'') AS cliente,
                 COALESCE(cedula,'') AS cedula,
-                COALESCE(telefono,'') AS telefono
+                COALESCE(telefono,'') AS telefono,
+                '-' AS direccion,
+                '-' AS email
             FROM quotes
             WHERE deleted_at IS NULL
               AND (
@@ -626,7 +682,7 @@ def _search_clients_like(con: sqlite3.Connection, q: str, limit: int) -> List[Di
 @dataclass
 class _FuzzyCache:
     products: List[Tuple[str, str]]  # (codigo, texto_expandido)
-    clients: List[Tuple[str, str, str]]  # (cliente, cedula, telefono)
+    clients: List[Tuple[str, str, str, str, str]]  # (cliente, cedula, telefono, direccion, email)
     combos: List[Dict[str, Any]]  # rows sinteticas de codigo combinado
     presentations: List[Dict[str, Any]]  # rows de presentaciones (codigo directo)
     product_codes: set[str]
@@ -670,7 +726,7 @@ class LocalSearchIndex:
         *,
         products: List[Tuple[str, str]],
         product_rows: List[Dict[str, Any]],
-        clients: List[Tuple[str, str, str]],
+        clients: List[Tuple[str, str, str, str, str]],
         combos: List[Dict[str, Any]],
         presentations: List[Dict[str, Any]],
     ) -> _FuzzyCache:
@@ -885,13 +941,17 @@ class LocalSearchIndex:
             con = self._connect()
             try:
                 if _clients_table_has_rows(con):
+                    direccion_expr = "COALESCE(NULLIF(TRIM(direccion), ''), '-')" if _column_exists(con, "clients", "direccion") else "'-'"
+                    email_expr = "COALESCE(NULLIF(TRIM(email), ''), '-')" if _column_exists(con, "clients", "email") else "'-'"
                     deleted_filter = " AND deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
                     crows = con.execute(
                         f"""
                         SELECT
                             COALESCE(nombre, '') AS cliente,
                             COALESCE(documento, '') AS cedula,
-                            COALESCE(telefono, '') AS telefono
+                            COALESCE(telefono, '') AS telefono,
+                            {direccion_expr} AS direccion,
+                            {email_expr} AS email
                         FROM clients
                         WHERE TRIM(COALESCE(nombre, '')) <> ''
                           {deleted_filter}
@@ -901,7 +961,7 @@ class LocalSearchIndex:
                 else:
                     crows = con.execute(
                         """
-                        SELECT cliente, cedula, telefono
+                        SELECT cliente, cedula, telefono, '-' AS direccion, '-' AS email
                         FROM quotes
                         WHERE deleted_at IS NULL
                           AND TRIM(COALESCE(cliente,'')) <> ''
@@ -910,9 +970,17 @@ class LocalSearchIndex:
                         """
                     ).fetchall()
 
-                clients: List[Tuple[str, str, str]] = []
+                clients: List[Tuple[str, str, str, str, str]] = []
                 for r in crows:
-                    clients.append((str(r["cliente"] or ""), str(r["cedula"] or ""), str(r["telefono"] or "")))
+                    clients.append(
+                        (
+                            str(r["cliente"] or ""),
+                            str(r["cedula"] or ""),
+                            str(r["telefono"] or ""),
+                            str(r["direccion"] or "-"),
+                            str(r["email"] or "-"),
+                        )
+                    )
 
                 essence_cats = {"ESENCIA", "ESENCIAS", "AROMATERAPIA"}
                 prows = con.execute(
@@ -1703,9 +1771,19 @@ class LocalSearchIndex:
             out: List[Dict[str, Any]] = []
             collect_limit = max(limit * 5, 60)
             has_clients_table = _clients_table_has_rows(con)
+            has_client_direccion = _column_exists(con, "clients", "direccion") if has_clients_table else False
+            has_client_email = _column_exists(con, "clients", "email") if has_clients_table else False
             app_country_code = _load_app_country_code(con)
 
             def _client_key(row: Dict[str, Any]) -> str:
+                cli = str(row.get("cliente") or "").strip().lower()
+                doc = str(row.get("cedula") or "").strip().lower()
+                tel = str(row.get("telefono") or "").strip().lower()
+                addr = str(row.get("direccion") or "-").strip().lower()
+                mail = str(row.get("email") or "-").strip().lower()
+                return f"{cli}|{doc}|{tel}|{addr}|{mail}"
+
+            def _usage_key(row: Dict[str, Any]) -> str:
                 cli = str(row.get("cliente") or "").strip().lower()
                 doc = str(row.get("cedula") or "").strip().lower()
                 tel = str(row.get("telefono") or "").strip().lower()
@@ -1721,12 +1799,16 @@ class LocalSearchIndex:
                     params.append(str(app_country_code))
                 if _column_exists(con, "clients", "deleted_at"):
                     where_sql.append("deleted_at IS NULL")
+                direccion_expr = "COALESCE(NULLIF(TRIM(direccion), ''), '-')" if has_client_direccion else "'-'"
+                email_expr = "COALESCE(NULLIF(TRIM(email), ''), '-')" if has_client_email else "'-'"
                 row = con.execute(
-                    """
+                    f"""
                     SELECT
                         COALESCE(nombre, '') AS cliente,
                         COALESCE(documento, '') AS cedula,
                         COALESCE(telefono, '') AS telefono,
+                        {direccion_expr} AS direccion,
+                        {email_expr} AS email,
                         COALESCE(country_code, '') AS country_code,
                         COALESCE(tipo_documento, '') AS tipo_documento
                     FROM clients
@@ -1759,6 +1841,8 @@ class LocalSearchIndex:
                             str(row.get("cliente") or ""),
                             str(row.get("cedula") or ""),
                             str(row.get("telefono") or ""),
+                            str(row.get("direccion") or ""),
+                            str(row.get("email") or ""),
                         ]
                     ).strip()
                 )
@@ -1775,7 +1859,7 @@ class LocalSearchIndex:
                 for qv in variants:
                     rows = _search_clients_fts(con, qv, max(collect_limit, 60))
                     for r in rows or []:
-                        key = (r.get("cliente"), r.get("cedula"), r.get("telefono"))
+                        key = (r.get("cliente"), r.get("cedula"), r.get("telefono"), r.get("direccion"), r.get("email"))
                         if key in seen:
                             continue
                         seen.add(key)
@@ -1786,7 +1870,7 @@ class LocalSearchIndex:
             for qv in variants:
                 rows = _search_clients_like(con, qv, max(collect_limit, 60))
                 for r in rows or []:
-                    key = (r.get("cliente"), r.get("cedula"), r.get("telefono"))
+                    key = (r.get("cliente"), r.get("cedula"), r.get("telefono"), r.get("direccion"), r.get("email"))
                     if key in seen:
                         continue
                     seen.add(key)
@@ -1799,8 +1883,8 @@ class LocalSearchIndex:
                 cache = self._ensure_fuzzy_cache()
 
                 choices: Dict[str, str] = {}
-                for i, (cli, doc, tel) in enumerate(cache.clients):
-                    base = _norm_query(f"{cli} {doc} {tel}".strip())
+                for i, (cli, doc, tel, addr, mail) in enumerate(cache.clients):
+                    base = _norm_query(f"{cli} {doc} {tel} {addr} {mail}".strip())
                     ns = base.replace(" ", "")
                     choices[str(i)] = f"{base} {ns}"
 
@@ -1819,8 +1903,18 @@ class LocalSearchIndex:
                     if score < 72:
                         continue
                     i = int(key)
-                    cli, doc, tel = cache.clients[i]
-                    out.append({"cliente": cli, "cedula": doc, "telefono": tel, "score": score, "_rel": float(score)})
+                    cli, doc, tel, addr, mail = cache.clients[i]
+                    out.append(
+                        {
+                            "cliente": cli,
+                            "cedula": doc,
+                            "telefono": tel,
+                            "direccion": addr,
+                            "email": mail,
+                            "score": score,
+                            "_rel": float(score),
+                        }
+                    )
                     if len(out) >= collect_limit:
                         break
 
@@ -1828,11 +1922,7 @@ class LocalSearchIndex:
             if out:
                 keys = []
                 for r in out:
-                    cli = str(r.get("cliente") or "").strip()
-                    doc = str(r.get("cedula") or "").strip()
-                    tel = str(r.get("telefono") or "").strip()
-                    k = f"{cli.lower().strip()}|{doc.lower().strip()}|{tel.lower().strip()}"
-                    keys.append(k)
+                    keys.append(_usage_key(r))
 
                 # query counts en 1 tiro
                 expr = (
@@ -1859,10 +1949,7 @@ class LocalSearchIndex:
                 mp = {str(r["k"]): (int(r["cnt"] or 0), str(r["last_created"] or "")) for r in rr}
 
                 for r in out:
-                    cli = str(r.get("cliente") or "").strip()
-                    doc = str(r.get("cedula") or "").strip()
-                    tel = str(r.get("telefono") or "").strip()
-                    k = f"{cli.lower().strip()}|{doc.lower().strip()}|{tel.lower().strip()}"
+                    k = _usage_key(r)
                     cnt, lastc = mp.get(k, (0, ""))
                     r["usage_cnt"] = cnt
                     r["last_created"] = lastc
@@ -1896,10 +1983,15 @@ class LocalSearchIndex:
                     unique_keys.append(ck)
 
                 if unique_keys:
+                    dir_expr = "LOWER(COALESCE(NULLIF(TRIM(direccion),''), '-'))" if has_client_direccion else "'-'"
+                    email_expr = "LOWER(COALESCE(NULLIF(TRIM(email),''), '-'))" if has_client_email else "'-'"
                     expr_cli = (
                         "LOWER(TRIM(COALESCE(nombre,''))) || '|' || "
                         "LOWER(TRIM(COALESCE(documento,''))) || '|' || "
-                        "LOWER(TRIM(COALESCE(telefono,'')))"
+                        "LOWER(TRIM(COALESCE(telefono,''))) || '|' || "
+                        + dir_expr
+                        + " || '|' || "
+                        + email_expr
                     )
                     ph = ",".join(["?"] * len(unique_keys))
                     active_filter = "TRIM(COALESCE(deleted_at, '')) = '' AND " if _column_exists(con, "clients", "deleted_at") else ""
@@ -1926,6 +2018,8 @@ class LocalSearchIndex:
                             str(generic_candidate.get("cliente") or ""),
                             str(generic_candidate.get("cedula") or ""),
                             str(generic_candidate.get("telefono") or ""),
+                            str(generic_candidate.get("direccion") or ""),
+                            str(generic_candidate.get("email") or ""),
                         ]
                     ).strip()
                 )

@@ -80,6 +80,8 @@ def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
         ("quote_items", "tipo_prod"),
         ("clients", "documento_norm"),
         ("clients", "deleted_at"),
+        ("clients", "direccion"),
+        ("clients", "email"),
         ("products_current", "p_max"),
         ("products_current", "p_min"),
         ("products_current", "p_oferta"),

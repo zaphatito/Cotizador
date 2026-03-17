@@ -169,6 +169,8 @@ class ClientsTableModel(QAbstractTableModel):
                 "documento_norm": "",
                 "nombre": "",
                 "telefono": "",
+                "direccion": "-",
+                "email": "-",
                 "source_quote_id": None,
                 "source_created_at": "",
                 "created_at": "",
@@ -261,7 +263,7 @@ class ClientsEditorDialog(QDialog):
 
         top = QHBoxLayout()
         self.ed_search = QLineEdit()
-        self.ed_search.setPlaceholderText("Buscar por nombre, tipo, documento o telefono")
+        self.ed_search.setPlaceholderText("Buscar por nombre, tipo, documento, telefono, direccion o email")
         self.btn_refresh = QPushButton("Recargar")
         self.btn_new = QPushButton("Nuevo")
         top.addWidget(self.ed_search, 1)
@@ -463,6 +465,8 @@ class ClientsEditorDialog(QDialog):
                             documento=str(row.get("documento") or "").strip(),
                             nombre=str(row.get("nombre") or "").strip(),
                             telefono=str(row.get("telefono") or "").strip(),
+                            direccion=str(row.get("direccion") or "-").strip() or "-",
+                            email=str(row.get("email") or "-").strip() or "-",
                             client_id=client_id,
                         )
                     except ValueError as e:

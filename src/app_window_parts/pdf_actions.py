@@ -63,11 +63,13 @@ class PdfActionsMixin:
         c = self.entry_cliente.text()
         ci = self.entry_cedula.text()
         t = self.entry_telefono.text()
+        d = self.entry_direccion.text()
+        e = self.entry_email.text()
         items = self.items
-        if not all([c, ci, t]):
+        if not all([c, ci, t, d, e]):
             QMessageBox.warning(self, "Advertencia", "❌ Faltan datos del cliente")
             return
-        ok_doc, msg_doc, _tipo_doc = self._validate_doc_phone_values(ci, t)
+        ok_doc, msg_doc, _tipo_doc = self._validate_doc_phone_values(ci, t, direccion=d, email=e)
         if not ok_doc:
             QMessageBox.warning(self, "Advertencia", msg_doc)
             return
@@ -142,10 +144,12 @@ class PdfActionsMixin:
         c = self.entry_cliente.text()
         ci = self.entry_cedula.text()
         t = self.entry_telefono.text()
-        if not all([c, ci, t]):
+        d = self.entry_direccion.text()
+        e = self.entry_email.text()
+        if not all([c, ci, t, d, e]):
             QMessageBox.warning(self, "Advertencia", "❌ Faltan datos del cliente")
             return
-        ok_doc, msg_doc, tipo_doc = self._validate_doc_phone_values(ci, t)
+        ok_doc, msg_doc, tipo_doc = self._validate_doc_phone_values(ci, t, direccion=d, email=e)
         if not ok_doc:
             QMessageBox.warning(self, "Advertencia", msg_doc)
             return
@@ -188,6 +192,8 @@ class PdfActionsMixin:
             "cliente": c,
             "cedula": ci,
             "telefono": t,
+            "direccion": d,
+            "email": e,
             "metodo_pago": metodo_pago_pdf,
             "items": items_pdf,
             "subtotal_bruto": subtotal_bruto_shown,
@@ -216,6 +222,8 @@ class PdfActionsMixin:
                 quote_ref = str(conflict.get("quote_no") or f"ID {conflict.get('id')}")
                 old_cli = str(conflict.get("cliente") or "").strip()
                 old_tel = str(conflict.get("telefono") or "").strip()
+                old_dir = str(conflict.get("direccion") or "").strip()
+                old_mail = str(conflict.get("email") or "").strip()
                 old_tipo = str(conflict.get("tipo_documento") or "").strip().upper()
                 old_doc = str(conflict.get("cedula") or "").strip()
 
@@ -230,6 +238,10 @@ class PdfActionsMixin:
                         self.entry_cedula.setText(old_doc)
                     if old_tel:
                         self.entry_telefono.setText(old_tel)
+                    if getattr(self, "entry_direccion", None) is not None and old_dir:
+                        self.entry_direccion.setText(old_dir)
+                    if getattr(self, "entry_email", None) is not None and old_mail:
+                        self.entry_email.setText(old_mail)
                     try:
                         self._update_title_with_client(self.entry_cliente.text())
                     except Exception:
@@ -248,7 +260,9 @@ class PdfActionsMixin:
                         "Se cargaron los datos ya guardados para ese documento.\n\n"
                         f"Historial: {quote_ref}\n"
                         f"Cliente: {old_cli}\n"
-                        f"Telefono: {old_tel}"
+                        f"Telefono: {old_tel}\n"
+                        f"Direccion: {old_dir}\n"
+                        f"Email: {old_mail}"
                     ),
                 )
                 con.close()
@@ -279,6 +293,8 @@ class PdfActionsMixin:
                         cliente=c,
                         cedula=ci,
                         telefono=t,
+                        direccion=d,
+                        email=e,
                         tipo_documento=tipo_doc,
                         metodo_pago=metodo_pago_db,
                         currency_shown=str(curr or ""),
@@ -347,6 +363,10 @@ class PdfActionsMixin:
         self.entry_cliente.clear()
         self.entry_cedula.clear()
         self.entry_telefono.clear()
+        if getattr(self, "entry_direccion", None) is not None:
+            self.entry_direccion.clear()
+        if getattr(self, "entry_email", None) is not None:
+            self.entry_email.clear()
         try:
             if getattr(self, "combo_tipo_documento", None) is not None:
                 self.combo_tipo_documento.setCurrentIndex(0)

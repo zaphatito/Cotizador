@@ -153,9 +153,18 @@ class UiMixin:
     def _infer_tipo_documento(self, doc: str) -> str:
         return infer_tipo_documento_from_doc(COUNTRY_CODE, str(doc or ""))
 
-    def _validate_doc_phone_values(self, doc: str, phone: str) -> tuple[bool, str, str]:
+    def _validate_doc_phone_values(
+        self,
+        doc: str,
+        phone: str,
+        *,
+        direccion: str = "",
+        email: str = "",
+    ) -> tuple[bool, str, str]:
         d = str(doc or "").strip()
         t = str(phone or "").strip()
+        addr = str(direccion or "").strip()
+        mail = str(email or "").strip()
         doc_type = self._selected_doc_type()
         if not doc_type:
             return (
@@ -182,6 +191,22 @@ class UiMixin:
                 ),
                 "",
             )
+        if not addr:
+            return (
+                False,
+                (
+                    "Ingresa una direccion."
+                ),
+                "",
+            )
+        if not mail:
+            return (
+                False,
+                (
+                    "Ingresa un email."
+                ),
+                "",
+            )
         return True, "", str(doc_type or "").strip().upper()
 
     def _update_title_with_client(self, text: str):
@@ -192,6 +217,8 @@ class UiMixin:
         cli = str(payload.get("cliente") or "").strip()
         doc = str(payload.get("cedula") or "").strip()
         tel = str(payload.get("telefono") or "").strip()
+        addr = str(payload.get("direccion") or "-").strip() or "-"
+        mail = str(payload.get("email") or "-").strip() or "-"
         doc_type = str(payload.get("tipo_documento") or "").strip().upper()
         if not doc_type and "-" in doc:
             pref, body = doc.split("-", 1)
@@ -209,10 +236,14 @@ class UiMixin:
                 self._set_selected_doc_type(doc_type)
             self.entry_cedula.setText(doc)
             self.entry_telefono.setText(tel)
+            if getattr(self, "entry_direccion", None) is not None:
+                self.entry_direccion.setText(addr)
+            if getattr(self, "entry_email", None) is not None:
+                self.entry_email.setText(mail)
         except Exception:
             pass
 
-        for attr in ("_ai_cli", "_ai_doc", "_ai_tel"):
+        for attr in ("_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
             sc = getattr(self, attr, None)
             if sc is not None:
                 try:
@@ -315,8 +346,14 @@ class UiMixin:
             self._ai_doc = SmartCompleter(self.entry_cedula, index=self._ai_index, kind="client", parent=self)
             self._ai_doc.picked.connect(self._on_ai_client_picked)
 
-            # Telefono: sin autocompleter por pedido de UX.
-            self._ai_tel = None
+            self._ai_tel = SmartCompleter(self.entry_telefono, index=self._ai_index, kind="client", parent=self)
+            self._ai_tel.picked.connect(self._on_ai_client_picked)
+
+            self._ai_dir = SmartCompleter(self.entry_direccion, index=self._ai_index, kind="client", parent=self)
+            self._ai_dir.picked.connect(self._on_ai_client_picked)
+
+            self._ai_email = SmartCompleter(self.entry_email, index=self._ai_index, kind="client", parent=self)
+            self._ai_email.picked.connect(self._on_ai_client_picked)
 
             # ✅ al activar AI, pinta preview de recomendaciones si hay
             self._schedule_refresh_recs_preview()
@@ -345,7 +382,9 @@ class UiMixin:
         try:
             self.entry_cedula.returnPressed.connect(self._go_name)
             self.entry_cliente.returnPressed.connect(self._go_phone)
-            self.entry_telefono.returnPressed.connect(self._go_product_search)
+            self.entry_telefono.returnPressed.connect(self._go_address)
+            self.entry_direccion.returnPressed.connect(self._go_email)
+            self.entry_email.returnPressed.connect(self._go_product_search)
         except Exception:
             pass
 
@@ -367,6 +406,20 @@ class UiMixin:
         try:
             self.entry_telefono.setFocus()
             self.entry_telefono.selectAll()
+        except Exception:
+            pass
+
+    def _go_address(self):
+        try:
+            self.entry_direccion.setFocus()
+            self.entry_direccion.selectAll()
+        except Exception:
+            pass
+
+    def _go_email(self):
+        try:
+            self.entry_email.setFocus()
+            self.entry_email.selectAll()
         except Exception:
             pass
 
@@ -1394,10 +1447,17 @@ class UiMixin:
         self.entry_cliente = QLineEdit()
         self.entry_cedula = QLineEdit()
         self.entry_telefono = QLineEdit()
+        self.entry_direccion = QLineEdit()
+        self.entry_email = QLineEdit()
         self.combo_tipo_documento = QComboBox()
         self.entry_cliente.setClearButtonEnabled(True)
         self.entry_cedula.setClearButtonEnabled(True)
         self.entry_telefono.setClearButtonEnabled(True)
+        self.entry_direccion.setClearButtonEnabled(True)
+        self.entry_email.setClearButtonEnabled(True)
+        self.entry_cliente.setPlaceholderText("Nombre completo")
+        self.entry_direccion.setPlaceholderText("Direccion")
+        self.entry_email.setPlaceholderText("Email")
         self.combo_tipo_documento.setMinimumHeight(28)
         self.combo_tipo_documento.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.combo_tipo_documento.setMinimumWidth(112)
@@ -1411,15 +1471,16 @@ class UiMixin:
             # Siempre iniciar con el primer tipo disponible del pais.
             self.combo_tipo_documento.setCurrentIndex(0)
         self.combo_tipo_documento.currentIndexChanged.connect(self._on_doc_type_changed)
-        lbl_name = QLabel("Nombre Completo:")
         lbl_phone = QLabel("Telefono:")
         form_cli.addWidget(self.combo_tipo_documento, 0, 0)
         form_cli.addWidget(self.entry_cedula, 0, 1, 1, 2)
         form_cli.addWidget(lbl_phone, 0, 3)
         form_cli.addWidget(self.entry_telefono, 0, 4)
-        form_cli.addWidget(lbl_name, 1, 0)
-        form_cli.addWidget(self.entry_cliente, 1, 1, 1, 4)
+        form_cli.addWidget(self.entry_cliente, 1, 0, 1, 5)
+        form_cli.addWidget(self.entry_direccion, 2, 0, 1, 3)
+        form_cli.addWidget(self.entry_email, 2, 3, 1, 2)
         form_cli.setColumnStretch(2, 3)
+        form_cli.setColumnStretch(3, 1)
         form_cli.setColumnStretch(4, 2)
         self._apply_client_validators()
         grp_cli.setLayout(form_cli)
@@ -1431,6 +1492,8 @@ class UiMixin:
             self.entry_cliente.textChanged.connect(lambda _=None: self._schedule_refresh_recs_preview())
             self.entry_cedula.textChanged.connect(lambda _=None: self._schedule_refresh_recs_preview())
             self.entry_telefono.textChanged.connect(lambda _=None: self._schedule_refresh_recs_preview())
+            self.entry_direccion.textChanged.connect(lambda _=None: self._schedule_refresh_recs_preview())
+            self.entry_email.textChanged.connect(lambda _=None: self._schedule_refresh_recs_preview())
         except Exception:
             pass
 

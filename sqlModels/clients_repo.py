@@ -40,6 +40,8 @@ def ensure_clients_table(con: sqlite3.Connection) -> None:
             documento_norm TEXT NOT NULL DEFAULT '',
             nombre TEXT NOT NULL DEFAULT '',
             telefono TEXT NOT NULL DEFAULT '',
+            direccion TEXT NOT NULL DEFAULT '-',
+            email TEXT NOT NULL DEFAULT '-',
             source_quote_id INTEGER,
             source_created_at TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -53,6 +55,33 @@ def ensure_clients_table(con: sqlite3.Connection) -> None:
             con.execute("ALTER TABLE clients ADD COLUMN deleted_at TEXT")
         except sqlite3.OperationalError:
             pass
+    if not _has_column(con, "clients", "direccion"):
+        try:
+            con.execute("ALTER TABLE clients ADD COLUMN direccion TEXT NOT NULL DEFAULT '-'")
+        except sqlite3.OperationalError:
+            pass
+    if not _has_column(con, "clients", "email"):
+        try:
+            con.execute("ALTER TABLE clients ADD COLUMN email TEXT NOT NULL DEFAULT '-'")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        con.execute(
+            """
+            UPDATE clients
+            SET direccion = '-'
+            WHERE TRIM(COALESCE(direccion, '')) = ''
+            """
+        )
+        con.execute(
+            """
+            UPDATE clients
+            SET email = '-'
+            WHERE TRIM(COALESCE(email, '')) = ''
+            """
+        )
+    except Exception:
+        pass
     con.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_tipo_doc_norm
@@ -94,6 +123,13 @@ def _collapse_spaces(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
+def _normalize_client_extra(value: Any) -> str:
+    txt = _collapse_spaces(value)
+    if txt:
+        return txt
+    return "-"
+
+
 def _extract_doc_body(value: Any) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
@@ -129,6 +165,8 @@ _GENERIC_CLIENTS: tuple[dict[str, str], ...] = (
         "documento": "00000000",
         "nombre": "CLIENTE GENERICO",
         "telefono": "0",
+        "direccion": "-",
+        "email": "-",
     },
     {
         "country_code": "PY",
@@ -136,6 +174,8 @@ _GENERIC_CLIENTS: tuple[dict[str, str], ...] = (
         "documento": "00000000",
         "nombre": "CLIENTE GENERICO",
         "telefono": "0",
+        "direccion": "-",
+        "email": "-",
     },
     {
         "country_code": "VE",
@@ -143,6 +183,8 @@ _GENERIC_CLIENTS: tuple[dict[str, str], ...] = (
         "documento": "0",
         "nombre": "CLIENTE GENERICO",
         "telefono": "0",
+        "direccion": "-",
+        "email": "-",
     },
 )
 
@@ -197,6 +239,8 @@ def ensure_generic_clients(con: sqlite3.Connection) -> None:
             documento=spec.get("documento", ""),
             nombre=spec.get("nombre", ""),
             telefono=spec.get("telefono", ""),
+            direccion=spec.get("direccion", "-"),
+            email=spec.get("email", "-"),
             require_valid_document=False,
         )
         con.execute(
@@ -208,17 +252,21 @@ def ensure_generic_clients(con: sqlite3.Connection) -> None:
                 documento_norm,
                 nombre,
                 telefono,
+                direccion,
+                email,
                 source_quote_id,
                 source_created_at,
                 created_at,
                 updated_at,
                 deleted_at
-            ) VALUES(?, ?, ?, ?, ?, ?, NULL, '', datetime('now'), datetime('now'), NULL)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, '', datetime('now'), datetime('now'), NULL)
             ON CONFLICT(tipo_documento, documento_norm) DO UPDATE SET
                 country_code = excluded.country_code,
                 documento = excluded.documento,
                 nombre = excluded.nombre,
                 telefono = excluded.telefono,
+                direccion = excluded.direccion,
+                email = excluded.email,
                 source_quote_id = NULL,
                 source_created_at = '',
                 deleted_at = NULL,
@@ -231,6 +279,8 @@ def ensure_generic_clients(con: sqlite3.Connection) -> None:
                 payload["documento_norm"],
                 payload["nombre"],
                 payload["telefono"],
+                payload["direccion"],
+                payload["email"],
             ),
         )
 
@@ -317,11 +367,15 @@ def normalize_client_payload(
     documento: Any,
     nombre: Any,
     telefono: Any,
+    direccion: Any = "-",
+    email: Any = "-",
     require_valid_document: bool = True,
 ) -> dict[str, Any]:
     cc = _known_country_code(country_code)
     name = _collapse_spaces(nombre)
     phone = _collapse_spaces(telefono)
+    address = _normalize_client_extra(direccion)
+    email_norm = _normalize_client_extra(email)
 
     doc_store = _normalize_doc_store(documento)
     doc_key = _normalize_doc_key(doc_store)
@@ -349,6 +403,8 @@ def normalize_client_payload(
         "documento_norm": str(doc_key or "").strip().upper(),
         "nombre": name,
         "telefono": phone,
+        "direccion": address,
+        "email": email_norm,
     }
 
 
@@ -419,6 +475,8 @@ def upsert_client(
     documento: Any,
     nombre: Any,
     telefono: Any,
+    direccion: Any = "-",
+    email: Any = "-",
     source_quote_id: int | None = None,
     source_created_at: str | None = None,
     require_valid_document: bool = True,
@@ -431,6 +489,8 @@ def upsert_client(
         documento=documento,
         nombre=nombre,
         telefono=telefono,
+        direccion=direccion,
+        email=email,
         require_valid_document=require_valid_document,
     )
     tipo = str(payload.get("tipo_documento") or "")
@@ -453,6 +513,10 @@ def upsert_client(
         raise ValueError("Nombre de cliente vacio.")
     if require_valid_document and not str(payload.get("telefono") or "").strip():
         raise ValueError("Telefono de cliente vacio.")
+    if require_valid_document and not str(payload.get("direccion") or "").strip():
+        raise ValueError("Direccion de cliente vacia.")
+    if require_valid_document and not str(payload.get("email") or "").strip():
+        raise ValueError("Email de cliente vacio.")
 
     # Dedupe por identidad (nombre + telefono) para evitar duplicados
     # con documentos distintos para la misma persona.
@@ -476,6 +540,14 @@ def upsert_client(
                     WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
                     ELSE telefono
                 END,
+                direccion = CASE
+                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
+                    ELSE direccion
+                END,
+                email = CASE
+                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
+                    ELSE email
+                END,
                 source_quote_id = CASE
                     WHEN ? IS NOT NULL THEN ?
                     ELSE source_quote_id
@@ -494,6 +566,10 @@ def upsert_client(
                 payload["nombre"],
                 payload["telefono"],
                 payload["telefono"],
+                payload["direccion"],
+                payload["direccion"],
+                payload["email"],
+                payload["email"],
                 (int(source_quote_id) if source_quote_id is not None else None),
                 (int(source_quote_id) if source_quote_id is not None else None),
                 str(source_created_at or ""),
@@ -512,11 +588,13 @@ def upsert_client(
             documento_norm,
             nombre,
             telefono,
+            direccion,
+            email,
             source_quote_id,
             source_created_at,
             created_at,
             updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         ON CONFLICT(tipo_documento, documento_norm) DO UPDATE SET
             country_code = excluded.country_code,
             documento = excluded.documento,
@@ -527,6 +605,14 @@ def upsert_client(
             telefono = CASE
                 WHEN TRIM(COALESCE(excluded.telefono, '')) <> '' THEN excluded.telefono
                 ELSE clients.telefono
+            END,
+            direccion = CASE
+                WHEN TRIM(COALESCE(excluded.direccion, '')) <> '' THEN excluded.direccion
+                ELSE clients.direccion
+            END,
+            email = CASE
+                WHEN TRIM(COALESCE(excluded.email, '')) <> '' THEN excluded.email
+                ELSE clients.email
             END,
             source_quote_id = CASE
                 WHEN excluded.source_quote_id IS NOT NULL THEN excluded.source_quote_id
@@ -546,6 +632,8 @@ def upsert_client(
             payload["documento_norm"],
             payload["nombre"],
             payload["telefono"],
+            payload["direccion"],
+            payload["email"],
             (int(source_quote_id) if source_quote_id is not None else None),
             str(source_created_at or ""),
         ),
@@ -566,6 +654,8 @@ def save_client(
     documento: Any,
     nombre: Any,
     telefono: Any,
+    direccion: Any = "-",
+    email: Any = "-",
     client_id: int | None = None,
 ) -> int:
     ensure_clients_table(con)
@@ -576,12 +666,18 @@ def save_client(
         documento=documento,
         nombre=nombre,
         telefono=telefono,
+        direccion=direccion,
+        email=email,
         require_valid_document=True,
     )
     if not str(payload.get("nombre") or "").strip():
         raise ValueError("Nombre de cliente vacio.")
     if not str(payload.get("telefono") or "").strip():
         raise ValueError("Telefono de cliente vacio.")
+    if not str(payload.get("direccion") or "").strip():
+        raise ValueError("Direccion de cliente vacia.")
+    if not str(payload.get("email") or "").strip():
+        raise ValueError("Email de cliente vacio.")
 
     tipo = str(payload["tipo_documento"])
     doc_norm = str(payload["documento_norm"])
@@ -610,6 +706,8 @@ def save_client(
                     documento_norm = ?,
                     nombre = ?,
                     telefono = ?,
+                    direccion = ?,
+                    email = ?,
                     deleted_at = NULL,
                     updated_at = datetime('now')
                 WHERE id = ?
@@ -621,6 +719,8 @@ def save_client(
                     payload["documento_norm"],
                     payload["nombre"],
                     payload["telefono"],
+                    payload["direccion"],
+                    payload["email"],
                     int(existing),
                 ),
             )
@@ -647,9 +747,11 @@ def save_client(
                 documento_norm,
                 nombre,
                 telefono,
+                direccion,
+                email,
                 created_at,
                 updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             """,
             (
                 payload["country_code"],
@@ -658,6 +760,8 @@ def save_client(
                 payload["documento_norm"],
                 payload["nombre"],
                 payload["telefono"],
+                payload["direccion"],
+                payload["email"],
             ),
         )
         return int(cur.lastrowid)
@@ -672,6 +776,8 @@ def save_client(
             documento_norm = ?,
             nombre = ?,
             telefono = ?,
+            direccion = ?,
+            email = ?,
             deleted_at = NULL,
             updated_at = datetime('now')
         WHERE id = ?
@@ -683,6 +789,8 @@ def save_client(
             payload["documento_norm"],
             payload["nombre"],
             payload["telefono"],
+            payload["direccion"],
+            payload["email"],
             int(client_id),
         ),
     )
@@ -711,6 +819,8 @@ def get_client(
             documento_norm,
             nombre,
             telefono,
+            direccion,
+            email,
             source_quote_id,
             source_created_at,
             created_at,
@@ -762,14 +872,18 @@ def list_clients(
                 OR LOWER(COALESCE(tipo_documento, '')) LIKE ?
                 OR LOWER(COALESCE(documento, '')) LIKE ?
                 OR LOWER(COALESCE(telefono, '')) LIKE ?
+                OR LOWER(COALESCE(direccion, '')) LIKE ?
+                OR LOWER(COALESCE(email, '')) LIKE ?
                 OR LOWER(COALESCE(documento_norm, '')) LIKE ?
                 OR REPLACE(LOWER(COALESCE(nombre, '')), ' ', '') LIKE ?
                 OR REPLACE(LOWER(COALESCE(documento, '')), ' ', '') LIKE ?
                 OR REPLACE(LOWER(COALESCE(telefono, '')), ' ', '') LIKE ?
+                OR REPLACE(LOWER(COALESCE(direccion, '')), ' ', '') LIKE ?
+                OR REPLACE(LOWER(COALESCE(email, '')), ' ', '') LIKE ?
             )
             """
         )
-        params.extend([like, like, like, like, like, like_ns, like_ns, like_ns])
+        params.extend([like, like, like, like, like, like, like, like_ns, like_ns, like_ns, like_ns, like_ns])
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     rows = con.execute(
@@ -782,6 +896,8 @@ def list_clients(
             documento_norm,
             nombre,
             telefono,
+            direccion,
+            email,
             source_quote_id,
             source_created_at,
             created_at,
@@ -999,6 +1115,8 @@ def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
             "documento_norm": doc_norm,
             "nombre": name,
             "telefono": phone,
+            "direccion": str(payload.get("direccion") or "-"),
+            "email": str(payload.get("email") or "-"),
             "source_quote_id": quote_id,
             "source_created_at": created_at,
             "_rank": (created_at, quote_id),
@@ -1121,6 +1239,8 @@ def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
                 fin.get("documento_norm", ""),
                 fin.get("nombre", ""),
                 fin.get("telefono", ""),
+                fin.get("direccion", "-"),
+                fin.get("email", "-"),
                 fin.get("source_quote_id", None),
                 fin.get("source_created_at", ""),
             )
@@ -1136,11 +1256,13 @@ def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
                 documento_norm,
                 nombre,
                 telefono,
+                direccion,
+                email,
                 source_quote_id,
                 source_created_at,
                 created_at,
                 updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             """,
             payloads,
         )

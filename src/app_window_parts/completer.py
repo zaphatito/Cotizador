@@ -175,7 +175,7 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
 
 class CompleterMixin:
     def _hide_all_client_popups(self):
-        for k in ("_ai_cli", "_ai_doc", "_ai_tel"):
+        for k in ("_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
             c = getattr(self, k, None)
             try:
                 if c is not None:
@@ -194,6 +194,8 @@ class CompleterMixin:
             cli = str(payload.get("cliente") or "").strip()
             doc = str(payload.get("cedula") or "").strip()
             tel = str(payload.get("telefono") or "").strip()
+            addr = str(payload.get("direccion") or "-").strip() or "-"
+            mail = str(payload.get("email") or "-").strip() or "-"
 
             if cli:
                 self.entry_cliente.setText(cli)
@@ -201,6 +203,10 @@ class CompleterMixin:
                 self.entry_cedula.setText(doc)
             if tel:
                 self.entry_telefono.setText(tel)
+            if getattr(self, "entry_direccion", None) is not None:
+                self.entry_direccion.setText(addr)
+            if getattr(self, "entry_email", None) is not None:
+                self.entry_email.setText(mail)
 
             w = QApplication.focusWidget()
             if w is getattr(self, "entry_cliente", None):
@@ -208,6 +214,10 @@ class CompleterMixin:
             elif w is getattr(self, "entry_cedula", None):
                 self._go_name()
             elif w is getattr(self, "entry_telefono", None):
+                self._go_address()
+            elif w is getattr(self, "entry_direccion", None):
+                self._go_email()
+            elif w is getattr(self, "entry_email", None):
                 self._go_product_search()
 
         except Exception:

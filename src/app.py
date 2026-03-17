@@ -253,7 +253,6 @@ def run_app():
     # ===== CUADRO DE UPDATE =====
     dlg = UpdateProgressDialog(app_icon=app_icon)
     dlg.show()
-    dlg.handle_event("status", {"text": "Buscando actualizaciones…"})
 
     try:
         from .updater import check_for_updates_and_maybe_install

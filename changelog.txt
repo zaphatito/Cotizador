@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES - REGISTRO DE CAMBIOS
-Versión: 2.0.5
-Fecha: 2026-03-04
+Versión: 2.0.6
+Fecha: 2026-03-17
 
 Resumen
 - La version 2.0.0 concentra el salto funcional completo desde la 1.2.13: nuevo flujo comercial con API, asistente IA offline, mejor gestion de clientes, cambios de historial, mejoras visuales y una base de datos mas solida.

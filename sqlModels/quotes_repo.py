@@ -240,6 +240,8 @@ def find_doc_identity_conflict(
 
     # Esquema actual: clientes en tabla maestra y quotes con id_cliente.
     if _table_exists(con, "clients") and _has_column(con, "quotes", "id_cliente"):
+        direccion_expr = "COALESCE(c.direccion, '') AS direccion" if _has_column(con, "clients", "direccion") else "'' AS direccion"
+        email_expr = "COALESCE(c.email, '') AS email" if _has_column(con, "clients", "email") else "'' AS email"
         has_deleted = _has_column(con, "quotes", "deleted_at")
         exclude_sql = f" AND qx.id <> {int(exclude_quote_id)}" if exclude_quote_id is not None else ""
         active_sql = " AND qx.deleted_at IS NULL" if (not include_deleted and has_deleted) else ""
@@ -274,6 +276,8 @@ def find_doc_identity_conflict(
                 COALESCE(c.documento, '') AS cedula,
                 COALESCE(c.tipo_documento, '') AS tipo_documento,
                 COALESCE(c.telefono, '') AS telefono,
+                {direccion_expr},
+                {email_expr},
                 (
                     SELECT qx.id
                     FROM quotes qx
@@ -331,6 +335,8 @@ def find_doc_identity_conflict(
                 "cedula": str(d.get("cedula") or ""),
                 "tipo_documento": str(d.get("tipo_documento") or ""),
                 "telefono": str(d.get("telefono") or ""),
+                "direccion": str(d.get("direccion") or ""),
+                "email": str(d.get("email") or ""),
                 "same_cliente": bool(same_cliente),
                 "same_telefono": bool(same_telefono),
             }
@@ -386,6 +392,8 @@ def find_doc_identity_conflict(
             "cedula": str(d.get("cedula") or ""),
             "tipo_documento": str(d.get("tipo_documento") or ""),
             "telefono": str(d.get("telefono") or ""),
+            "direccion": "-",
+            "email": "-",
             "same_cliente": bool(same_cliente),
             "same_telefono": bool(same_telefono),
         }
@@ -711,6 +719,8 @@ def insert_quote(
     cliente: str,
     cedula: str,
     telefono: str,
+    direccion: str = "-",
+    email: str = "-",
     tipo_documento: str = "",
     metodo_pago: str = "",
     currency_shown: str,
@@ -879,6 +889,8 @@ def insert_quote(
             documento=cedula,
             nombre=cliente,
             telefono=telefono,
+            direccion=direccion,
+            email=email,
             source_quote_id=quote_id,
             source_created_at=created_at,
             require_valid_document=False,
@@ -1317,19 +1329,24 @@ def list_quotes(
 
 def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
     if _has_column(con, "quotes", "id_cliente") and _table_exists(con, "clients"):
-        r = con.execute(
-            """
+        client_direccion_expr = "COALESCE(c.direccion, '') AS client_direccion" if _has_column(con, "clients", "direccion") else "'' AS client_direccion"
+        client_email_expr = "COALESCE(c.email, '') AS client_email" if _has_column(con, "clients", "email") else "'' AS client_email"
+        sql = f"""
             SELECT
                 q.*,
                 COALESCE(c.nombre, '') AS client_nombre,
                 COALESCE(c.documento, '') AS client_documento,
                 COALESCE(c.tipo_documento, '') AS client_tipo_documento,
-                COALESCE(c.telefono, '') AS client_telefono
+                COALESCE(c.telefono, '') AS client_telefono,
+                {client_direccion_expr},
+                {client_email_expr}
             FROM quotes q
             LEFT JOIN clients c ON c.id = q.id_cliente
             WHERE q.id = ?
             LIMIT 1
-            """,
+            """
+        r = con.execute(
+            sql,
             (int(quote_id),),
         ).fetchone()
     else:
@@ -1345,6 +1362,14 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
         out["tipo_documento"] = str(out.pop("client_tipo_documento") or "")
     if "client_telefono" in out:
         out["telefono"] = str(out.pop("client_telefono") or "")
+    if "client_direccion" in out:
+        out["direccion"] = str(out.pop("client_direccion") or "")
+    if "client_email" in out:
+        out["email"] = str(out.pop("client_email") or "")
+    if not str(out.get("direccion") or "").strip():
+        out["direccion"] = "-"
+    if not str(out.get("email") or "").strip():
+        out["email"] = "-"
     return out
 
 
