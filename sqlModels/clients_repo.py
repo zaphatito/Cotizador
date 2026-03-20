@@ -188,6 +188,34 @@ _GENERIC_CLIENTS: tuple[dict[str, str], ...] = (
     },
 )
 
+_GENERIC_DOC_KEYS: set[tuple[str, str, str]] = {
+    (
+        _country_code_norm(spec.get("country_code", "")),
+        str(spec.get("tipo_documento", "") or "").strip().upper(),
+        _normalize_doc_key(spec.get("documento", "")),
+    )
+    for spec in _GENERIC_CLIENTS
+}
+
+
+def _is_generic_doc_key(*, country_code: Any, tipo_documento: Any, documento_norm: Any) -> bool:
+    cc = _country_code_norm(country_code)
+    tipo = str(tipo_documento or "").strip().upper()
+    doc_norm = _normalize_doc_key(documento_norm)
+    if (not cc) or (not tipo) or (not doc_norm):
+        return False
+    return (cc, tipo, doc_norm) in _GENERIC_DOC_KEYS
+
+
+def is_generic_client_row(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    return _is_generic_doc_key(
+        country_code=row.get("country_code"),
+        tipo_documento=row.get("tipo_documento"),
+        documento_norm=(row.get("documento_norm") or row.get("documento")),
+    )
+
 
 def _known_country_code(country_code: Any) -> str:
     cc = _country_code_norm(country_code)
@@ -433,40 +461,6 @@ def _get_client_id_by_key(
     return int(row["id"])
 
 
-def _find_client_id_by_identity(
-    con: sqlite3.Connection,
-    *,
-    country_code: Any,
-    nombre: Any,
-    telefono: Any,
-    exclude_id: int | None = None,
-) -> int | None:
-    cc = _known_country_code(country_code)
-    name_key = _normalize_name_key(nombre)
-    phone_key = _normalize_phone_key(telefono)
-    if (not name_key) or (not phone_key):
-        return None
-
-    rows = con.execute(
-        """
-        SELECT id, nombre, telefono
-        FROM clients
-        WHERE UPPER(TRIM(COALESCE(country_code, ''))) = ?
-          AND LOWER(TRIM(COALESCE(nombre, ''))) = ?
-          AND deleted_at IS NULL
-        ORDER BY id ASC
-        """,
-        (cc, name_key),
-    ).fetchall()
-    for r in rows:
-        cid = int(r["id"] or 0)
-        if exclude_id is not None and cid == int(exclude_id):
-            continue
-        if _normalize_phone_key(r["telefono"]) == phone_key:
-            return cid
-    return None
-
-
 def upsert_client(
     con: sqlite3.Connection,
     *,
@@ -518,66 +512,19 @@ def upsert_client(
     if require_valid_document and not str(payload.get("email") or "").strip():
         raise ValueError("Email de cliente vacio.")
 
-    # Dedupe por identidad (nombre + telefono) para evitar duplicados
-    # con documentos distintos para la misma persona.
-    same_identity_id = _find_client_id_by_identity(
-        con,
+    # Cliente generico: immutable. Si llega por cotizacion, conserva el maestro.
+    if _is_generic_doc_key(
         country_code=payload.get("country_code"),
-        nombre=payload.get("nombre"),
-        telefono=payload.get("telefono"),
-    )
-    if same_identity_id is not None:
-        con.execute(
-            """
-            UPDATE clients
-            SET
-                country_code = ?,
-                nombre = CASE
-                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
-                    ELSE nombre
-                END,
-                telefono = CASE
-                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
-                    ELSE telefono
-                END,
-                direccion = CASE
-                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
-                    ELSE direccion
-                END,
-                email = CASE
-                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
-                    ELSE email
-                END,
-                source_quote_id = CASE
-                    WHEN ? IS NOT NULL THEN ?
-                    ELSE source_quote_id
-                END,
-                source_created_at = CASE
-                    WHEN TRIM(COALESCE(?, '')) <> '' THEN ?
-                    ELSE source_created_at
-                END,
-                deleted_at = NULL,
-                updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                payload["country_code"],
-                payload["nombre"],
-                payload["nombre"],
-                payload["telefono"],
-                payload["telefono"],
-                payload["direccion"],
-                payload["direccion"],
-                payload["email"],
-                payload["email"],
-                (int(source_quote_id) if source_quote_id is not None else None),
-                (int(source_quote_id) if source_quote_id is not None else None),
-                str(source_created_at or ""),
-                str(source_created_at or ""),
-                int(same_identity_id),
-            ),
+        tipo_documento=payload.get("tipo_documento"),
+        documento_norm=payload.get("documento_norm"),
+    ):
+        ensure_generic_clients(con)
+        return _get_client_id_by_key(
+            con,
+            tipo_documento=str(payload.get("tipo_documento") or ""),
+            documento_norm=str(payload.get("documento_norm") or ""),
+            include_deleted=True,
         )
-        return int(same_identity_id)
 
     con.execute(
         """
@@ -679,6 +626,24 @@ def save_client(
     if not str(payload.get("email") or "").strip():
         raise ValueError("Email de cliente vacio.")
 
+    if _is_generic_doc_key(
+        country_code=payload.get("country_code"),
+        tipo_documento=payload.get("tipo_documento"),
+        documento_norm=payload.get("documento_norm"),
+    ):
+        ensure_generic_clients(con)
+        generic_id = _get_client_id_by_key(
+            con,
+            tipo_documento=str(payload.get("tipo_documento") or ""),
+            documento_norm=str(payload.get("documento_norm") or ""),
+            include_deleted=True,
+        )
+        if generic_id is not None:
+            return int(generic_id)
+        if client_id is not None and int(client_id) > 0:
+            return int(client_id)
+        return 0
+
     tipo = str(payload["tipo_documento"])
     doc_norm = str(payload["documento_norm"])
     existing_row = con.execute(
@@ -726,16 +691,6 @@ def save_client(
             )
             return int(existing)
         raise ValueError("Ya existe un cliente con ese tipo y numero de documento.")
-
-    same_identity = _find_client_id_by_identity(
-        con,
-        country_code=payload.get("country_code"),
-        nombre=payload.get("nombre"),
-        telefono=payload.get("telefono"),
-        exclude_id=(int(client_id) if client_id is not None else None),
-    )
-    if same_identity is not None and (client_id is None or int(same_identity) != int(client_id)):
-        raise ValueError("Ya existe un cliente con el mismo nombre y telefono.")
 
     if client_id is None:
         cur = con.execute(
@@ -915,6 +870,9 @@ def list_clients(
 
 def delete_client(con: sqlite3.Connection, client_id: int) -> None:
     ensure_clients_table(con)
+    row = get_client(con, int(client_id), include_deleted=True)
+    if is_generic_client_row(row):
+        raise ValueError("El cliente generico no se puede eliminar.")
     con.execute(
         """
         UPDATE clients

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer
+from PySide6.QtGui import QIcon, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -19,7 +19,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from sqlModels.clients_repo import list_clients, save_client, delete_client, get_client
+from sqlModels.clients_repo import (
+    list_clients,
+    save_client,
+    delete_client,
+    get_client,
+    is_generic_client_row,
+)
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.quotes_repo import (
     document_type_rules_for_country,
@@ -46,13 +52,16 @@ def center_on_screen(w) -> None:
 
 
 class ClientsTableModel(QAbstractTableModel):
-    HEADERS = ["Nombre", "Tipo", "Documento", "Telefono", "Pais", "Actualizado"]
-    EDITABLE_COLS = {0, 1, 2, 3}
+    HEADERS = ["Nombre", "Tipo", "Documento", "Telefono", "Direccion", "Email", "Pais", "Actualizado"]
+    EDITABLE_COLS = {0, 1, 2, 3, 4, 5}
 
     def __init__(self):
         super().__init__()
         self.rows: list[dict[str, Any]] = []
         self._dirty_rows: set[int] = set()
+        self._dirty_cells: set[tuple[int, int]] = set()
+        self._dirty_font = QFont()
+        self._dirty_font.setBold(True)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self.rows)
@@ -72,7 +81,8 @@ class ClientsTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return None
-        row = self.rows[index.row()]
+        row_idx = index.row()
+        row = self.rows[row_idx]
         col = index.column()
 
         if role in (Qt.DisplayRole, Qt.EditRole):
@@ -85,21 +95,29 @@ class ClientsTableModel(QAbstractTableModel):
             if col == 3:
                 return str(row.get("telefono") or "")
             if col == 4:
-                return str(row.get("country_code") or "")
+                return str(row.get("direccion") or "")
             if col == 5:
+                return str(row.get("email") or "")
+            if col == 6:
+                return str(row.get("country_code") or "")
+            if col == 7:
                 return str(row.get("updated_at") or "")
 
         if role == Qt.TextAlignmentRole:
-            if col in (1, 2, 4):
+            if col in (1, 2, 6):
                 return int(Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
+        if role == Qt.FontRole:
+            if (row_idx, col) in self._dirty_cells:
+                return self._dirty_font
         return None
 
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return Qt.NoItemFlags
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if index.column() in self.EDITABLE_COLS:
+        row = self.rows[index.row()] if 0 <= index.row() < len(self.rows) else {}
+        if index.column() in self.EDITABLE_COLS and not is_generic_client_row(row):
             base |= Qt.ItemIsEditable
         return base
 
@@ -111,6 +129,8 @@ class ClientsTableModel(QAbstractTableModel):
         i = index.row()
         if i < 0 or i >= len(self.rows):
             return False
+        if is_generic_client_row(self.rows[i]):
+            return False
 
         col = index.column()
         key_by_col = {
@@ -118,6 +138,8 @@ class ClientsTableModel(QAbstractTableModel):
             1: "tipo_documento",
             2: "documento",
             3: "telefono",
+            4: "direccion",
+            5: "email",
         }
         key = key_by_col.get(col)
         if not key:
@@ -133,13 +155,15 @@ class ClientsTableModel(QAbstractTableModel):
 
         self.rows[i][key] = new_value
         self._dirty_rows.add(i)
-        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        self._dirty_cells.add((i, col))
+        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole, Qt.FontRole])
         return True
 
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self.beginResetModel()
         self.rows = rows or []
         self._dirty_rows = set()
+        self._dirty_cells = set()
         self.endResetModel()
 
     def row_by_index(self, index: QModelIndex) -> dict[str, Any] | None:
@@ -179,6 +203,8 @@ class ClientsTableModel(QAbstractTableModel):
             }
         )
         self._dirty_rows.add(idx)
+        for col in self.EDITABLE_COLS:
+            self._dirty_cells.add((idx, col))
         self.endInsertRows()
         return idx
 
@@ -192,13 +218,36 @@ class ClientsTableModel(QAbstractTableModel):
             for i in self._dirty_rows
             if i != row_idx
         }
+        self._dirty_cells = {
+            ((r - 1) if r > row_idx else r, c)
+            for (r, c) in self._dirty_cells
+            if r != row_idx
+        }
         self.endRemoveRows()
 
     def dirty_row_indices(self) -> list[int]:
         return sorted(i for i in self._dirty_rows if 0 <= i < len(self.rows))
 
     def clear_dirty_rows(self) -> None:
+        had_dirty_cells = bool(self._dirty_cells)
         self._dirty_rows.clear()
+        self._dirty_cells.clear()
+        if had_dirty_cells and self.rows:
+            tl = self.index(0, 0)
+            br = self.index(len(self.rows) - 1, len(self.HEADERS) - 1)
+            self.dataChanged.emit(tl, br, [Qt.FontRole])
+
+
+class InlineTextDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, _option, _index):
+        editor = QLineEdit(parent)
+        editor.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        editor.setStyleSheet("QLineEdit { padding-top: 0px; padding-bottom: 0px; }")
+        QTimer.singleShot(0, editor.selectAll)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, _index):
+        editor.setGeometry(option.rect.adjusted(0, 0, 0, 0))
 
 
 class DocTypeDelegate(QStyledItemDelegate):
@@ -278,18 +327,27 @@ class ClientsEditorDialog(QDialog):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(True)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.setSortingEnabled(False)
         self.table.setEditTriggers(
             QTableView.DoubleClicked | QTableView.SelectedClicked | QTableView.EditKeyPressed
         )
+        self.inline_text_delegate = InlineTextDelegate(self.table)
+        self.table.setItemDelegateForColumn(0, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(2, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(3, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(4, self.inline_text_delegate)
+        self.table.setItemDelegateForColumn(5, self.inline_text_delegate)
         self.table.setItemDelegateForColumn(1, DocTypeDelegate(self.table, self._doc_types))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
+        hh.setSectionResizeMode(5, QHeaderView.Stretch)
+        hh.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self._excel_table = ExcelTableController(
             self.table,
             allow_copy=True,
@@ -493,6 +551,9 @@ class ClientsEditorDialog(QDialog):
         if row_idx < 0 or row_idx >= self.model.rowCount():
             return
         row_model = self.model.rows[row_idx]
+        if is_generic_client_row(row_model):
+            QMessageBox.warning(self, "No permitido", "El cliente generico no se puede eliminar.")
+            return
         cid = int(row_model.get("id") or 0)
         if cid <= 0:
             self.model.remove_row_at(row_idx)

@@ -3,6 +3,7 @@ import sqlite3
 from sqlModels.clients_repo import (
     delete_client,
     ensure_clients_table,
+    ensure_generic_clients,
     get_client,
     list_clients,
     rebuild_clients_from_quotes,
@@ -81,7 +82,7 @@ def test_upsert_client_merges_same_tipo_numero():
     con.close()
 
 
-def test_upsert_client_dedupes_same_name_phone_even_with_other_document():
+def test_upsert_client_allows_same_name_phone_with_other_document():
     con = sqlite3.connect(":memory:")
     con.row_factory = sqlite3.Row
     ensure_clients_table(con)
@@ -104,12 +105,139 @@ def test_upsert_client_dedupes_same_name_phone_even_with_other_document():
         telefono="912566666",
         require_valid_document=True,
     )
-    assert c1 == c2
+    assert int(c1) != int(c2)
 
     rows = list_clients(con, country_code="PE")
-    assert len(rows) == 1
-    assert str(rows[0]["documento"]) == "12345678"
-    assert str(rows[0]["tipo_documento"]) == "DNI"
+    assert len(rows) == 2
+    docs = {(str(r["tipo_documento"]), str(r["documento"])) for r in rows}
+    assert ("DNI", "12345678") in docs
+    assert ("P", "A123456") in docs
+    con.close()
+
+
+def test_upsert_client_does_not_modify_generic_client():
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    ensure_clients_table(con)
+    ensure_generic_clients(con)
+
+    row_before = con.execute(
+        """
+        SELECT id, nombre, telefono, direccion, email
+        FROM clients
+        WHERE country_code = 'PE' AND tipo_documento = 'DNI' AND documento_norm = '00000000'
+        LIMIT 1
+        """
+    ).fetchone()
+    assert row_before is not None
+    gid = int(row_before["id"])
+
+    got_id = upsert_client(
+        con,
+        country_code="PE",
+        tipo_documento="DNI",
+        documento="00000000",
+        nombre="CAMBIO NO PERMITIDO",
+        telefono="999999999",
+        direccion="Direccion X",
+        email="x@x.com",
+        require_valid_document=True,
+    )
+    assert int(got_id or 0) == gid
+
+    row_after = con.execute(
+        """
+        SELECT nombre, telefono, direccion, email
+        FROM clients
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (gid,),
+    ).fetchone()
+    assert row_after is not None
+    assert str(row_after["nombre"] or "") == "CLIENTE GENERICO"
+    assert str(row_after["telefono"] or "") == "0"
+    assert str(row_after["direccion"] or "") == "-"
+    assert str(row_after["email"] or "") == "-"
+    con.close()
+
+
+def test_save_client_ignores_modifying_generic_client():
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    ensure_clients_table(con)
+    ensure_generic_clients(con)
+
+    row_before = con.execute(
+        """
+        SELECT id, nombre, telefono, direccion, email
+        FROM clients
+        WHERE country_code = 'PE' AND tipo_documento = 'DNI' AND documento_norm = '00000000'
+        LIMIT 1
+        """
+    ).fetchone()
+    assert row_before is not None
+    gid = int(row_before["id"])
+
+    got_id = save_client(
+        con,
+        country_code="PE",
+        tipo_documento="DNI",
+        documento="00000000",
+        nombre="CAMBIO NO PERMITIDO",
+        telefono="999999999",
+        direccion="Direccion X",
+        email="x@x.com",
+        client_id=gid,
+    )
+    assert int(got_id) == gid
+
+    row_after = con.execute(
+        """
+        SELECT nombre, telefono, direccion, email
+        FROM clients
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (gid,),
+    ).fetchone()
+    assert row_after is not None
+    assert str(row_after["nombre"] or "") == "CLIENTE GENERICO"
+    assert str(row_after["telefono"] or "") == "0"
+    assert str(row_after["direccion"] or "") == "-"
+    assert str(row_after["email"] or "") == "-"
+    con.close()
+
+
+def test_delete_client_rejects_generic_client():
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    ensure_clients_table(con)
+    ensure_generic_clients(con)
+
+    row = con.execute(
+        """
+        SELECT id
+        FROM clients
+        WHERE country_code = 'PE' AND tipo_documento = 'DNI' AND documento_norm = '00000000'
+        LIMIT 1
+        """
+    ).fetchone()
+    assert row is not None
+    gid = int(row["id"])
+
+    try:
+        delete_client(con, gid)
+        raise AssertionError("Se esperaba ValueError al intentar eliminar cliente generico.")
+    except ValueError as e:
+        assert "generico" in str(e).lower()
+
+    row_after = con.execute(
+        "SELECT deleted_at FROM clients WHERE id = ? LIMIT 1",
+        (gid,),
+    ).fetchone()
+    assert row_after is not None
+    assert str(row_after["deleted_at"] or "").strip() == ""
     con.close()
 
 

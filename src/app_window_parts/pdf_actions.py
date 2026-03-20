@@ -20,7 +20,7 @@ from ..widgets import show_preview_dialog, ListadoProductosDialog
 from ..db_path import resolve_db_path
 
 from sqlModels.db import connect, ensure_schema, tx
-from sqlModels.quotes_repo import find_doc_identity_conflict, insert_quote
+from sqlModels.quotes_repo import insert_quote
 from sqlModels.sequences_repo import next_quote_no
 
 from .ticket_actions import generar_ticket_para_cotizacion
@@ -208,65 +208,6 @@ class PdfActionsMixin:
             db_path = resolve_db_path()
             con = connect(db_path)
             ensure_schema(con)
-
-            conflict = find_doc_identity_conflict(
-                con,
-                country_code=COUNTRY_CODE,
-                tipo_documento=tipo_doc,
-                cedula=ci,
-                cliente=c,
-                telefono=t,
-                include_deleted=False,
-            )
-            if conflict:
-                quote_ref = str(conflict.get("quote_no") or f"ID {conflict.get('id')}")
-                old_cli = str(conflict.get("cliente") or "").strip()
-                old_tel = str(conflict.get("telefono") or "").strip()
-                old_dir = str(conflict.get("direccion") or "").strip()
-                old_mail = str(conflict.get("email") or "").strip()
-                old_tipo = str(conflict.get("tipo_documento") or "").strip().upper()
-                old_doc = str(conflict.get("cedula") or "").strip()
-
-                # En vez de bloquear con conflicto, recarga los datos guardados
-                # para mantener una sola identidad por documento.
-                try:
-                    if old_cli:
-                        self.entry_cliente.setText(old_cli)
-                    if old_tipo and hasattr(self, "_set_selected_doc_type"):
-                        self._set_selected_doc_type(old_tipo)
-                    if old_doc:
-                        self.entry_cedula.setText(old_doc)
-                    if old_tel:
-                        self.entry_telefono.setText(old_tel)
-                    if getattr(self, "entry_direccion", None) is not None and old_dir:
-                        self.entry_direccion.setText(old_dir)
-                    if getattr(self, "entry_email", None) is not None and old_mail:
-                        self.entry_email.setText(old_mail)
-                    try:
-                        self._update_title_with_client(self.entry_cliente.text())
-                    except Exception:
-                        pass
-                    try:
-                        self._schedule_refresh_recs_preview()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-                QMessageBox.information(
-                    self,
-                    "Documento ya registrado",
-                    (
-                        "Se cargaron los datos ya guardados para ese documento.\n\n"
-                        f"Historial: {quote_ref}\n"
-                        f"Cliente: {old_cli}\n"
-                        f"Telefono: {old_tel}\n"
-                        f"Direccion: {old_dir}\n"
-                        f"Email: {old_mail}"
-                    ),
-                )
-                con.close()
-                return
 
             created_at = emission_dt.isoformat(timespec="seconds")
             curr, _sec, rate = get_currency_context()
