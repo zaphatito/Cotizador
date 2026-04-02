@@ -6,7 +6,7 @@ import datetime
 import re
 import threading
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent, Signal
 from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
@@ -31,7 +31,7 @@ from ..utils import nz
 from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
 
 from ..db_path import resolve_db_path
-from ..api.presupuesto_client import sync_pending_history_quotes_once
+from ..api.presupuesto_client import sync_pending_history_quotes_once, verify_cotizador_signature_once
 from ..catalog_sync import (
     sync_catalog_from_excel_to_db,
     load_catalog_from_db,
@@ -913,6 +913,7 @@ class QuotesTableModel(QAbstractTableModel):
 
 
 class QuoteHistoryWindow(QMainWindow):
+    lockdown_requested = Signal(str)
     _DEFAULT_SIZE = (1300, 720)
     _MIN_REASONABLE = (980, 620)
     _WIN_KEY_PREFIX = "ui_window_history"
@@ -947,6 +948,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         self._open_windows: list[SistemaCotizaciones] = []
         self._closing_with_children = False
+        self._lockdown_active = False
 
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -973,6 +975,7 @@ class QuoteHistoryWindow(QMainWindow):
         self._api_sync_stop_event = threading.Event()
         self._api_sync_wake_event = threading.Event()
         self._api_sync_thread: threading.Thread | None = None
+        self.lockdown_requested.connect(self._apply_admin_lockdown)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1382,6 +1385,18 @@ class QuoteHistoryWindow(QMainWindow):
                 continue
 
             try:
+                verification = verify_cotizador_signature_once()
+                if bool(verification.get("blocked")):
+                    detail = str(verification.get("detail") or "").strip()
+                    msg = str(verification.get("message") or "Este programa fue bloqueado por un administrador.").strip()
+                    if detail:
+                        msg = f"{msg}\n\nDetalle tecnico:\n{detail}"
+                    self.lockdown_requested.emit(msg)
+                    break
+
+                if str(verification.get("status") or "").strip().upper() == "SOFT_FAIL":
+                    log.warning("Verificacion de firma no disponible: %s", verification.get("message"))
+
                 res = sync_pending_history_quotes_once(limit=batch_limit)
                 if bool(res.get("disabled")):
                     if not disabled_logged:
@@ -1417,6 +1432,41 @@ class QuoteHistoryWindow(QMainWindow):
             except Exception as e:
                 log.warning("Sync API automatico fallo: %s", e)
                 wait_s = interval_error_s
+
+    def _apply_admin_lockdown(self, message: str):
+        if self._lockdown_active:
+            return
+
+        self._lockdown_active = True
+        self._api_sync_stop_event.set()
+        self._api_sync_wake_event.set()
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        previous_quit_mode = app.quitOnLastWindowClosed()
+        app.setQuitOnLastWindowClosed(False)
+
+        try:
+            for widget in list(QApplication.topLevelWidgets()):
+                if widget is None:
+                    continue
+                try:
+                    widget.close()
+                except Exception:
+                    pass
+
+            QApplication.processEvents()
+
+            QMessageBox.critical(
+                None,
+                "Programa bloqueado",
+                str(message or "Este programa fue bloqueado por un administrador."),
+            )
+        finally:
+            app.setQuitOnLastWindowClosed(previous_quit_mode)
+            app.quit()
 
     def _on_catalog_updated(self, *_):
         self._apply_catalog_gate()
@@ -2233,6 +2283,12 @@ class QuoteHistoryWindow(QMainWindow):
         return quote_code, new_pdf_path, cmd_path
 
     def closeEvent(self, event: QCloseEvent):
+        if self._lockdown_active:
+            self._stop_background_api_sync()
+            self._save_window_state()
+            event.accept()
+            return
+
         if self._closing_with_children:
             self._stop_background_api_sync()
             self._save_window_state()

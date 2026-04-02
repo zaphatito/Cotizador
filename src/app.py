@@ -33,6 +33,7 @@ from .widgets_parts.quote_history_dialog import QuoteHistoryWindow
 
 from .ai.search_index import LocalSearchIndex
 from .ai.assistant.ollama_bootstrap import ensure_ollama_on_startup
+from .api.presupuesto_client import verify_cotizador_signature_once
 from .ui_theme import apply_modern_theme
 log = get_logger(__name__)
 
@@ -239,6 +240,41 @@ def _single_instance_or_raise_existing() -> None:
         return
 
 
+def _verify_access_before_startup(*, app_icon=None) -> bool:
+    try:
+        log.info("Verificando acceso del cotizador antes del chequeo de actualizacion.")
+        result = verify_cotizador_signature_once()
+    except Exception as exc:
+        # Fallback defensivo: la verificacion normal ya maneja soft/hard fail.
+        log.exception("Fallo inesperado al verificar acceso del cotizador.")
+        result = {
+            "status": "SOFT_FAIL",
+            "allowed": True,
+            "blocked": False,
+            "message": str(exc),
+        }
+
+    status = str(result.get("status") or "").strip().upper()
+    message = str(result.get("message") or "").strip()
+
+    if status == "SOFT_FAIL":
+        log.warning("No se pudo verificar acceso al iniciar: %s", message or "sin detalle")
+        return True
+
+    if bool(result.get("blocked")):
+        mb = QMessageBox()
+        mb.setIcon(QMessageBox.Critical)
+        mb.setWindowTitle("Programa bloqueado")
+        if app_icon is not None and not app_icon.isNull():
+            mb.setWindowIcon(app_icon)
+        mb.setText(message or "Este programa fue bloqueado por un administrador.")
+        mb.exec()
+        return False
+
+    log.info("Verificacion de acceso completada al iniciar | status=%s", status or "ACTIVE")
+    return True
+
+
 def run_app():
     set_win_app_id()
     _single_instance_or_raise_existing()
@@ -249,6 +285,9 @@ def run_app():
     app_icon = load_app_icon(COUNTRY_CODE)
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
+
+    if not _verify_access_before_startup(app_icon=app_icon):
+        return
 
     # ===== CUADRO DE UPDATE =====
     dlg = UpdateProgressDialog(app_icon=app_icon)

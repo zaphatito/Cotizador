@@ -21,6 +21,7 @@ def build_api_cases(base_url: str | None = None) -> tuple[tuple[int, str], ...]:
     return (
         (API_CASE_LOGIN, f"{root}/sessions/busLogin"),
         (API_CASE_POST_PRESUPUESTO, f"{root}/db/postPresupuesto"),
+        (API_CASE_VERIFY_COTIZADOR, f"{root}/db/verifyCotizador"),
     )
 
 
@@ -29,6 +30,7 @@ API_BASE_URL: Final[str] = _resolve_api_base_url()
 # Cases API de sesion + presupuesto.
 API_CASE_LOGIN: Final[int] = 1
 API_CASE_POST_PRESUPUESTO: Final[int] = 2
+API_CASE_VERIFY_COTIZADOR: Final[int] = 3
 
 API_CASES: Final[tuple[tuple[int, str], ...]] = build_api_cases(API_BASE_URL)
 

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import datetime
+import getpass
+import hashlib
+import json
 import os
+import platform
 import re
+import socket
 import threading
+import uuid
 from typing import Any
 
 from sqlModels.api_identity import (
@@ -18,14 +24,14 @@ from sqlModels.quotes_repo import (
     get_quote_items,
     infer_tipo_documento_from_doc,
 )
-from sqlModels.settings_repo import get_setting
+from sqlModels.settings_repo import get_setting, set_setting
 
 from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, CATS
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..utils import nz
-from .cases import API_CASE_LOGIN, API_CASE_POST_PRESUPUESTO
+from .cases import API_CASE_LOGIN, API_CASE_POST_PRESUPUESTO, API_CASE_VERIFY_COTIZADOR
 from .controller import post
 from .generic_controller import ApiRequestError
 
@@ -35,6 +41,13 @@ _API_QUOTE_CODE_RE = re.compile(r"^[A-Z0-9]+-\d{7,}$")
 _CATS_UPPER = {str(x).strip().upper() for x in (CATS or []) if str(x).strip()}
 _SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
+_COTIZADOR_PID_KEY = "cotizador_pid"
+_VERIFICATION_OK_KEY = "cotizador_last_verification_ok_at"
+_VERIFICATION_ATTEMPT_KEY = "cotizador_last_verification_attempt_at"
+_VERIFICATION_STATUS_KEY = "cotizador_last_verification_status"
+_VERIFICATION_MESSAGE_KEY = "cotizador_last_verification_message"
+_VERIFICATION_GRACE_STARTED_KEY = "cotizador_verification_grace_started_at"
+_VERIFICATION_STALE_AFTER = datetime.timedelta(days=3)
 
 
 class PresupuestoApiError(RuntimeError):
@@ -43,10 +56,10 @@ class PresupuestoApiError(RuntimeError):
 
 def _ensure_schema_once(con) -> None:
     global _SCHEMA_READY
-    if _SCHEMA_READY:
+    if _SCHEMA_READY and _has_column(con, "settings", "key"):
         return
     with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
+        if _SCHEMA_READY and _has_column(con, "settings", "key"):
             return
         ensure_schema(con)
         _SCHEMA_READY = True
@@ -257,6 +270,19 @@ def _extract_message(payload: Any) -> str:
     return ""
 
 
+def _extract_text_flag(payload: Any, *, key: str) -> str:
+    if isinstance(payload, dict):
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        for nested_key in ("data", "result", "payload"):
+            nested = payload.get(nested_key)
+            txt = _extract_text_flag(nested, key=key)
+            if txt:
+                return txt
+    return ""
+
+
 def _api_requires_wrapped_presupuesto_payload(err: ApiRequestError) -> bool:
     """
     Detecta el contrato legacy del backend:
@@ -443,6 +469,181 @@ def _build_adjunto_source(path: str) -> dict[str, Any]:
     }
 
 
+def _resolve_app_version() -> str:
+    try:
+        from ..version import __version__
+
+        return str(__version__ or "").strip()
+    except Exception:
+        return ""
+
+
+def _resolve_local_ip() -> str:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            ip = str(sock.getsockname()[0] or "").strip()
+            if ip:
+                return ip
+        finally:
+            sock.close()
+    except Exception:
+        pass
+
+    try:
+        ip = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return ""
+
+
+def _load_or_create_cotizador_pid() -> str:
+    db_path = resolve_db_path()
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        pid = str(get_setting(con, _COTIZADOR_PID_KEY, "") or "").strip()
+        grace_started = str(get_setting(con, _VERIFICATION_GRACE_STARTED_KEY, "") or "").strip()
+        if pid and grace_started:
+            return pid
+
+        if not pid:
+            pid = str(uuid.uuid4())
+        if not grace_started:
+            grace_started = _now_iso_local()
+
+        with tx(con):
+            set_setting(con, _COTIZADOR_PID_KEY, pid)
+            set_setting(con, _VERIFICATION_GRACE_STARTED_KEY, grace_started)
+        return pid
+    finally:
+        con.close()
+
+
+def _load_verification_reference_at() -> str:
+    db_path = resolve_db_path()
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        last_ok = str(get_setting(con, _VERIFICATION_OK_KEY, "") or "").strip()
+        if last_ok:
+            return last_ok
+        return str(get_setting(con, _VERIFICATION_GRACE_STARTED_KEY, "") or "").strip()
+    finally:
+        con.close()
+
+
+def _persist_verification_state(*, status: str, message: str, success: bool) -> None:
+    db_path = resolve_db_path()
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    now_iso = _now_iso_local()
+    try:
+        with tx(con):
+            set_setting(con, _VERIFICATION_ATTEMPT_KEY, now_iso)
+            set_setting(con, _VERIFICATION_STATUS_KEY, str(status or "").strip())
+            set_setting(con, _VERIFICATION_MESSAGE_KEY, _normalize_error_message(message, max_len=1200))
+            if success:
+                set_setting(con, _VERIFICATION_OK_KEY, now_iso)
+    finally:
+        con.close()
+
+
+def _parse_iso_datetime(value: Any) -> datetime.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(raw)
+    except Exception:
+        pass
+    if raw.endswith("Z"):
+        try:
+            return datetime.datetime.fromisoformat(raw[:-1] + "+00:00")
+        except Exception:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _is_verification_stale(reference_iso: str) -> bool:
+    ref_dt = _parse_iso_datetime(reference_iso)
+    if ref_dt is None:
+        return False
+
+    if ref_dt.tzinfo is not None:
+        now_dt = datetime.datetime.now(tz=ref_dt.tzinfo)
+    else:
+        now_dt = datetime.datetime.now()
+
+    return (now_dt - ref_dt) >= _VERIFICATION_STALE_AFTER
+
+
+def _build_cotizador_verification_payload(
+    *,
+    api_username: str,
+    app_username: str,
+    country: str,
+    company_type: str,
+    store_id: str,
+    tienda: bool,
+) -> dict[str, Any]:
+    pid = _load_or_create_cotizador_pid()
+    cod_pais = _country_code_from_country(country)
+    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
+    id_cotizador = _extract_id_cotizador("", store_id)
+    hostname = str(socket.gethostname() or "").strip()
+    usuario_sistema = str(getpass.getuser() or "").strip()
+    sistema_operativo = str(platform.platform() or "").strip()
+    app_version = _resolve_app_version()
+    ip_local = _resolve_local_ip()
+
+    datos_firma = {
+        "pid": pid,
+        "id_cotizador": id_cotizador,
+        "user": user_for_payload,
+        "api_username": str(api_username or "").strip(),
+        "hostname": hostname,
+        "ip_local": ip_local,
+        "usuario_sistema": usuario_sistema,
+        "sistema_operativo": sistema_operativo,
+        "app_version": app_version,
+        "cod_pais": cod_pais,
+        "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
+        "tienda": bool(tienda),
+    }
+    firma_hash = hashlib.sha256(
+        json.dumps(datos_firma, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "pid": pid,
+        "id_cotizador": id_cotizador,
+        "user": user_for_payload,
+        "ip_local": ip_local,
+        "hostname": hostname,
+        "usuario_sistema": usuario_sistema,
+        "sistema_operativo": sistema_operativo,
+        "app_version": app_version,
+        "cod_pais": cod_pais,
+        "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
+        "tienda": bool(tienda),
+        "firma_hash": firma_hash,
+        "datos_firma": {
+            **datos_firma,
+            "firma_hash": firma_hash,
+        },
+    }
+
+
 def _ticket_cmd_path_from_pdf(pdf_path: str) -> str:
     if not pdf_path:
         return ""
@@ -620,6 +821,137 @@ def build_presupuesto_payload(
     }
 
 
+def _login_api(
+    *,
+    user_id: int,
+    api_username: str,
+    login_password: str | None = None,
+) -> tuple[str, Any]:
+    plain_password = str(login_password or API_LOGIN_PASSWORD or "").strip()
+    login_payload = {
+        "id": int(user_id),
+        "username": str(api_username),
+        "password": plain_password,
+    }
+
+    try:
+        login_resp = post(
+            API_CASE_LOGIN,
+            json_data=login_payload,
+            expected_status=(200, 201, 202),
+            timeout=12,
+            raise_for_status=True,
+        )
+    except ApiRequestError as e:
+        detail = ""
+        if getattr(e, "response", None) is not None:
+            detail = str(getattr(e.response, "text", "") or "").strip()
+        raise PresupuestoApiError(f"Login API fallido. {detail}".strip()) from e
+
+    token = _extract_access_token(login_resp.data)
+    if not token:
+        token = _extract_access_token(login_resp.text)
+    if not token:
+        raise PresupuestoApiError("No se pudo obtener access token desde busLogin.")
+
+    return token, login_resp
+
+
+def verify_cotizador_signature_once(*, login_password: str | None = None) -> dict[str, Any]:
+    identity = _load_api_identity()
+    tienda = False
+    if len(identity) >= 7:
+        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
+    elif len(identity) >= 6:
+        user_id, api_username, app_username, country, company_type, store_id = identity[:6]
+    else:
+        user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
+        app_username = str(api_username or "")
+
+    payload = _build_cotizador_verification_payload(
+        api_username=str(api_username or ""),
+        app_username=str(app_username or ""),
+        country=str(country or ""),
+        company_type=str(company_type or ""),
+        store_id=str(store_id or ""),
+        tienda=bool(tienda),
+    )
+    reference_iso = _load_verification_reference_at()
+
+    try:
+        token, login_resp = _login_api(
+            user_id=int(user_id),
+            api_username=str(api_username or ""),
+            login_password=login_password,
+        )
+
+        verify_resp = post(
+            API_CASE_VERIFY_COTIZADOR,
+            json_data=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            expected_status=(200, 201, 202),
+            timeout=12,
+            raise_for_status=True,
+        )
+
+        allowed = _extract_bool_flag(verify_resp.data, key="allowed")
+        if allowed is None:
+            raise PresupuestoApiError("No se pudo determinar el estado de verificacion del cotizador.")
+
+        estatus = _extract_text_flag(verify_resp.data, key="estatus") or ("activo" if allowed else "bloqueado")
+        message = _extract_message(verify_resp.data) or (
+            "Firma del cotizador verificada correctamente."
+            if allowed
+            else "Este programa fue bloqueado por un administrador."
+        )
+
+        _persist_verification_state(status=estatus, message=message, success=bool(allowed))
+
+        return {
+            "status": "ACTIVE" if allowed else "BLOCKED",
+            "allowed": bool(allowed),
+            "blocked": not bool(allowed),
+            "pid": str(payload.get("pid") or ""),
+            "message": message,
+            "login_status": int(login_resp.status_code),
+            "verify_status": int(verify_resp.status_code),
+            "response": verify_resp.data if verify_resp.data is not None else verify_resp.text,
+            "payload": payload,
+        }
+    except Exception as exc:
+        detail = _normalize_error_message(exc)
+        expired = _is_verification_stale(reference_iso)
+        _persist_verification_state(
+            status="expired" if expired else "soft_fail",
+            message=detail,
+            success=False,
+        )
+        if expired:
+            return {
+                "status": "HARD_FAIL",
+                "allowed": False,
+                "blocked": True,
+                "expired": True,
+                "pid": str(payload.get("pid") or ""),
+                "message": (
+                    "Este programa fue bloqueado por un administrador.\n\n"
+                    "No hubo una verificacion exitosa en los ultimos 3 dias."
+                ),
+                "detail": detail,
+                "payload": payload,
+            }
+
+        return {
+            "status": "SOFT_FAIL",
+            "allowed": True,
+            "blocked": False,
+            "expired": False,
+            "pid": str(payload.get("pid") or ""),
+            "message": detail,
+            "payload": payload,
+        }
+
+
 def login_and_send_presupuesto(
     *,
     quote_code: str,
@@ -683,32 +1015,11 @@ def login_and_send_presupuesto(
     if (not isinstance(presupuesto_items, list)) or (not presupuesto_items):
         raise PresupuestoApiError("No hay items para enviar al API.")
 
-    plain_password = str(login_password or API_LOGIN_PASSWORD or "").strip()
-    login_payload = {
-        "id": int(user_id),
-        "username": str(api_username),
-        "password": plain_password,
-    }
-
-    try:
-        login_resp = post(
-            API_CASE_LOGIN,
-            json_data=login_payload,
-            expected_status=(200, 201, 202),
-            timeout=12,
-            raise_for_status=True,
-        )
-    except ApiRequestError as e:
-        detail = ""
-        if getattr(e, "response", None) is not None:
-            detail = str(getattr(e.response, "text", "") or "").strip()
-        raise PresupuestoApiError(f"Login API fallido. {detail}".strip()) from e
-
-    token = _extract_access_token(login_resp.data)
-    if not token:
-        token = _extract_access_token(login_resp.text)
-    if not token:
-        raise PresupuestoApiError("No se pudo obtener access token desde busLogin.")
+    token, login_resp = _login_api(
+        user_id=int(user_id),
+        api_username=str(api_username),
+        login_password=login_password,
+    )
 
     headers = {
         "Authorization": f"Bearer {token}",

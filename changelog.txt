@@ -1,13 +1,13 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.7
-Fecha: 2026-03-20
+Versión: 2.0.8
+Fecha: 2026-04-02
 
 Resumen
 - Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
 
 Cambios y mejoras
-- [Mejora] Edición de email y dirección de clientes desde el editor de clientes
-- [Mejora] Edición de clientes desde el modulo de creacion de cotizaciones
+- [Mejora] Bloqueo de usuarios desde el servidor
+
 
 
 Compatibilidad

@@ -321,6 +321,100 @@ def test_login_and_send_presupuesto_does_not_call_api_when_items_are_empty(monke
     assert calls == []
 
 
+def test_verify_cotizador_signature_returns_blocked_when_api_marks_it(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    db_path = str(tmp_path / "verify_blocked.sqlite3")
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_VERIFY_COTIZADOR):
+            return SimpleNamespace(
+                status_code=200,
+                data={
+                    "allowed": False,
+                    "message": "Bloqueado por administrador",
+                    "data": {"estatus": "bloqueado"},
+                },
+                text='{"allowed":false}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1, "user_demo", "app_demo", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.verify_cotizador_signature_once()
+
+    assert res["status"] == "BLOCKED"
+    assert res["blocked"] is True
+    assert "Bloqueado por administrador" in res["message"]
+
+
+def test_verify_cotizador_signature_soft_fails_inside_grace_window(monkeypatch, tmp_path):
+    from src.api.generic_controller import ApiRequestError
+
+    db_path = str(tmp_path / "verify_soft_fail.sqlite3")
+
+    def fake_post(case, **kwargs):
+        raise ApiRequestError("network down")
+
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1, "user_demo", "app_demo", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.verify_cotizador_signature_once()
+
+    assert res["status"] == "SOFT_FAIL"
+    assert res["blocked"] is False
+    assert res["allowed"] is True
+
+
+def test_verify_cotizador_signature_hard_fails_after_three_days(monkeypatch, tmp_path):
+    import datetime
+
+    from sqlModels.db import connect, ensure_schema, tx
+    from sqlModels.settings_repo import set_setting
+    from src.api.generic_controller import ApiRequestError
+
+    db_path = str(tmp_path / "verify_hard_fail.sqlite3")
+    con = connect(db_path)
+    ensure_schema(con)
+    with tx(con):
+        set_setting(con, pc._COTIZADOR_PID_KEY, "pid-demo")
+        set_setting(
+            con,
+            pc._VERIFICATION_GRACE_STARTED_KEY,
+            (datetime.datetime.now() - datetime.timedelta(days=4)).isoformat(timespec="seconds"),
+        )
+    con.close()
+
+    def fake_post(case, **kwargs):
+        raise ApiRequestError("network down")
+
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1, "user_demo", "app_demo", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.verify_cotizador_signature_once()
+
+    assert res["status"] == "HARD_FAIL"
+    assert res["blocked"] is True
+    assert "3 dias" in res["message"]
+
 
 def test_sync_pending_history_quotes_once_ignores_quotes_without_items(tmp_path, monkeypatch):
     from sqlModels.db import connect, ensure_schema, tx
