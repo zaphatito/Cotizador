@@ -5,23 +5,24 @@ import os
 import datetime
 from copy import deepcopy
 
-from PySide6.QtWidgets import QMessageBox, QDialog
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl, QTimer
 
 from ..paths import COTIZACIONES_DIR, resolve_country_asset
-from ..config import APP_COUNTRY, COUNTRY_CODE, STORE_ID, convert_from_base, get_currency_context
+from ..config import APP_COUNTRY, COUNTRY_CODE, convert_from_base, get_currency_context
 from ..utils import nz
 from ..pdfgen import generar_pdf
 from ..quote_code import format_quote_code
 from ..logging_setup import get_logger
+from ..api.presupuesto_client import reserve_next_quote_code
 from ..widgets import show_preview_dialog, ListadoProductosDialog
 
 from ..db_path import resolve_db_path
 
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.quotes_repo import insert_quote
-from sqlModels.sequences_repo import next_quote_no
+from sqlModels.sequences_repo import ensure_quote_no_at_least, get_quote_no_value, next_quote_no
 
 from .ticket_actions import generar_ticket_para_cotizacion
 
@@ -211,15 +212,22 @@ class PdfActionsMixin:
 
             created_at = emission_dt.isoformat(timespec="seconds")
             curr, _sec, rate = get_currency_context()
+            local_last_value = get_quote_no_value(con, COUNTRY_CODE)
+            reserved_quote = reserve_next_quote_code(local_last_value=local_last_value)
+            reserved_quote_no = str(reserved_quote.get("quote_no") or "").strip()
+            if not reserved_quote_no:
+                raise RuntimeError("El API no devolvio un correlativo valido.")
 
             with tx(con):
+                ensure_quote_no_at_least(con, COUNTRY_CODE, max(0, int(reserved_quote_no) - 1))
                 quote_no = next_quote_no(con, COUNTRY_CODE, width=7)
-                quote_code = format_quote_code(
-                    country_code=COUNTRY_CODE,
-                    store_id=STORE_ID,
-                    quote_no=quote_no,
-                    width=7,
-                )
+
+            quote_code = format_quote_code(
+                country_code=COUNTRY_CODE,
+                store_id=str(reserved_quote.get("id_cotizador") or ""),
+                quote_no=quote_no,
+                width=7,
+            )
 
             ruta = generar_pdf(datos, fixed_quote_no=quote_code)
             log.info("PDF generado en %s", ruta)
@@ -298,7 +306,15 @@ class PdfActionsMixin:
 
         except Exception as e:
             log.exception("Error al generar PDF")
-            QMessageBox.critical(self, "Error al generar PDF", f"❌ No se pudo generar la cotización:\n{e}")
+            QMessageBox.critical(
+                self,
+                "Error al generar PDF",
+                (
+                    "❌ No se pudo generar la cotización.\n\n"
+                    "La app sincroniza el correlativo local consultando el servidor antes de guardar.\n\n"
+                    f"Detalle:\n{e}"
+                ),
+            )
 
     def limpiar_formulario(self):
         self.entry_cliente.clear()

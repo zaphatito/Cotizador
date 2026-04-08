@@ -30,8 +30,15 @@ from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, CATS
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
+from ..quote_code import format_quote_code
 from ..utils import nz
-from .cases import API_CASE_LOGIN, API_CASE_POST_PRESUPUESTO, API_CASE_VERIFY_COTIZADOR
+from .cases import (
+    API_CASE_GET_COUNTRY_CLIENTS,
+    API_CASE_GET_NEXT_QUOTE_CODE,
+    API_CASE_LOGIN,
+    API_CASE_POST_PRESUPUESTO,
+    API_CASE_VERIFY_COTIZADOR,
+)
 from .controller import post
 from .generic_controller import ApiRequestError
 
@@ -283,6 +290,23 @@ def _extract_text_flag(payload: Any, *, key: str) -> str:
     return ""
 
 
+def _extract_int_flag(payload: Any, *, key: str) -> int | None:
+    if isinstance(payload, dict):
+        value = payload.get(key)
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            return parsed
+        for nested_key in ("data", "result", "payload"):
+            nested = payload.get(nested_key)
+            parsed_nested = _extract_int_flag(nested, key=key)
+            if parsed_nested is not None:
+                return parsed_nested
+    return None
+
+
 def _api_requires_wrapped_presupuesto_payload(err: ApiRequestError) -> bool:
     """
     Detecta el contrato legacy del backend:
@@ -413,6 +437,28 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
         str(company or ""),
         str(store_id or ""),
         bool(tienda_cfg),
+    )
+
+
+def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str, str, str, bool]:
+    if len(identity) >= 7:
+        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
+    elif len(identity) >= 6:
+        user_id, api_username, app_username, country, company_type, store_id = identity[:6]
+        tienda = False
+    else:
+        user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
+        app_username = str(api_username or "")
+        tienda = False
+
+    return (
+        int(user_id),
+        str(api_username or ""),
+        str(app_username or ""),
+        str(country or ""),
+        str(company_type or ""),
+        str(store_id or ""),
+        bool(tienda),
     )
 
 
@@ -857,16 +903,16 @@ def _login_api(
     return token, login_resp
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+    }
+
+
 def verify_cotizador_signature_once(*, login_password: str | None = None) -> dict[str, Any]:
-    identity = _load_api_identity()
-    tienda = False
-    if len(identity) >= 7:
-        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
-    elif len(identity) >= 6:
-        user_id, api_username, app_username, country, company_type, store_id = identity[:6]
-    else:
-        user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
-        app_username = str(api_username or "")
+    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
+        _load_api_identity()
+    )
 
     payload = _build_cotizador_verification_payload(
         api_username=str(api_username or ""),
@@ -888,7 +934,7 @@ def verify_cotizador_signature_once(*, login_password: str | None = None) -> dic
         verify_resp = post(
             API_CASE_VERIFY_COTIZADOR,
             json_data=payload,
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_auth_headers(token),
             expected_status=(200, 201, 202),
             timeout=12,
             raise_for_status=True,
@@ -952,6 +998,172 @@ def verify_cotizador_signature_once(*, login_password: str | None = None) -> dic
         }
 
 
+def reserve_next_quote_code(
+    *,
+    local_last_value: int | None = None,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    user_id, api_username, app_username, country, _company_type, store_id, _tienda = _unpack_api_identity(
+        _load_api_identity()
+    )
+    cod_pais = _country_code_from_country(country)
+    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
+    id_cotizador = _extract_id_cotizador("", store_id)
+
+    token, login_resp = _login_api(
+        user_id=int(user_id),
+        api_username=str(api_username or ""),
+        login_password=login_password,
+    )
+
+    try:
+        request_payload = {
+            "id_cotizador": str(id_cotizador or ""),
+            "user": user_for_payload,
+            "cod_pais": str(cod_pais or ""),
+        }
+        if local_last_value is not None:
+            try:
+                request_payload["local_last_value"] = max(0, int(local_last_value))
+            except Exception:
+                pass
+
+        reserve_resp = post(
+            API_CASE_GET_NEXT_QUOTE_CODE,
+            json_data=request_payload,
+            headers=_auth_headers(token),
+            expected_status=(200, 201),
+            timeout=12,
+            raise_for_status=True,
+        )
+    except ApiRequestError as e:
+        detail = ""
+        if getattr(e, "response", None) is not None:
+            detail = str(getattr(e.response, "text", "") or "").strip()
+        raise PresupuestoApiError(f"No se pudo reservar el numero de cotizacion. {detail}".strip()) from e
+
+    response_payload = reserve_resp.data if reserve_resp.data is not None else {}
+    quote_code = _extract_text_flag(response_payload, key="quote_code")
+    quote_no = _extract_text_flag(response_payload, key="quote_no")
+    last_value = _extract_int_flag(response_payload, key="last_value")
+
+    if not quote_no and last_value is not None and last_value > 0:
+        quote_no = str(last_value).zfill(7)
+    if not quote_code and quote_no:
+        quote_code = format_quote_code(
+            country_code=cod_pais,
+            store_id=id_cotizador,
+            quote_no=quote_no,
+            width=7,
+        )
+
+    if not quote_code:
+        raise PresupuestoApiError("El API no devolvio un codigo de cotizacion valido.")
+
+    return {
+        "login_status": int(login_resp.status_code),
+        "reserve_status": int(reserve_resp.status_code),
+        "quote_code": str(quote_code or "").strip().upper(),
+        "quote_no": str(quote_no or "").strip(),
+        "id_cotizador": str(id_cotizador or "").strip(),
+        "cod_pais": str(cod_pais or "").strip(),
+        "codigo_user": user_for_payload,
+        "response": response_payload if response_payload is not None else reserve_resp.text,
+    }
+
+
+def _normalize_country_client_row(row: dict[str, Any], *, cod_pais: str) -> dict[str, Any]:
+    return {
+        "id": int(row.get("id") or row.get("id_cliente") or 0),
+        "country_code": str(row.get("country_code") or cod_pais or "").strip().upper(),
+        "tipo_documento": str(row.get("tipo_documento") or "").strip().upper(),
+        "documento": str(row.get("documento") or "").strip().upper(),
+        "documento_norm": str(row.get("documento_norm") or row.get("documento") or "").strip().upper(),
+        "nombre": str(row.get("nombre") or "").strip(),
+        "telefono": str(row.get("telefono") or "").strip(),
+        "direccion": str(row.get("direccion") or "-").strip() or "-",
+        "email": str(row.get("email") or "-").strip() or "-",
+        "source_quote_id": None,
+        "source_created_at": "",
+        "created_at": str(row.get("created_at") or "").strip(),
+        "updated_at": str(row.get("updated_at") or "").strip(),
+        "deleted_at": None,
+    }
+
+
+def fetch_country_clients_page(
+    *,
+    search_text: str = "",
+    limit: int = 200,
+    offset: int = 0,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    user_id, api_username, _app_username, country, _company_type, _store_id, _tienda = _unpack_api_identity(
+        _load_api_identity()
+    )
+    cod_pais = _country_code_from_country(country)
+
+    token, _login_resp = _login_api(
+        user_id=int(user_id),
+        api_username=str(api_username or ""),
+        login_password=login_password,
+    )
+
+    try:
+        resp = post(
+            API_CASE_GET_COUNTRY_CLIENTS,
+            json_data={
+                "cod_pais": str(cod_pais or ""),
+                "search_text": str(search_text or "").strip(),
+                "limit": max(1, min(500, int(limit))),
+                "offset": max(0, int(offset)),
+            },
+            headers=_auth_headers(token),
+            expected_status=(200, 204),
+            timeout=15,
+            raise_for_status=True,
+        )
+    except ApiRequestError as e:
+        detail = ""
+        if getattr(e, "response", None) is not None:
+            detail = str(getattr(e.response, "text", "") or "").strip()
+        raise PresupuestoApiError(f"No se pudieron consultar los clientes del pais. {detail}".strip()) from e
+
+    raw_rows: list[dict[str, Any]] = []
+    has_more = False
+    if isinstance(resp.data, list):
+        raw_rows = [dict(x) for x in resp.data if isinstance(x, dict)]
+    elif isinstance(resp.data, dict):
+        data_rows = resp.data.get("data")
+        if isinstance(data_rows, list):
+            raw_rows = [dict(x) for x in data_rows if isinstance(x, dict)]
+        has_more = bool(resp.data.get("has_more"))
+
+    rows = [_normalize_country_client_row(row, cod_pais=cod_pais) for row in raw_rows]
+    return {
+        "rows": rows,
+        "has_more": bool(has_more),
+        "offset": max(0, int(offset)),
+        "limit": max(1, min(500, int(limit))),
+    }
+
+
+def fetch_country_clients(
+    *,
+    search_text: str = "",
+    limit: int = 200,
+    offset: int = 0,
+    login_password: str | None = None,
+) -> list[dict[str, Any]]:
+    page = fetch_country_clients_page(
+        search_text=search_text,
+        limit=limit,
+        offset=offset,
+        login_password=login_password,
+    )
+    return list(page.get("rows") or [])
+
+
 def login_and_send_presupuesto(
     *,
     quote_code: str,
@@ -969,16 +1181,9 @@ def login_and_send_presupuesto(
     adjunto_files: list[dict[str, str]] | None = None,
     login_password: str | None = None,
 ) -> dict[str, Any]:
-    identity = _load_api_identity()
-    tienda = False
-    if len(identity) >= 7:
-        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
-    elif len(identity) >= 6:
-        user_id, api_username, app_username, country, company_type, store_id = identity[:6]
-    else:
-        # Compatibilidad con versiones/mocks antiguos de _load_api_identity.
-        user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
-        app_username = str(api_username or "")
+    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
+        _load_api_identity()
+    )
 
     cod_pais = _country_code_from_country(country)
     tipo_documento_norm = str(tipo_documento or "").strip().upper()
@@ -1022,7 +1227,7 @@ def login_and_send_presupuesto(
     )
 
     headers = {
-        "Authorization": f"Bearer {token}",
+        **_auth_headers(token),
     }
 
     def _post_presupuesto(json_body: dict[str, Any]) -> Any:

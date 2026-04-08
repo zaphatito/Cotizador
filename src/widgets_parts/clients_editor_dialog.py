@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QObject, Signal, QRunnable, QThreadPool
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from sqlModels.clients_repo import (
     list_clients,
     save_client,
+    upsert_client,
     delete_client,
     get_client,
     is_generic_client_row,
@@ -35,6 +36,7 @@ from sqlModels.quotes_repo import (
 from ..config import COUNTRY_CODE
 from ..db_path import resolve_db_path
 from ..ai.search_index import LocalSearchIndex
+from ..api.presupuesto_client import fetch_country_clients_page
 from .excel_table_behavior import ExcelTableController
 
 
@@ -58,6 +60,7 @@ class ClientsTableModel(QAbstractTableModel):
     def __init__(self):
         super().__init__()
         self.rows: list[dict[str, Any]] = []
+        self._read_only = False
         self._dirty_rows: set[int] = set()
         self._dirty_cells: set[tuple[int, int]] = set()
         self._dirty_font = QFont()
@@ -117,7 +120,7 @@ class ClientsTableModel(QAbstractTableModel):
             return Qt.NoItemFlags
         base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         row = self.rows[index.row()] if 0 <= index.row() < len(self.rows) else {}
-        if index.column() in self.EDITABLE_COLS and not is_generic_client_row(row):
+        if (not self._read_only) and index.column() in self.EDITABLE_COLS and not is_generic_client_row(row):
             base |= Qt.ItemIsEditable
         return base
 
@@ -165,6 +168,16 @@ class ClientsTableModel(QAbstractTableModel):
         self._dirty_rows = set()
         self._dirty_cells = set()
         self.endResetModel()
+
+    def append_rows(self, rows: list[dict[str, Any]]) -> None:
+        chunk = list(rows or [])
+        if not chunk:
+            return
+        start = len(self.rows)
+        end = start + len(chunk) - 1
+        self.beginInsertRows(QModelIndex(), start, end)
+        self.rows.extend(chunk)
+        self.endInsertRows()
 
     def row_by_index(self, index: QModelIndex) -> dict[str, Any] | None:
         if not index.isValid():
@@ -237,6 +250,13 @@ class ClientsTableModel(QAbstractTableModel):
             br = self.index(len(self.rows) - 1, len(self.HEADERS) - 1)
             self.dataChanged.emit(tl, br, [Qt.FontRole])
 
+    def set_read_only(self, value: bool) -> None:
+        self._read_only = bool(value)
+        if self.rows:
+            tl = self.index(0, 0)
+            br = self.index(len(self.rows) - 1, len(self.HEADERS) - 1)
+            self.dataChanged.emit(tl, br, [])
+
 
 class InlineTextDelegate(QStyledItemDelegate):
     def createEditor(self, parent, _option, _index):
@@ -294,7 +314,80 @@ class DocTypeDelegate(QStyledItemDelegate):
         model.setData(index, str(raw or "").strip().upper(), Qt.EditRole)
 
 
+class _ClientsLoadSignals(QObject):
+    done = Signal(int, int, bool, list, bool, str)
+
+
+class _ClientsLoadTask(QRunnable):
+    def __init__(
+        self,
+        *,
+        session_id: int,
+        mode: str,
+        country_code: str,
+        search_text: str,
+        limit: int,
+        offset: int,
+        db_path: str,
+    ):
+        super().__init__()
+        self.session_id = int(session_id)
+        self.mode = str(mode or "").strip().lower()
+        self.country_code = str(country_code or "").strip().upper()
+        self.search_text = str(search_text or "").strip()
+        self.limit = max(1, int(limit))
+        self.offset = max(0, int(offset))
+        self.db_path = str(db_path or "")
+        self.signals = _ClientsLoadSignals()
+
+    def run(self):
+        rows: list[dict[str, Any]] = []
+        has_more = False
+        error = ""
+        try:
+            if self.mode == ClientsEditorDialog.SOURCE_COUNTRY:
+                page = fetch_country_clients_page(
+                    search_text=self.search_text,
+                    limit=self.limit,
+                    offset=self.offset,
+                )
+                rows = list(page.get("rows") or [])
+                has_more = bool(page.get("has_more"))
+            else:
+                fetch_limit = self.limit + 1
+                con = connect(self.db_path)
+                ensure_schema(con)
+                try:
+                    fetched = list_clients(
+                        con,
+                        country_code=self.country_code,
+                        search_text=self.search_text,
+                        limit=fetch_limit,
+                        offset=self.offset,
+                    )
+                finally:
+                    con.close()
+                has_more = len(fetched) > self.limit
+                rows = fetched[: self.limit] if has_more else fetched
+        except Exception as e:
+            rows = []
+            has_more = False
+            error = str(e or "").strip()
+
+        self.signals.done.emit(
+            self.session_id,
+            self.offset,
+            self.offset <= 0,
+            rows,
+            has_more,
+            error,
+        )
+
+
 class ClientsEditorDialog(QDialog):
+    SOURCE_LOCAL = "local"
+    SOURCE_COUNTRY = "country"
+
     def __init__(self, parent=None, *, app_icon: QIcon | None = None, country_code: str = COUNTRY_CODE):
         super().__init__(parent)
         self.setWindowTitle("Editor de clientes")
@@ -305,16 +398,39 @@ class ClientsEditorDialog(QDialog):
         self._country_code = str(country_code or "").strip().upper()
         self._current_client_id: int | None = None
         self._doc_types = self._doc_types_for_country()
+        self._country_load_error = ""
+        self._source_mode = self.SOURCE_LOCAL
+        self._db_path = resolve_db_path()
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)
+        self._load_session_id = 0
+        self._load_show_errors: dict[int, bool] = {}
+        self._loading = False
+        self._next_offset = 0
+        self._has_more = False
+        self._page_size_local = 250
+        self._page_size_country = 100
+        self._editable_triggers = (
+            QTableView.DoubleClicked | QTableView.SelectedClicked | QTableView.EditKeyPressed
+        )
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(280)
+        self._search_timer.timeout.connect(self._reload)
 
         self.model = ClientsTableModel()
 
         root = QVBoxLayout(self)
 
         top = QHBoxLayout()
+        self.cmb_source = QComboBox()
+        self.cmb_source.addItem("Locales", self.SOURCE_LOCAL)
+        self.cmb_source.addItem("Consulta general de clientes", self.SOURCE_COUNTRY)
         self.ed_search = QLineEdit()
         self.ed_search.setPlaceholderText("Buscar por nombre, tipo, documento, telefono, direccion o email")
         self.btn_refresh = QPushButton("Recargar")
         self.btn_new = QPushButton("Nuevo")
+        top.addWidget(self.cmb_source, 0)
         top.addWidget(self.ed_search, 1)
         top.addWidget(self.btn_refresh, 0)
         top.addWidget(self.btn_new, 0)
@@ -329,9 +445,7 @@ class ClientsEditorDialog(QDialog):
         self.table.verticalHeader().setVisible(True)
         self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.setSortingEnabled(False)
-        self.table.setEditTriggers(
-            QTableView.DoubleClicked | QTableView.SelectedClicked | QTableView.EditKeyPressed
-        )
+        self.table.setEditTriggers(self._editable_triggers)
         self.inline_text_delegate = InlineTextDelegate(self.table)
         self.table.setItemDelegateForColumn(0, self.inline_text_delegate)
         self.table.setItemDelegateForColumn(2, self.inline_text_delegate)
@@ -372,14 +486,16 @@ class ClientsEditorDialog(QDialog):
         bottom.addWidget(self.btn_close, 0)
         root.addLayout(bottom)
 
-        self.ed_search.textChanged.connect(self._reload)
-        self.btn_refresh.clicked.connect(self._reload)
+        self.cmb_source.currentIndexChanged.connect(self._on_source_changed)
+        self.ed_search.textChanged.connect(self._on_search_changed)
+        self.btn_refresh.clicked.connect(lambda _checked=False: self._reload(show_errors=True))
         self.btn_new.clicked.connect(self._new_client)
         self.btn_save.clicked.connect(self._save_current)
         self.btn_delete.clicked.connect(self._delete_current)
         self.btn_close.clicked.connect(self.accept)
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
+        self._apply_source_mode()
         self._reload()
         center_on_screen(self)
 
@@ -406,35 +522,144 @@ class ClientsEditorDialog(QDialog):
             out.append(code)
         return out
 
-    def _reload(self) -> None:
-        sel = self._current_client_id
-        con = self._open_con()
-        try:
-            rows = list_clients(
-                con,
-                country_code=self._country_code,
-                search_text=str(self.ed_search.text() or "").strip(),
-                limit=1000,
-                offset=0,
+    def _current_source_mode(self) -> str:
+        mode = str(self.cmb_source.currentData() or self._source_mode or self.SOURCE_LOCAL).strip().lower()
+        if mode not in (self.SOURCE_LOCAL, self.SOURCE_COUNTRY):
+            return self.SOURCE_LOCAL
+        return mode
+
+    def _is_country_source(self) -> bool:
+        return self._current_source_mode() == self.SOURCE_COUNTRY
+
+    def _apply_source_mode(self) -> None:
+        self._source_mode = self._current_source_mode()
+        is_country_source = self._is_country_source()
+        self.model.set_read_only(is_country_source)
+        self.table.setEditTriggers(QTableView.NoEditTriggers if is_country_source else self._editable_triggers)
+        self.btn_new.setEnabled(not is_country_source)
+        self.btn_save.setText("Guardar en local" if is_country_source else "Guardar")
+        self.btn_save.setEnabled(not self._loading)
+        self.btn_delete.setEnabled(not is_country_source)
+        if is_country_source:
+            self.ed_search.setPlaceholderText("Buscar clientes del servidor")
+        else:
+            self.ed_search.setPlaceholderText("Buscar por nombre, tipo, documento, telefono, direccion o email")
+
+    def _on_source_changed(self, _index: int) -> None:
+        self._apply_source_mode()
+        self._reload(show_errors=True)
+
+    def _on_search_changed(self, _text: str) -> None:
+        self._search_timer.start()
+
+    def _render_load_state(self) -> None:
+        is_country_source = self._is_country_source()
+        self.btn_refresh.setEnabled(not self._loading)
+        self.btn_new.setEnabled((not is_country_source) and (not self._loading))
+        self.btn_delete.setEnabled((not is_country_source) and (not self._loading))
+        self.btn_save.setEnabled(not self._loading)
+
+    def _start_async_load(self, *, reset: bool, show_errors: bool = False) -> None:
+        self._loading = True
+        if reset:
+            self._load_session_id += 1
+            self._next_offset = 0
+            self._has_more = False
+            self.model.set_rows([])
+            self._current_client_id = None
+        session_id = self._load_session_id
+        self._load_show_errors[session_id] = bool(show_errors)
+        offset = 0 if reset else self._next_offset
+        search_text = str(self.ed_search.text() or "").strip()
+        limit = self._page_size_country if self._is_country_source() else self._page_size_local
+
+        if self._is_country_source():
+            base_info = f"Consulta general de clientes: {self.model.rowCount()}"
+        else:
+            base_info = f"Clientes: {self.model.rowCount()}"
+        self.lbl_info.setText(f"{base_info} | cargando...")
+        self._render_load_state()
+
+        task = _ClientsLoadTask(
+            session_id=session_id,
+            mode=self._current_source_mode(),
+            country_code=self._country_code,
+            search_text=search_text,
+            limit=limit,
+            offset=offset,
+            db_path=self._db_path,
+        )
+        task.signals.done.connect(self._on_load_done)
+        self._pool.start(task)
+
+    def _on_load_done(
+        self,
+        session_id: int,
+        offset: int,
+        reset: bool,
+        rows: list[dict[str, Any]],
+        has_more: bool,
+        error: str,
+    ) -> None:
+        if int(session_id) != int(self._load_session_id):
+            return
+
+        self._loading = False
+        self._country_load_error = str(error or "").strip()
+        self._has_more = bool(has_more)
+        self._next_offset = max(0, int(offset)) + len(rows or [])
+
+        show_errors = bool(self._load_show_errors.pop(int(session_id), False))
+        if self._country_load_error and show_errors:
+            QMessageBox.warning(
+                self,
+                "Consulta no disponible",
+                f"No se pudieron cargar los clientes:\n{self._country_load_error}",
             )
-        finally:
-            con.close()
 
-        self.model.set_rows(rows)
-        self.lbl_info.setText(f"Clientes: {len(rows)}")
+        previous_selection = self._current_client_id
+        if reset:
+            self.model.set_rows(rows or [])
+        else:
+            self.model.append_rows(rows or [])
 
-        if not rows:
+        loaded_rows = self.model.rowCount()
+        if self._is_country_source():
+            if self._country_load_error:
+                self.lbl_info.setText("Consulta general de clientes: 0 | consulta no disponible")
+            else:
+                suffix = " | cargando más..." if self._has_more else ""
+                self.lbl_info.setText(f"Consulta general de clientes: {loaded_rows}{suffix}")
+        else:
+            suffix = " | cargando más..." if self._has_more else ""
+            self.lbl_info.setText(f"Clientes: {loaded_rows}{suffix}")
+
+        self._render_load_state()
+
+        if loaded_rows <= 0:
             self._current_client_id = None
             return
 
-        row_idx = -1
-        if sel is not None:
-            row_idx = self.model.row_by_client_id(int(sel))
-        if row_idx < 0:
-            row_idx = 0
+        if reset:
+            row_idx = -1
+            if previous_selection is not None:
+                row_idx = self.model.row_by_client_id(int(previous_selection))
+            if row_idx < 0:
+                row_idx = 0
 
-        self.table.selectRow(row_idx)
-        self._set_current_from_row(row_idx)
+            self.table.selectRow(row_idx)
+            self._set_current_from_row(row_idx)
+
+        if (not self._country_load_error) and self._has_more:
+            QTimer.singleShot(0, self._load_more)
+
+    def _reload(self, show_errors: bool = False) -> None:
+        self._start_async_load(reset=True, show_errors=show_errors)
+
+    def _load_more(self) -> None:
+        if self._loading or (not self._has_more):
+            return
+        self._start_async_load(reset=False, show_errors=False)
 
     def _selected_row_index(self) -> int:
         sm = self.table.selectionModel()
@@ -463,6 +688,8 @@ class ClientsEditorDialog(QDialog):
         self._current_client_id = cid if cid > 0 else None
 
     def _new_client(self) -> None:
+        if self._is_country_source():
+            return
         default_tipo = self._doc_types[0] if self._doc_types else ""
         row_idx = self.model.add_empty_row(country_code=self._country_code, default_tipo=default_tipo)
         self.lbl_info.setText(f"Clientes: {self.model.rowCount()}")
@@ -491,10 +718,68 @@ class ClientsEditorDialog(QDialog):
             return False, "Telefono de cliente vacio."
         return True, ""
 
+    def _selected_rows_for_local_save(self) -> list[dict[str, Any]]:
+        sm = self.table.selectionModel()
+        selected: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        if sm is not None:
+            for idx in sm.selectedRows():
+                row_idx = int(idx.row())
+                if row_idx in seen or row_idx < 0 or row_idx >= self.model.rowCount():
+                    continue
+                seen.add(row_idx)
+                selected.append(self.model.rows[row_idx])
+        if selected:
+            return selected
+        if self._current_client_id is not None:
+            row_idx = self.model.row_by_client_id(int(self._current_client_id))
+            if 0 <= row_idx < self.model.rowCount():
+                return [self.model.rows[row_idx]]
+        return list(self.model.rows)
+
+    def _save_country_results_to_local(self) -> None:
+        rows = self._selected_rows_for_local_save()
+        if not rows:
+            QMessageBox.information(self, "Sin datos", "No hay clientes cargados para guardar localmente.")
+            return
+
+        con = self._open_con()
+        saved = 0
+        try:
+            with tx(con):
+                for row in rows:
+                    upsert_client(
+                        con,
+                        country_code=str(row.get("country_code") or self._country_code or "").strip().upper(),
+                        tipo_documento=str(row.get("tipo_documento") or "").strip().upper(),
+                        documento=str(row.get("documento") or "").strip(),
+                        nombre=str(row.get("nombre") or "").strip(),
+                        telefono=str(row.get("telefono") or "").strip(),
+                        direccion=str(row.get("direccion") or "-").strip() or "-",
+                        email=str(row.get("email") or "-").strip() or "-",
+                        require_valid_document=True,
+                    )
+                    saved += 1
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudieron guardar los clientes en local:\n{e}")
+            return
+        finally:
+            con.close()
+
+        self._rebuild_ai_index()
+        QMessageBox.information(
+            self,
+            "Clientes guardados",
+            f"Se guardaron o actualizaron {saved} clientes en la base local.",
+        )
+
     def _save_current(self) -> None:
         # Fuerza commit de la celda en edición antes de leer el modelo.
         self.table.clearFocus()
 
+        if self._is_country_source():
+            self._save_country_results_to_local()
+            return
         dirty_rows = self.model.dirty_row_indices()
         if not dirty_rows:
             return
@@ -547,6 +832,8 @@ class ClientsEditorDialog(QDialog):
         self._reload()
 
     def _delete_current(self) -> None:
+        if self._is_country_source():
+            return
         row_idx = self._selected_row_index()
         if row_idx < 0 or row_idx >= self.model.rowCount():
             return

@@ -70,6 +70,99 @@ def test_build_presupuesto_payload_includes_adjuntos():
     assert payload["presupuesto"]["cantidad_items"] == 0
 
 
+def test_reserve_next_quote_code_uses_api_sequence(monkeypatch):
+    from types import SimpleNamespace
+
+    sent: dict[str, object] = {}
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_GET_NEXT_QUOTE_CODE):
+            sent.update(kwargs)
+            return SimpleNamespace(
+                status_code=200,
+                data={
+                    "data": {
+                        "quote_code": "PE-001-0000123",
+                        "quote_no": "0000123",
+                        "last_value": 123,
+                    }
+                },
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    monkeypatch.setattr(pc, "_load_api_identity", lambda: (1003, "cotizador-PE-2", "user_demo", "PERU", "LA CASA DEL PERFUME", "001", False))
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.reserve_next_quote_code(local_last_value=122)
+
+    assert res["quote_code"] == "PE-001-0000123"
+    assert res["quote_no"] == "0000123"
+    assert sent.get("json_data") == {
+        "id_cotizador": "001",
+        "user": "user_demo",
+        "cod_pais": "PE",
+        "local_last_value": 122,
+    }
+
+
+def test_fetch_country_clients_returns_rows_normalized_for_ui(monkeypatch):
+    from types import SimpleNamespace
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_GET_COUNTRY_CLIENTS):
+            return SimpleNamespace(
+                status_code=200,
+                data={
+                    "data": [
+                        {
+                            "id": 55,
+                            "country_code": "PE",
+                            "tipo_documento": "DNI",
+                            "documento": "12345678",
+                            "documento_norm": "12345678",
+                            "nombre": "Cliente Demo",
+                            "telefono": "555",
+                            "direccion": "Lima",
+                            "email": "demo@example.com",
+                            "created_at": "2026-04-08 10:00:00",
+                            "updated_at": "2026-04-08 11:00:00",
+                        }
+                    ]
+                },
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    monkeypatch.setattr(pc, "_load_api_identity", lambda: (1003, "cotizador-PE-2", "user_demo", "PERU", "LA CASA DEL PERFUME", "001", False))
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    rows = pc.fetch_country_clients(search_text="cliente")
+
+    assert rows == [
+        {
+            "id": 55,
+            "country_code": "PE",
+            "tipo_documento": "DNI",
+            "documento": "12345678",
+            "documento_norm": "12345678",
+            "nombre": "Cliente Demo",
+            "telefono": "555",
+            "direccion": "Lima",
+            "email": "demo@example.com",
+            "source_quote_id": None,
+            "source_created_at": "",
+            "created_at": "2026-04-08 10:00:00",
+            "updated_at": "2026-04-08 11:00:00",
+            "deleted_at": None,
+        }
+    ]
+
+
 def test_build_adjuntos_for_quote_reads_pdf_and_cmd(tmp_path):
     pdf_name = "C-PE-001-0000001_20260224_101500.pdf"
     pdf_path = tmp_path / pdf_name
