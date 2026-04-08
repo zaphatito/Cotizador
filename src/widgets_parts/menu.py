@@ -166,7 +166,7 @@ class MainMenuWindow(QMainWindow):
         self.btn_new.setProperty("variant", "primary")
         btn_config = QPushButton("⚙️ Configuración")
         btn_rates_hist = QPushButton("📈 Ver histórico de tasas")
-        btn_clients = QPushButton("👥 Editar clientes")
+        btn_clients = QPushButton("👥 Consultar clientes")
         btn_update = QPushButton("📦 Actualizar productos")
         btn_open_quotes = QPushButton("📁 Abrir carpeta cotizaciones")
         btn_close = QPushButton("Cerrar menú")
