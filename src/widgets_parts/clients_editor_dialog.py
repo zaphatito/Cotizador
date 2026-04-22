@@ -33,7 +33,7 @@ from sqlModels.quotes_repo import (
     validate_document_for_type,
 )
 
-from ..config import COUNTRY_CODE
+from ..config import COUNTRY_CODE, is_ai_enabled
 from ..db_path import resolve_db_path
 from ..ai.search_index import LocalSearchIndex
 from ..api.presupuesto_client import fetch_country_clients_page
@@ -507,7 +507,10 @@ class ClientsEditorDialog(QDialog):
     def _rebuild_ai_index(self) -> None:
         try:
             idx = LocalSearchIndex(resolve_db_path())
-            idx.ensure_and_rebuild()
+            if is_ai_enabled(refresh=True):
+                idx.ensure_and_rebuild()
+            else:
+                idx.drop_schema()
         except Exception:
             pass
 

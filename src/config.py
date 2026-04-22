@@ -407,6 +407,20 @@ def is_ai_enabled(*, refresh: bool = True) -> bool:
     return bool(APP_CONFIG.get("enable_ai", ENABLE_AI))
 
 
+def _sync_optional_ai_storage(db_path: str | None = None) -> None:
+    dbp = str(db_path or _resolve_db_path_for_config())
+    try:
+        from .ai.search_index import LocalSearchIndex
+
+        idx = LocalSearchIndex(dbp)
+        if bool(APP_CONFIG.get("enable_ai", ENABLE_AI)):
+            idx.ensure_and_rebuild()
+        else:
+            idx.drop_schema()
+    except Exception:
+        pass
+
+
 def set_ai_enabled(enabled: bool) -> bool:
     """
     Persiste enable_ai en DB y sincroniza cache en memoria.
@@ -419,11 +433,19 @@ def set_ai_enabled(enabled: bool) -> bool:
         ensure_schema(con)
         with tx(con):
             set_setting(con, "enable_ai", v)
+            if v == "0":
+                try:
+                    from .ai.search_index import drop_ai_schema
+
+                    drop_ai_schema(con)
+                except Exception:
+                    pass
     finally:
         con.close()
 
     ENABLE_AI = (v == "1")
     APP_CONFIG["enable_ai"] = ENABLE_AI
+    _sync_optional_ai_storage(db_path)
     return ENABLE_AI
 
 
@@ -470,6 +492,7 @@ def set_recommendations_enabled(enabled: bool) -> bool:
 
     ENABLE_RECOMMENDATIONS = (v == "1")
     APP_CONFIG["enable_recommendations"] = ENABLE_RECOMMENDATIONS
+    _sync_optional_ai_storage(db_path)
     return ENABLE_RECOMMENDATIONS
 
 

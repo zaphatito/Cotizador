@@ -223,7 +223,12 @@ def sync_catalog_from_excel_path(con, excel_path: str) -> None:
         log.info("Import productos (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id)
 
         df_prod = _leer_inventario_xlsx(excel_path, os.path.basename(excel_path))
-        products_repo.upsert_products_snapshot(con, import_id, df_prod)
+        products_repo.upsert_products_snapshot(
+            con,
+            import_id,
+            df_prod,
+            replace_current=True,
+        )
         changed_for_rollup = True
 
     # Presentaciones
@@ -272,7 +277,12 @@ def sync_catalog_from_excel_to_db(con, data_dir: str) -> None:
         log.info("Import productos: %s (import_id=%s)", os.path.basename(path), import_id)
 
         df_prod = _leer_inventario_xlsx(path, os.path.basename(path))
-        products_repo.upsert_products_snapshot(con, import_id, df_prod)
+        products_repo.upsert_products_snapshot(
+            con,
+            import_id,
+            df_prod,
+            replace_sources=True,
+        )
         changed_for_rollup = True
 
     if os.path.exists(inv_lcdp):

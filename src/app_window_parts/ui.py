@@ -313,6 +313,23 @@ class UiMixin:
 
         self._schedule_refresh_recs_preview()
 
+    def _handle_product_return_pressed(self):
+        if bool(getattr(self, "_use_ai_completer", False)):
+            self._on_ai_enter_pressed()
+            return
+        self._on_return_pressed()
+
+    def _ensure_recommendation_engine(self):
+        if getattr(self, "_rec_engine", None) is not None:
+            return
+        try:
+            from ..db_path import resolve_db_path
+            from ..ai.recommender import QuoteRecommender
+
+            self._rec_engine = QuoteRecommender(resolve_db_path())
+        except Exception:
+            self._rec_engine = None
+
     def _setup_ai_completers(self):
         if getattr(self, "_ai_prod", None) is not None:
             return
@@ -321,7 +338,6 @@ class UiMixin:
             from ..db_path import resolve_db_path
             from ..ai.search_index import LocalSearchIndex
             from ..ai.smart_completer import SmartCompleter
-            from ..ai.recommender import QuoteRecommender
 
             dbp = resolve_db_path()
             self._ai_index = LocalSearchIndex(dbp)
@@ -329,7 +345,6 @@ class UiMixin:
                 self._ai_index.prewarm_async()
             except Exception:
                 pass
-            self._rec_engine = QuoteRecommender(dbp)
 
             self._ai_prod = SmartCompleter(
                 self.entry_producto,
@@ -661,6 +676,7 @@ class UiMixin:
         if not self._recommendations_active():
             return []
 
+        self._ensure_recommendation_engine()
         eng = getattr(self, "_rec_engine", None)
         if eng is None:
             return []
@@ -1297,6 +1313,7 @@ class UiMixin:
                     pass
                 return
 
+            self._ensure_recommendation_engine()
             eng = getattr(self, "_rec_engine", None)
             if eng is None:
                 try:
@@ -1604,10 +1621,7 @@ class UiMixin:
 
         self.entry_producto = QLineEdit()
         self.entry_producto.setPlaceholderText("Código, nombre, categoría o tipo")
-        if bool(getattr(self, "_use_ai_completer", False)):
-            self.entry_producto.returnPressed.connect(self._on_ai_enter_pressed)
-        else:
-            self.entry_producto.returnPressed.connect(self._on_return_pressed)
+        self.entry_producto.returnPressed.connect(self._handle_product_return_pressed)
 
         self.entry_producto.installEventFilter(self)
         self.entry_cedula.installEventFilter(self)

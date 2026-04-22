@@ -373,11 +373,14 @@ def run_app():
             log.exception("Falló load_catalog_from_db (se abre sin catálogo): %s", e)
 
         try:
-            # Rebuild rápido (2000 productos es nada). Esto habilita autocompletado.
             idx = LocalSearchIndex(db_path)
-            idx.ensure_and_rebuild()
+            if ENABLE_AI:
+                # Rebuild rapido (2000 productos es nada). Esto habilita autocompletado smart.
+                idx.ensure_and_rebuild()
+            else:
+                idx.drop_schema()
         except Exception as e:
-            log.exception("AI index: no se pudo reconstruir: %s", e)
+            log.exception("AI index: no se pudo sincronizar: %s", e)
 
         con.close()
 

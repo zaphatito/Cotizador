@@ -79,9 +79,6 @@ def upsert_presentations_snapshot(
 
     now = now_iso()
 
-    rows_raw_hist: list[tuple] = []
-    rows_raw_cur: list[tuple] = []
-
     rows_hist: list[tuple] = []
     rows_cur: list[tuple] = []
 
@@ -102,37 +99,6 @@ def upsert_presentations_snapshot(
 
         req = 1 if bool(r.get("REQUIERE_BOTELLA")) else 0
         fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
-
-        rows_raw_hist.append(
-            (
-                int(import_id),
-                codigo_norm,
-                codigo,
-                nombre,
-                descripcion,
-                depto,
-                genero,
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                fuente,
-            )
-        )
-        rows_raw_cur.append(
-            (
-                codigo_norm,
-                codigo,
-                nombre,
-                descripcion,
-                depto,
-                genero,
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                fuente,
-                now,
-            )
-        )
 
         rows_hist.append(
             (
@@ -169,47 +135,10 @@ def upsert_presentations_snapshot(
                 fuente,
                 now,
             )
-        )
+    )
 
     if replace_current:
-        con.execute("DELETE FROM presentacion_current")
         con.execute("DELETE FROM presentations_current")
-
-    if rows_raw_hist:
-        con.executemany(
-            """
-            INSERT OR REPLACE INTO presentacion_hist(
-                import_id, codigo_norm, codigo, nombre, descripcion,
-                departamento, genero, p_max, p_min, p_oferta, fuente
-            )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            rows_raw_hist,
-        )
-
-    if rows_raw_cur:
-        con.executemany(
-            """
-            INSERT INTO presentacion_current(
-                codigo_norm, codigo, nombre, descripcion,
-                departamento, genero, p_max, p_min, p_oferta,
-                fuente, updated_at
-            )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(codigo_norm, departamento, genero) DO UPDATE SET
-                codigo=excluded.codigo,
-                nombre=excluded.nombre,
-                descripcion=excluded.descripcion,
-                departamento=excluded.departamento,
-                genero=excluded.genero,
-                p_max=excluded.p_max,
-                p_min=excluded.p_min,
-                p_oferta=excluded.p_oferta,
-                fuente=excluded.fuente,
-                updated_at=excluded.updated_at
-            """,
-            rows_raw_cur,
-        )
 
     if rows_hist:
         con.executemany(

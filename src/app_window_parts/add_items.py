@@ -365,7 +365,7 @@ class AddItemsMixin:
             elif default_pid == 3:
                 default_tier = "oferta"
 
-            factor = factor_total_por_categoria(cat)
+            factor = factor_total_por_categoria(cat, prod)
             subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
 
             item = {

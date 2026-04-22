@@ -174,6 +174,44 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
 
 
 class CompleterMixin:
+    def _teardown_plain_completer(self):
+        comp = getattr(self, "_completer", None)
+        if comp is not None:
+            try:
+                if getattr(self, "entry_producto", None) is not None:
+                    self.entry_producto.setCompleter(None)
+            except Exception:
+                pass
+            try:
+                comp.deleteLater()
+            except Exception:
+                pass
+        self._completer = None
+        self._sug_model = None
+
+    def _teardown_ai_completers(self):
+        for attr in ("_ai_prod", "_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
+            comp = getattr(self, attr, None)
+            if comp is None:
+                continue
+            try:
+                if hasattr(comp, "hide_popup"):
+                    comp.hide_popup()
+            except Exception:
+                pass
+            try:
+                comp.deleteLater()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+        self._ai_index = None
+
+    def _rebuild_search_completers(self):
+        self._teardown_plain_completer()
+        self._teardown_ai_completers()
+        self._build_completer()
+
     def _hide_all_client_popups(self):
         for k in ("_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
             c = getattr(self, k, None)

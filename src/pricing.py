@@ -1,5 +1,6 @@
 # src/pricing.py
 from .config import APP_COUNTRY, CATS
+from .product_rules import is_py_unit_product
 from .utils import nz, format_grams
 
 
@@ -17,6 +18,11 @@ def cantidad_para_mostrar(it: dict) -> str:
             except Exception:
                 gramos = 0.0
             return format_grams(gramos)
+        if is_py_unit_product(it, country=APP_COUNTRY):
+            try:
+                return str(int(round(float(qty))))
+            except Exception:
+                return "0"
         else:
             try:
                 q_int = int(round(float(qty)))
@@ -39,16 +45,17 @@ def cantidad_para_mostrar(it: dict) -> str:
 # =====================================================
 # Factor para total por categoria / pais
 # =====================================================
-def factor_total_por_categoria(cat: str) -> float:
+def factor_total_por_categoria(cat: str, prod_or_item: dict | None = None) -> float:
     """
     Factor que SOLO afecta el calculo de subtotal/total (no el precio unitario mostrado).
 
     - CATS (esencias/granel):
         * PERU: qty ya viene en otra unidad, NO aplica x50 aqui.
         * NO-PERU: qty representa unidades de 50g => total = unit * qty * 50
+        * Excepcion PY: FERO001/FIJ002 se comportan como unidades => NO aplica x50
     """
     cat_u = (cat or "").upper()
-    if cat_u in CATS and APP_COUNTRY != "PERU":
+    if cat_u in CATS and APP_COUNTRY != "PERU" and not is_py_unit_product(prod_or_item, country=APP_COUNTRY):
         return 50.0
     return 1.0
 

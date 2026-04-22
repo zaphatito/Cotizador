@@ -31,6 +31,11 @@ def test_quantity_for_api_keeps_py_cats_positive_values_above_zero():
     assert pc._quantity_for_api({"categoria": "ESENCIAS", "cantidad": 0.0}, cod_pais="PY") == 0
 
 
+def test_quantity_for_api_keeps_py_unit_exception_codes_as_units():
+    assert pc._quantity_for_api({"codigo": "FERO001", "categoria": "ESENCIAS", "cantidad": 3}, cod_pais="PY") == 3
+    assert pc._quantity_for_api({"codigo": "FIJ002", "categoria": "ESENCIAS", "cantidad": 0.4}, cod_pais="PY") == 1
+
+
 def test_build_presupuesto_payload_includes_adjuntos():
     adjuntos = [
         {

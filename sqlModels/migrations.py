@@ -1998,6 +1998,19 @@ def mig_31(con: sqlite3.Connection) -> None:
     )
 
 
+def mig_32(con: sqlite3.Connection) -> None:
+    """
+    v32: elimina tablas duplicadas raw de productos y presentaciones.
+    - Borra producto_current / producto_hist
+    - Borra presentacion_current / presentacion_hist
+    - Conserva products_*, presentations_* y presentacion_prod_*
+    """
+    con.execute("DROP TABLE IF EXISTS producto_current")
+    con.execute("DROP TABLE IF EXISTS producto_hist")
+    con.execute("DROP TABLE IF EXISTS presentacion_current")
+    con.execute("DROP TABLE IF EXISTS presentacion_hist")
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2030,4 +2043,5 @@ MIGRATIONS: dict[int, callable] = {
     29: mig_29,
     30: mig_30,
     31: mig_31,
+    32: mig_32,
 }

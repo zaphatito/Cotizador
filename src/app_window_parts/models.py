@@ -429,7 +429,7 @@ class ItemsModel(QAbstractTableModel):
         if f > 0:
             return f
         cat = (it.get("categoria") or "").upper()
-        return float(factor_total_por_categoria(cat))
+        return float(factor_total_por_categoria(cat, it))
 
     def _compute_subtotal_base(self, it: dict, unit_price: float | None = None) -> float:
         if unit_price is None:
@@ -1072,7 +1072,9 @@ class ItemsModel(QAbstractTableModel):
 
         if "factor_total" not in item:
             try:
-                item["factor_total"] = float(factor_total_por_categoria((item.get("categoria") or "").upper()))
+                item["factor_total"] = float(
+                    factor_total_por_categoria((item.get("categoria") or "").upper(), item)
+                )
             except Exception:
                 item["factor_total"] = 1.0
 

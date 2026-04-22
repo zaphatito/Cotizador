@@ -1230,6 +1230,21 @@ class QuoteHistoryWindow(QMainWindow):
             self._attach_assistant()
         else:
             self._detach_assistant()
+
+        wins = list(self._alive_quote_windows())
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SistemaCotizaciones) and w not in wins:
+                    wins.append(w)
+        except Exception:
+            pass
+
+        for w in wins:
+            try:
+                if hasattr(w, "refresh_ai_features"):
+                    w.refresh_ai_features()
+            except Exception:
+                pass
         self._apply_catalog_gate()
 
     def refresh_recommendations_controls(self):

@@ -310,6 +310,11 @@ def ensure_ai_schema(con: sqlite3.Connection) -> bool:
     return True
 
 
+def drop_ai_schema(con: sqlite3.Connection) -> None:
+    for name in (_FTS_PRODUCTS, _FTS_CLIENTS, _SEARCH_CACHE_TABLE):
+        con.execute(f"DROP TABLE IF EXISTS {name}")
+
+
 def _expand_name_for_index(nombre: str) -> str:
     raw = str(nombre or "").strip()
     base = _norm_query(raw)
@@ -906,6 +911,20 @@ class LocalSearchIndex:
             self.prewarm()
         except Exception:
             pass
+
+    def drop_schema(self) -> None:
+        with self._lock:
+            con = self._connect()
+            try:
+                drop_ai_schema(con)
+                con.commit()
+            finally:
+                con.close()
+            self._fts_available = False
+            self._fuzzy = None
+            self._prewarm_started = False
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                _GLOBAL_FUZZY_CACHE.pop(self.db_path, None)
 
     def prewarm(self) -> None:
         try:

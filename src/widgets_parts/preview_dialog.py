@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import APP_COUNTRY, CATS, convert_from_base, id_label_for_country
-from ..pricing import cantidad_para_mostrar
+from ..pricing import cantidad_para_mostrar, factor_total_por_categoria
+from ..product_rules import is_py_unit_product
 from ..utils import fmt_money_ui, nz
 
 
@@ -32,7 +33,7 @@ def _fmt_qty(x: float) -> str:
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
-def _esencia_a_gramos(cant: float) -> float:
+def _esencia_a_gramos(it: dict, cant: float) -> float:
     """
     Convierte 'cantidad' a gramos para categorías en CATS,
     consistente con cómo se suele mostrar en UI:
@@ -40,6 +41,8 @@ def _esencia_a_gramos(cant: float) -> float:
     - VE/PY: 1 unidad = 50 g
     - Otros (ej. PERÚ): cantidad está en KG => gramos = KG * 1000
     """
+    if is_py_unit_product(it, country=APP_COUNTRY):
+        return 0.0
     if APP_COUNTRY in ("VENEZUELA", "PARAGUAY"):
         return cant * 50.0
     return cant * 1000.0
@@ -133,7 +136,7 @@ def show_preview_dialog(
                 total_botellas += cant
 
             if cat_u in CATS:
-                total_esencias_g += _esencia_a_gramos(cant)
+                total_esencias_g += _esencia_a_gramos(it, cant)
         except Exception:
             pass
 
@@ -142,7 +145,9 @@ def show_preview_dialog(
             cat_u = (it.get("categoria") or "").upper()
             disp = float(nz(it.get("stock_disponible"), 0.0))
             cant = float(nz(it.get("cantidad"), 0.0))
-            mult = 50.0 if (APP_COUNTRY in ("VENEZUELA", "PARAGUAY") and cat_u in CATS) else 1.0
+            mult = factor_total_por_categoria(cat_u, it)
+            if APP_COUNTRY == "VENEZUELA" and cat_u in CATS:
+                mult = 50.0
             if cant * mult > disp and disp >= 0.0:
                 qty_item = tbl.item(r, 2)
                 if qty_item:

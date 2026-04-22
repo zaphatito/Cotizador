@@ -13,6 +13,7 @@ from sqlModels.quotes_repo import STATUS_PENDIENTE
 
 from ...paths import DATA_DIR
 from ...config import APP_COUNTRY, CATS
+from ...product_rules import is_py_unit_product
 from .resolvers import resolve_client_from_history, resolve_product_candidates, month_range_from_today
 from .reports import report_text_from_db
 
@@ -371,6 +372,9 @@ def _find_row_any(window, code: str) -> tuple[Optional[dict], Optional[dict]]:
 
 
 def is_cats_code(window, code: str) -> bool:
+    if is_py_unit_product(code, country=APP_COUNTRY):
+        return False
+
     cats = {str(x or "").strip().upper() for x in (CATS or [])}
     r_pr, r_p = _find_row_any(window, code)
 
@@ -378,7 +382,7 @@ def is_cats_code(window, code: str) -> bool:
         if not r:
             continue
         cat = str(r.get("categoria") or r.get("CATEGORIA") or "").strip().upper()
-        if cat and cat in cats:
+        if cat and cat in cats and not is_py_unit_product(r, country=APP_COUNTRY):
             return True
 
     return False

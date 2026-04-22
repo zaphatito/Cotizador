@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 DDL = [
     # =========================
@@ -121,44 +121,6 @@ DDL = [
     """,
 
     # =========================
-    # Products (estructura excel)
-    # =========================
-    """
-    CREATE TABLE IF NOT EXISTS producto_current (
-        codigo TEXT PRIMARY KEY,
-        nombre TEXT,
-        departamento TEXT,
-        genero TEXT,
-        cantidad_disponible REAL NOT NULL DEFAULT 0,
-        p_max REAL NOT NULL DEFAULT 0,
-        p_min REAL NOT NULL DEFAULT 0,
-        p_oferta REAL NOT NULL DEFAULT 0,
-        fuente TEXT,
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS producto_hist (
-        import_id INTEGER NOT NULL,
-        codigo TEXT NOT NULL,
-        nombre TEXT,
-        departamento TEXT,
-        genero TEXT,
-        cantidad_disponible REAL NOT NULL DEFAULT 0,
-        p_max REAL NOT NULL DEFAULT 0,
-        p_min REAL NOT NULL DEFAULT 0,
-        p_oferta REAL NOT NULL DEFAULT 0,
-        fuente TEXT,
-        PRIMARY KEY (import_id, codigo),
-        FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_producto_hist_codigo
-    ON producto_hist(codigo)
-    """,
-
-    # =========================
     # Presentations (compat current + hist)
     # =========================
     """
@@ -205,47 +167,6 @@ DDL = [
     """
     CREATE INDEX IF NOT EXISTS idx_presentations_hist_code
     ON presentations_hist(codigo_norm)
-    """,
-
-    # =========================
-    # Presentations (estructura excel)
-    # =========================
-    """
-    CREATE TABLE IF NOT EXISTS presentacion_current (
-        codigo_norm TEXT NOT NULL,
-        departamento TEXT NOT NULL DEFAULT '',
-        genero TEXT NOT NULL DEFAULT '',
-        codigo TEXT,
-        nombre TEXT,
-        descripcion TEXT,
-        p_max REAL NOT NULL DEFAULT 0,
-        p_min REAL NOT NULL DEFAULT 0,
-        p_oferta REAL NOT NULL DEFAULT 0,
-        fuente TEXT,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (codigo_norm, departamento, genero)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS presentacion_hist (
-        import_id INTEGER NOT NULL,
-        codigo_norm TEXT NOT NULL,
-        departamento TEXT NOT NULL DEFAULT '',
-        genero TEXT NOT NULL DEFAULT '',
-        codigo TEXT,
-        nombre TEXT,
-        descripcion TEXT,
-        p_max REAL NOT NULL DEFAULT 0,
-        p_min REAL NOT NULL DEFAULT 0,
-        p_oferta REAL NOT NULL DEFAULT 0,
-        fuente TEXT,
-        PRIMARY KEY (import_id, codigo_norm, departamento, genero),
-        FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_presentacion_hist_codigo
-    ON presentacion_hist(codigo_norm)
     """,
 
     # =========================

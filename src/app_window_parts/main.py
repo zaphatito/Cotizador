@@ -102,7 +102,7 @@ class SistemaCotizaciones(
             self._rates,
         )
 
-        self._use_ai_completer = True
+        self._use_ai_completer = bool(is_ai_enabled(refresh=True))
         self._recommendations_enabled = bool(is_recommendations_enabled(refresh=True))
         self._build_ui()
         self._restore_window_state()
@@ -115,14 +115,9 @@ class SistemaCotizaciones(
 
 
         # --- Asistente tipo chat (acciones con confirmación) ---
-        if is_ai_enabled(refresh=True):
-            try:
-                from ..ai.assistant import attach_assistant
-                self._assistant = attach_assistant(self)
-            except Exception:
-                self._assistant = None
-        else:
-            self._assistant = None
+        self._assistant = None
+        if bool(self._use_ai_completer):
+            self._attach_inline_assistant()
 
         # Suscripción a catálogo global
         if self._catalog_manager is not None:
@@ -137,6 +132,57 @@ class SistemaCotizaciones(
                 self._quote_events.rates_updated.connect(self._on_rates_updated)
             except Exception:
                 pass
+
+    def _attach_inline_assistant(self):
+        if getattr(self, "_assistant", None) is not None:
+            return
+        try:
+            from ..ai.assistant import attach_assistant
+
+            self._assistant = attach_assistant(self)
+        except Exception:
+            self._assistant = None
+
+    def _detach_inline_assistant(self):
+        ctl = getattr(self, "_assistant", None)
+        if ctl is None:
+            return
+        try:
+            if hasattr(ctl, "uninstall"):
+                ctl.uninstall()
+            else:
+                dock = getattr(ctl, "dock", None)
+                if dock is not None:
+                    try:
+                        dock.hide()
+                    except Exception:
+                        pass
+                    try:
+                        self.removeDockWidget(dock)
+                    except Exception:
+                        pass
+                    try:
+                        dock.setParent(None)
+                        dock.deleteLater()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._assistant = None
+
+    def refresh_ai_features(self):
+        ai_on = bool(is_ai_enabled(refresh=True))
+        if ai_on != bool(getattr(self, "_use_ai_completer", False)):
+            self._use_ai_completer = ai_on
+            try:
+                self._rebuild_search_completers()
+            except Exception:
+                pass
+
+        if ai_on:
+            self._attach_inline_assistant()
+        else:
+            self._detach_inline_assistant()
 
     def _on_rates_updated(self):
         # recargar rates desde DB y refrescar label/tabla

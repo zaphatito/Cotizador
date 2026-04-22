@@ -22,7 +22,7 @@ from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
 
 from ..app_window import SistemaCotizaciones
-from ..config import APP_CURRENCY, get_secondary_currencies
+from ..config import APP_CURRENCY, get_secondary_currencies, is_ai_enabled
 
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.rates_repo import load_rates, set_rate
@@ -253,7 +253,10 @@ class MainMenuWindow(QMainWindow):
                 from ..ai.search_index import LocalSearchIndex
 
                 idx = LocalSearchIndex(resolve_db_path())
-                idx.ensure_and_rebuild()
+                if is_ai_enabled(refresh=True):
+                    idx.ensure_and_rebuild()
+                else:
+                    idx.drop_schema()
             except Exception:
                 return
 

@@ -67,24 +67,46 @@ def _to_price_id(v, default: int = 1) -> int:
         return int(default)
 
 
-def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.DataFrame) -> None:
+def _delete_current_products_by_sources(con: sqlite3.Connection, fuentes: set[str]) -> None:
+    fuentes_norm = sorted({_to_text(f) for f in (fuentes or set())})
+    if not fuentes_norm:
+        return
+
+    placeholders = ",".join("?" for _ in fuentes_norm)
+    con.execute(
+        f"DELETE FROM products_current WHERE COALESCE(fuente, '') IN ({placeholders})",
+        tuple(fuentes_norm),
+    )
+
+
+def upsert_products_snapshot(
+    con: sqlite3.Connection,
+    import_id: int,
+    df: pd.DataFrame,
+    *,
+    replace_current: bool = False,
+    replace_sources: bool = False,
+) -> None:
     """
     Espera columnas de producto (estructura excel):
       CODIGO, NOMBRE, DEPARTAMENTO, GENERO,
       CANTIDAD_DISPONIBLE, P_MAX, P_MIN, P_OFERTA, PRECIO_VENTA, __FUENTE
 
     Tambien soporta columnas de compatibilidad previas.
+
+    Modos:
+      - replace_current=True: reemplaza todo el current por este snapshot.
+      - replace_sources=True: reemplaza solo las filas current de las fuentes
+        presentes en este snapshot.
     """
     if df is None or df.empty:
         return
 
     now = now_iso()
 
-    rows_raw_hist: list[tuple] = []
-    rows_raw_cur: list[tuple] = []
-
     rows_hist: list[tuple] = []
     rows_cur: list[tuple] = []
+    fuentes_snapshot: set[str] = set()
 
     for _, r in df.iterrows():
         codigo = _to_text(r.get("CODIGO") or r.get("codigo") or r.get("id"))
@@ -105,40 +127,12 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
         )
 
         fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
+        fuentes_snapshot.add(fuente)
 
         depto_u = depto.upper()
         categoria = depto_u
 
         ml = _to_text(r.get("ml"))
-
-        rows_raw_hist.append(
-            (
-                int(import_id),
-                codigo,
-                nombre,
-                depto,
-                genero,
-                float(cantidad),
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                fuente,
-            )
-        )
-        rows_raw_cur.append(
-            (
-                codigo,
-                nombre,
-                depto,
-                genero,
-                float(cantidad),
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                fuente,
-                now,
-            )
-        )
 
         rows_hist.append(
             (
@@ -177,40 +171,10 @@ def upsert_products_snapshot(con: sqlite3.Connection, import_id: int, df: pd.Dat
             )
         )
 
-    if rows_raw_hist:
-        con.executemany(
-            """
-            INSERT OR REPLACE INTO producto_hist(
-                import_id, codigo, nombre, departamento, genero,
-                cantidad_disponible, p_max, p_min, p_oferta, fuente
-            )
-            VALUES(?,?,?,?,?,?,?,?,?,?)
-            """,
-            rows_raw_hist,
-        )
-
-    if rows_raw_cur:
-        con.executemany(
-            """
-            INSERT INTO producto_current(
-                codigo, nombre, departamento, genero,
-                cantidad_disponible, p_max, p_min, p_oferta,
-                fuente, updated_at
-            )
-            VALUES(?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(codigo) DO UPDATE SET
-                nombre=excluded.nombre,
-                departamento=excluded.departamento,
-                genero=excluded.genero,
-                cantidad_disponible=excluded.cantidad_disponible,
-                p_max=excluded.p_max,
-                p_min=excluded.p_min,
-                p_oferta=excluded.p_oferta,
-                fuente=excluded.fuente,
-                updated_at=excluded.updated_at
-            """,
-            rows_raw_cur,
-        )
+    if replace_current:
+        con.execute("DELETE FROM products_current")
+    elif replace_sources:
+        _delete_current_products_by_sources(con, fuentes_snapshot)
 
     if rows_hist:
         con.executemany(

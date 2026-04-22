@@ -30,6 +30,7 @@ from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, CATS
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
+from ..product_rules import is_py_unit_product
 from ..quote_code import format_quote_code
 from ..utils import nz
 from .cases import (
@@ -197,6 +198,12 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
     cat = str(item.get("categoria") or "").strip().upper()
 
     # Paraguay: para categorías CATS, el API espera gramos enteros.
+    if country == "PY" and is_py_unit_product(item, country="PARAGUAY"):
+        units = int(round(qty))
+        if qty > 0 and units <= 0:
+            return 1
+        return max(0, units)
+
     if country == "PY" and cat in _CATS_UPPER:
         grams = int(round(qty * 50.0))
         if qty > 0 and grams <= 0:

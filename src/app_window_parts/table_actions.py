@@ -198,7 +198,11 @@ class TableActionsMixin:
         (Mantenido tal cual) Recalcula precio/subtotal/descuento/total en base.
         """
         from .models import _price_from_tier
-        from ..pricing import precio_unitario_por_categoria, default_price_id_for_product
+        from ..pricing import (
+            precio_unitario_por_categoria,
+            default_price_id_for_product,
+            factor_total_por_categoria,
+        )
 
         cat = (item.get("categoria") or "").upper()
         qty = float(nz(item.get("cantidad"), 0.0))
@@ -236,7 +240,9 @@ class TableActionsMixin:
 
         item["precio"] = unit_price
 
-        subtotal = round(unit_price * qty, 2)
+        factor = float(factor_total_por_categoria(cat, item if item else base_prod))
+        item["factor_total"] = factor
+        subtotal = round(unit_price * qty * factor, 2)
         item["subtotal_base"] = subtotal
 
         d_pct = float(nz(item.get("descuento_pct"), 0.0))
