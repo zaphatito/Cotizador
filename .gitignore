@@ -23,3 +23,8 @@ sqlModels/app.sqlite3
 
 # Binarios locales (no versionar)
 vendor/ollama/
+
+# Artefactos generados por releases; se publican en GitHub Releases.
+/Output/Setup_SistemaCotizaciones_*.exe
+/Output/SistemaCotizaciones_Update_*.zip
+/Output/updates/
