@@ -1,7 +1,7 @@
 {
     "version":  "2.0.10",
     "type":  "archive",
-    "archive_url":  "https://github.com/zaphatito/CotizadorReleases/releases/download/v2.0.10/SistemaCotizaciones_Update_2.0.10.zip",
+    "archive_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/SistemaCotizaciones_Update_2.0.10.zip",
     "archive_sha256":  "5470D9E2B165739E296B14CA08333BC8B46C43940069ADB7F31043E8AC4E6659",
     "from_version":  "2.0.9",
     "files":  [
