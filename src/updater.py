@@ -20,6 +20,7 @@ import sys
 import json
 import re
 import hashlib
+import ssl
 import tempfile
 import subprocess
 import time
@@ -30,6 +31,9 @@ import zipfile
 from typing import Dict, Any, Tuple, Optional, Callable
 
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
+
+_SSL_CONTEXT_READY = False
+_SSL_CONTEXT: ssl.SSLContext | None = None
 
 
 # -------- errores de descarga --------
@@ -92,6 +96,118 @@ def _normalize_github_url(url: str) -> str:
     return u
 
 
+def _dedupe_urls(urls: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        u = str(url or "").strip()
+        if not u:
+            continue
+        key = u.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
+def _candidate_urls(url_or_urls: Any) -> list[str]:
+    raw: list[str] = []
+    if isinstance(url_or_urls, (list, tuple)):
+        for item in url_or_urls:
+            raw.append(str(item or "").strip())
+    else:
+        raw.append(str(url_or_urls or "").strip())
+
+    out: list[str] = []
+    for url in raw:
+        if not url:
+            continue
+        normalized = _normalize_github_url(url)
+        out.append(normalized)
+        if normalized != url:
+            out.append(url)
+    return _dedupe_urls(out)
+
+
+def _manifest_urls(manifest: Dict[str, Any], *keys: str) -> list[str]:
+    urls: list[str] = []
+    for key in keys:
+        value = manifest.get(key)
+        if isinstance(value, str):
+            urls.append(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, str):
+                    urls.append(item)
+    return _dedupe_urls(urls)
+
+
+def _https_context(log=None) -> ssl.SSLContext | None:
+    global _SSL_CONTEXT_READY, _SSL_CONTEXT
+    if _SSL_CONTEXT_READY:
+        return _SSL_CONTEXT
+
+    _SSL_CONTEXT_READY = True
+    try:
+        import certifi
+
+        _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+        if log:
+            log.debug("Updater: usando certifi para validacion TLS")
+    except Exception:
+        _SSL_CONTEXT = None
+        if log:
+            log.debug("Updater: certifi no disponible; se usa contexto TLS por defecto", exc_info=True)
+    return _SSL_CONTEXT
+
+
+def _urlopen(req, *, timeout: int, log=None):
+    url = str(getattr(req, "full_url", "") or "")
+    ctx = _https_context(log=log) if url.lower().startswith("https://") else None
+    if ctx is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _download_with_windows_tls(url: str, dest: str, timeout: int, log=None) -> None:
+    if os.name != "nt":
+        raise RuntimeError("Descargador Windows TLS no disponible")
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    url_q = _ps_quote(url)
+    dest_q = _ps_quote(dest)
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$ProgressPreference='SilentlyContinue';"
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;"
+        "$headers=@{'User-Agent'='Cotizador-Updater/1.6';'Cache-Control'='no-cache';'Pragma'='no-cache'};"
+        f"Invoke-WebRequest -UseBasicParsing -Uri {url_q} -OutFile {dest_q} -Headers $headers -MaximumRedirection 10"
+    )
+
+    if log:
+        log.debug(f"Updater: Windows TLS GET {url} -> {dest}")
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=max(timeout + 30, 60),
+        creationflags=creationflags,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(err or f"PowerShell fallo con codigo {proc.returncode}")
+    if not os.path.exists(dest) or os.path.getsize(dest) <= 0:
+        raise RuntimeError("PowerShell no genero archivo de descarga")
+
+
 def _is_git_lfs_pointer_file(path: str) -> bool:
     try:
         with open(path, "rb") as f:
@@ -107,20 +223,49 @@ def _cachebust(url: str) -> str:
 
 
 def _http_get_raw(url: str, timeout: int = 12, log=None) -> bytes:
-    u = _cachebust(url) if "raw.githubusercontent.com" in url else url
-    req = urllib.request.Request(
-        u,
-        headers={
-            "User-Agent": "Cotizador-Updater/1.6",
-            "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        },
-    )
-    if log:
-        log.debug(f"Updater: GET {u}")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    last_err: Exception | None = None
+    for u0 in _candidate_urls(url):
+        u = _cachebust(u0)
+        req = urllib.request.Request(
+            u,
+            headers={
+                "User-Agent": "Cotizador-Updater/1.6",
+                "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+        )
+        if log:
+            log.debug(f"Updater: GET {u}")
+
+        try:
+            with _urlopen(req, timeout=timeout, log=log) as r:
+                return r.read()
+        except Exception as e:
+            last_err = e
+            if log:
+                log.warning(f"Updater: fallo GET manifiesto con urllib: {e} | URL={u}")
+
+            if os.name == "nt" and u.lower().startswith("https://"):
+                fd, tmp = tempfile.mkstemp(suffix=".json", prefix="CotizadorManifest_")
+                os.close(fd)
+                try:
+                    _download_with_windows_tls(u, tmp, timeout=timeout, log=log)
+                    with open(tmp, "rb") as f:
+                        return f.read()
+                except Exception as win_e:
+                    last_err = win_e
+                    if log:
+                        log.warning(f"Updater: fallo GET manifiesto con Windows TLS: {win_e} | URL={u}")
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("URL de manifiesto vacia")
 
 
 def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any], str]:
@@ -143,10 +288,10 @@ def _http_get_json(url: str, timeout: int = 12, log=None) -> Tuple[Dict[str, Any
         return {}, text
 
 
-def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None, rel: str = "") -> None:
+def _download_once(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None, rel: str = "") -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-    u = _cachebust(_normalize_github_url(url))
+    u = _cachebust(url)
     req = urllib.request.Request(
         u,
         headers={
@@ -160,7 +305,7 @@ def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None
         log.debug(f"Updater: GET {u} -> {dest}")
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+        with _urlopen(req, timeout=timeout, log=log) as r, open(dest, "wb") as f:
             total = 0
             try:
                 total = int(r.headers.get("Content-Length") or 0)
@@ -187,6 +332,43 @@ def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None
         raise DownloadNetError(rel or dest, u, str(getattr(e, "reason", e))) from e
     except Exception as e:
         raise RuntimeError(f"{rel or dest}: Error descargando | URL={u} | {e}") from e
+
+
+def _download(url: Any, dest: str, timeout: int = 180, log=None, ui: UiCb = None, rel: str = "") -> None:
+    candidates = _candidate_urls(url)
+    if not candidates:
+        raise RuntimeError(f"{rel or dest}: URL de descarga vacia")
+
+    last_err: Exception | None = None
+    for idx, u in enumerate(candidates, start=1):
+        try:
+            _download_once(u, dest, timeout=timeout, log=log, ui=ui, rel=rel)
+            return
+        except DownloadHTTPError as e:
+            last_err = e
+            if log:
+                log.warning(f"Updater: descarga HTTP fallo ({idx}/{len(candidates)}): {e}")
+        except Exception as e:
+            last_err = e
+            if log:
+                log.warning(f"Updater: descarga urllib fallo ({idx}/{len(candidates)}): {e}")
+
+            if os.name == "nt" and u.lower().startswith("https://"):
+                try:
+                    _emit(ui, "status", text=f"Reintentando descarga con certificados de Windows: {rel or 'archivo'}")
+                    _download_with_windows_tls(_cachebust(u), dest, timeout=timeout, log=log)
+                    return
+                except Exception as win_e:
+                    last_err = DownloadNetError(rel or dest, _cachebust(u), str(win_e))
+                    if log:
+                        log.warning(f"Updater: descarga Windows TLS fallo ({idx}/{len(candidates)}): {win_e}")
+
+        if idx < len(candidates):
+            _emit(ui, "status", text=f"Reintentando descarga: {rel or 'archivo'}")
+
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"{rel or dest}: descarga fallida")
 
 
 def _safe_extract_zip(zip_path: str, dest_dir: str) -> None:
@@ -497,8 +679,16 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
 
 
 def _plan_archive_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
-    archive_url = str(manifest.get("archive_url") or manifest.get("zip_url") or "").strip()
-    if not archive_url:
+    archive_urls = _manifest_urls(
+        manifest,
+        "archive_url",
+        "zip_url",
+        "archive_urls",
+        "zip_urls",
+        "archive_fallback_urls",
+        "zip_fallback_urls",
+    )
+    if not archive_urls:
         raise RuntimeError("Manifiesto ARCHIVE sin archive_url")
 
     archive_sha = str(manifest.get("archive_sha256") or manifest.get("zip_sha256") or "").strip().lower()
@@ -513,7 +703,7 @@ def _plan_archive_update(manifest: Dict[str, Any], app_config: Dict[str, Any], l
     os.close(fd)
 
     _emit(ui, "status", text="Descargando paquete de actualizacion...")
-    _download(archive_url, tmp_zip, timeout=240, log=log, ui=ui, rel="Update archive")
+    _download(archive_urls, tmp_zip, timeout=240, log=log, ui=ui, rel="Update archive")
 
     if archive_sha:
         _emit(ui, "status", text="Verificando paquete de actualizacion...")
@@ -606,10 +796,17 @@ def _plan_archive_update(manifest: Dict[str, Any], app_config: Dict[str, Any], l
 # ----------------- INSTALLER (descarga + plan para apply_update) -----------------
 
 def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
-    url = str(manifest.get("url", "")).strip()
-    if not url:
+    urls = _manifest_urls(
+        manifest,
+        "url",
+        "installer_url",
+        "urls",
+        "installer_urls",
+        "url_fallbacks",
+        "installer_fallback_urls",
+    )
+    if not urls:
         raise RuntimeError("Manifiesto sin 'url' (installer)")
-    url = _normalize_github_url(url)
 
     sha256 = str(manifest.get("sha256", "")).strip().lower()
 
@@ -626,7 +823,7 @@ def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=No
     os.close(fd)
 
     _emit(ui, "status", text="Descargando instalador…")
-    _download(url, tmp, timeout=240, log=log, ui=ui, rel="Setup")
+    _download(urls, tmp, timeout=240, log=log, ui=ui, rel="Setup")
 
     if _is_git_lfs_pointer_file(tmp):
         raise RuntimeError("Setup descargado como pointer LFS")

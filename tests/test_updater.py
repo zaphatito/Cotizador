@@ -231,3 +231,31 @@ def test_check_for_updates_fails_if_files_manifest_is_incompatible_and_has_no_in
     }
     assert failures == [("2.0.5", "Paquete incremental requiere base 2.0.4; local=2.0.3")]
     assert any(kind == "failed" and payload.get("error") == "Paquete incremental requiere base 2.0.4; local=2.0.3" for kind, payload in events)
+
+
+def test_candidate_urls_prefers_media_for_raw_github_url():
+    urls = updater._candidate_urls(
+        "https://raw.githubusercontent.com/zaphatito/Cotizador/main/Output/Setup.exe"
+    )
+
+    assert urls[0] == "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup.exe"
+    assert urls[1] == "https://raw.githubusercontent.com/zaphatito/Cotizador/main/Output/Setup.exe"
+
+
+def test_download_tries_next_candidate_when_first_url_fails(tmp_path, monkeypatch):
+    calls: list[str] = []
+    dest = tmp_path / "setup.exe"
+
+    def fake_download_once(url, dest_path, **kwargs):
+        calls.append(url)
+        if "primary" in url:
+            raise updater.DownloadNetError("Setup", url, "ssl failed")
+        Path(dest_path).write_bytes(b"ok")
+
+    monkeypatch.setattr(updater, "_download_once", fake_download_once)
+    monkeypatch.setattr(updater, "_download_with_windows_tls", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no windows fallback")))
+
+    updater._download(["https://example.invalid/primary.exe", "https://example.invalid/fallback.exe"], str(dest), rel="Setup")
+
+    assert calls == ["https://example.invalid/primary.exe", "https://example.invalid/fallback.exe"]
+    assert dest.read_bytes() == b"ok"
