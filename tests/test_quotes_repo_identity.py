@@ -1,7 +1,11 @@
 import re
 import sqlite3
 
-from sqlModels.quotes_repo import find_doc_identity_conflict
+from sqlModels.quotes_repo import (
+    find_doc_identity_conflict,
+    get_quote_header,
+    resolve_doc_type_for_form,
+)
 
 
 def _norm_doc(value: str) -> str:
@@ -140,6 +144,55 @@ def test_find_doc_identity_conflict_allows_same_triplet():
         telefono="912345678",
     )
     assert got is None
+    con.close()
+
+
+def test_resolve_doc_type_for_form_normalizes_legacy_aliases():
+    assert resolve_doc_type_for_form("PE", "12345678", "CI") == "DNI"
+    assert resolve_doc_type_for_form("PE", "AB123", "PASAPORTE") == "P"
+    assert resolve_doc_type_for_form("PY", "12345678", "CE") == "CI"
+
+
+def test_get_quote_header_normalizes_joined_client_doc_type_for_form():
+    con = _mk_con()
+    client_id = _upsert_client(
+        con,
+        country_code="PE",
+        cliente="Juan Perez",
+        cedula="12345678",
+        tipo_documento="CI",
+        telefono="912345678",
+    )
+    cur = con.execute(
+        """
+        INSERT INTO quotes(country_code, quote_no, created_at, id_cliente, deleted_at)
+        VALUES('PE', 'PE-001-0000009', '2026-02-24T10:00:00', ?, NULL)
+        """,
+        (client_id,),
+    )
+    header = get_quote_header(con, int(cur.lastrowid))
+    assert header["tipo_documento"] == "DNI"
+    con.close()
+
+
+def test_get_quote_header_infers_doc_type_when_client_type_is_empty():
+    con = _mk_con()
+    con.execute(
+        """
+        INSERT INTO clients(country_code, tipo_documento, documento, documento_norm, nombre, telefono)
+        VALUES('PE', '', '12345678', '12345678', 'Juan Perez', '912345678')
+        """
+    )
+    client_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+    cur = con.execute(
+        """
+        INSERT INTO quotes(country_code, quote_no, created_at, id_cliente, deleted_at)
+        VALUES('PE', 'PE-001-0000010', '2026-02-24T10:00:00', ?, NULL)
+        """,
+        (client_id,),
+    )
+    header = get_quote_header(con, int(cur.lastrowid))
+    assert header["tipo_documento"] == "DNI"
     con.close()
 
 

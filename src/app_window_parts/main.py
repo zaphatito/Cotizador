@@ -299,6 +299,11 @@ class SistemaCotizaciones(
                 doc_value = body
         elif doc_type_value and doc_value.upper().startswith(f"{doc_type_value}-"):
             doc_value = doc_value[len(doc_type_value) + 1 :].strip()
+        if hasattr(self, "_resolve_doc_type_for_form"):
+            try:
+                doc_type_value = self._resolve_doc_type_for_form(doc_value, doc_type_value)
+            except Exception:
+                pass
         try:
             if hasattr(self, "_set_selected_doc_type"):
                 self._set_selected_doc_type(doc_type_value)

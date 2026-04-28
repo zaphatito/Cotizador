@@ -151,6 +151,53 @@ def test_check_for_updates_falls_back_to_installer_when_files_plan_fails(tmp_pat
     assert all(kind != "failed" for kind, _payload in events)
 
 
+def test_check_for_updates_uses_archive_manifest_when_base_matches(tmp_path, monkeypatch):
+    app_root = tmp_path / "app"
+    _write_local_version(app_root, "2.0.4")
+
+    manifest = {
+        "version": "2.0.5",
+        "type": "archive",
+        "from_version": "2.0.4",
+        "archive_url": "https://github.com/example/CotizadorReleases/releases/download/v2.0.5/update.zip",
+        "archive_sha256": "abc123",
+        "files": [{"path": "SistemaCotizaciones.exe", "sha256": "def456"}],
+        "delete": [],
+        "url": "https://github.com/example/CotizadorReleases/releases/download/v2.0.5/Setup.exe",
+        "sha256": "ghi789",
+    }
+    archive_plan = {
+        "version": "2.0.5",
+        "staging_root": "C:/tmp/staging",
+        "files": [{"src": "C:/tmp/staging/SistemaCotizaciones.exe", "dst": "C:/app/SistemaCotizaciones.exe"}],
+        "delete": [],
+    }
+
+    events: list[tuple[str, dict]] = []
+    spawned: list[dict] = []
+
+    monkeypatch.setattr(updater, "_app_root", lambda: str(app_root))
+    monkeypatch.setattr(updater, "_http_get_json", lambda *args, **kwargs: (manifest, "{}"))
+    monkeypatch.setattr(updater, "_read_state", lambda log=None: {})
+    monkeypatch.setattr(updater, "_clear_failure", lambda state, log=None: None)
+    monkeypatch.setattr(updater, "_plan_archive_update", lambda *args, **kwargs: archive_plan)
+    monkeypatch.setattr(
+        updater,
+        "_plan_installer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no debe usar installer cuando archive aplica")),
+    )
+    monkeypatch.setattr(updater, "_spawn_apply", lambda plan, app_config, ui=None, log=None: spawned.append(plan))
+
+    result = updater.check_for_updates_and_maybe_install(
+        {"update_manifest_url": "https://github.com/example/CotizadorReleases/releases/latest/download/cotizador.json"},
+        ui=lambda kind, payload: events.append((kind, dict(payload))),
+    )
+
+    assert result == {"status": "UPDATE_STARTED", "method": "archive", "remote": "2.0.5"}
+    assert spawned == [archive_plan]
+    assert any("Preparando actualización (archive)" in text for text in _status_texts(events))
+
+
 def test_check_for_updates_fails_if_files_manifest_is_incompatible_and_has_no_installer(tmp_path, monkeypatch):
     app_root = tmp_path / "app"
     _write_local_version(app_root, "2.0.3")

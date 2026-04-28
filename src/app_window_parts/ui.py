@@ -41,6 +41,7 @@ from sqlModels.quotes_repo import (
     document_type_rule,
     document_type_rules_for_country,
     infer_tipo_documento_from_doc,
+    resolve_doc_type_for_form,
     validate_document_for_type,
 )
 
@@ -94,15 +95,20 @@ class UiMixin:
     def _set_selected_doc_type(self, doc_type: str):
         cb = getattr(self, "combo_tipo_documento", None)
         if cb is None:
-            return
-        t = str(doc_type or "").strip().upper()
+            return False
+        t = resolve_doc_type_for_form(COUNTRY_CODE, "", doc_type)
         if not t:
-            return
+            return False
         i = cb.findData(t)
         if i < 0:
             i = cb.findText(t, Qt.MatchFixedString)
         if i >= 0:
             cb.setCurrentIndex(i)
+            return True
+        return False
+
+    def _resolve_doc_type_for_form(self, doc: str, doc_type: str = "") -> str:
+        return resolve_doc_type_for_form(COUNTRY_CODE, str(doc or ""), str(doc_type or ""))
 
     def _doc_regex_pattern(self, *, doc_type: str | None = None) -> str:
         dt = str(doc_type or self._selected_doc_type() or "").strip().upper()
@@ -229,6 +235,8 @@ class UiMixin:
                 doc = body
         elif doc_type and doc.upper().startswith(f"{doc_type}-"):
             doc = doc[len(doc_type) + 1 :].strip()
+
+        doc_type = self._resolve_doc_type_for_form(doc, doc_type)
 
         try:
             self.entry_cliente.setText(cli)

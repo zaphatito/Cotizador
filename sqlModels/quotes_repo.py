@@ -492,6 +492,37 @@ def infer_tipo_documento_from_doc(
     return ""
 
 
+def resolve_doc_type_for_form(
+    country_code: Any,
+    cedula: Any,
+    explicit_tipo: Any = "",
+) -> str:
+    """
+    Devuelve un tipo canónico apto para el combo del formulario.
+
+    Prioridad:
+    - tipo explícito reconocido para el país (normaliza aliases legacy)
+    - inferencia por prefijo/cuerpo del documento
+    - tipo explícito normalizado, aunque el documento no valide
+    """
+    cod = _country_code_norm(country_code)
+    explicit_norm = _normalize_doc_type(cod, explicit_tipo)
+    allowed = _DOC_TYPES_BY_COUNTRY_CODE.get(cod, set())
+
+    if explicit_norm and ((not allowed) or (explicit_norm in allowed)):
+        return explicit_norm
+
+    inferred = infer_tipo_documento_from_doc(
+        cod,
+        cedula,
+        explicit_tipo=explicit_tipo,
+    )
+    if inferred:
+        return inferred
+
+    return explicit_norm or ""
+
+
 def _status_code_token(value: Any) -> str:
     try:
         from .quote_statuses_repo import normalize_status_code
@@ -1354,18 +1385,31 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
     if not r:
         raise KeyError(f"Cotización no encontrada: {quote_id}")
     out = dict(r)
+    current_doc = str(out.get("cedula") or out.get("documento") or "")
+    current_tipo = str(out.get("tipo_documento") or "")
     if "client_nombre" in out:
-        out["cliente"] = str(out.pop("client_nombre") or "")
+        client_nombre = str(out.pop("client_nombre") or "")
+        out["cliente"] = client_nombre or str(out.get("cliente") or "")
     if "client_documento" in out:
-        out["cedula"] = str(out.pop("client_documento") or "")
+        client_documento = str(out.pop("client_documento") or "")
+        out["cedula"] = client_documento or current_doc
+        current_doc = str(out.get("cedula") or "")
     if "client_tipo_documento" in out:
-        out["tipo_documento"] = str(out.pop("client_tipo_documento") or "")
+        client_tipo = str(out.pop("client_tipo_documento") or "")
+        out["tipo_documento"] = resolve_doc_type_for_form(
+            out.get("country_code"),
+            current_doc,
+            client_tipo or current_tipo,
+        )
     if "client_telefono" in out:
-        out["telefono"] = str(out.pop("client_telefono") or "")
+        client_telefono = str(out.pop("client_telefono") or "")
+        out["telefono"] = client_telefono or str(out.get("telefono") or "")
     if "client_direccion" in out:
-        out["direccion"] = str(out.pop("client_direccion") or "")
+        client_direccion = str(out.pop("client_direccion") or "")
+        out["direccion"] = client_direccion or str(out.get("direccion") or "")
     if "client_email" in out:
-        out["email"] = str(out.pop("client_email") or "")
+        client_email = str(out.pop("client_email") or "")
+        out["email"] = client_email or str(out.get("email") or "")
     if not str(out.get("direccion") or "").strip():
         out["direccion"] = "-"
     if not str(out.get("email") or "").strip():

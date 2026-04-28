@@ -2,12 +2,15 @@ param(
   [ValidateSet("major","mayor","minor","patch")]
   [string]$Bump = "patch",
   [string]$RepoUser = "zaphatito",
-  [string]$RepoName = "Cotizador",
+  [string]$RepoName = "CotizadorReleases",
+  [string]$ReleaseTagPrefix = "v",
   [string]$ProjectRoot = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador",
   [string]$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
+  [switch]$Publish,
+  [bool]$Draft = $true,
   [switch]$Mandatory,
   [switch]$PruneOpenGLSW
 )
@@ -16,11 +19,42 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
+if ($Publish -and [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+  throw "Falta GH_TOKEN. Configuralo con permiso Contents: Read/Write sobre $RepoUser/$RepoName."
+}
+
+function Get-CurrentGitBranch() {
+  $branch = (& git -C $ProjectRoot branch --show-current 2>$null)
+  if ($LASTEXITCODE -ne 0) {
+    throw "No se pudo validar la rama git actual."
+  }
+
+  $branch = ([string]$branch).Trim()
+  if ([string]::IsNullOrWhiteSpace($branch)) {
+    $branch = (& git -C $ProjectRoot rev-parse --abbrev-ref HEAD 2>$null)
+    $branch = ([string]$branch).Trim()
+  }
+
+  return $branch
+}
+
+function Assert-PublishBranch() {
+  if (-not $Publish) { return }
+
+  $branch = Get-CurrentGitBranch
+  if ($branch -ne "main") {
+    throw "Estas en la rama '$branch'. Para publicar instaladores debes hacer merge a prod (main) y ejecutar el release desde main."
+  }
+}
+
+Assert-PublishBranch
+
 function Normalize-BumpKind([string]$kind) {
   if ($null -eq $kind) { $kind = "" }
 
   switch ($kind.Trim().ToLowerInvariant()) {
     "major" { return "major" }
+    "mayor" { return "major" }
     "minor" { return "minor" }
     "patch" { return "patch" }
     default { throw "Bump invalido '$kind' (use major/minor/patch)" }
@@ -169,6 +203,133 @@ Soporte
   }
 }
 
+function Get-ReleaseTag([string]$Version) {
+  return "$ReleaseTagPrefix$Version"
+}
+
+function Get-GitHubHeaders() {
+  if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+    throw "Falta GH_TOKEN. Configuralo con permiso Contents: Read/Write sobre $RepoUser/$RepoName."
+  }
+
+  return @{
+    Authorization = "Bearer $($env:GH_TOKEN)"
+    Accept = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+    "User-Agent" = "Cotizador-Release-Script"
+  }
+}
+
+function Get-HttpStatusCode($Err) {
+  try { return [int]$Err.Exception.Response.StatusCode } catch { return 0 }
+}
+
+function Invoke-GitHubJson([string]$Method, [string]$Uri, $Body = $null) {
+  $headers = Get-GitHubHeaders
+  if ($null -eq $Body) {
+    return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers
+  }
+
+  $json = $Body | ConvertTo-Json -Depth 20
+  return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -Body $json -ContentType "application/json"
+}
+
+function Get-GitHubReleaseByTag([string]$Owner, [string]$Repo, [string]$Tag) {
+  $tagEsc = [System.Uri]::EscapeDataString($Tag)
+  $uri = "https://api.github.com/repos/$Owner/$Repo/releases/tags/$tagEsc"
+  try {
+    return Invoke-GitHubJson -Method "Get" -Uri $uri
+  } catch {
+    if ((Get-HttpStatusCode $_) -eq 404) { return $null }
+    throw
+  }
+}
+
+function Ensure-GitHubRelease([string]$Owner, [string]$Repo, [string]$Tag, [string]$Name, [bool]$IsDraft) {
+  $release = Get-GitHubReleaseByTag -Owner $Owner -Repo $Repo -Tag $Tag
+  if ($null -ne $release) { return $release }
+
+  $body = @{
+    tag_name = $Tag
+    name = $Name
+    draft = $IsDraft
+    prerelease = $false
+    generate_release_notes = $false
+  }
+
+  return Invoke-GitHubJson -Method "Post" -Uri "https://api.github.com/repos/$Owner/$Repo/releases" -Body $body
+}
+
+function Remove-GitHubAssetIfExists($Release, [string]$AssetName) {
+  $assetsUrl = "https://api.github.com/repos/$RepoUser/$RepoName/releases/$($Release.id)/assets?per_page=100"
+  $assets = Invoke-GitHubJson -Method "Get" -Uri $assetsUrl
+  foreach ($asset in @($assets)) {
+    if ([string]$asset.name -eq $AssetName) {
+      Write-Host "Reemplazando asset existente: $AssetName"
+      Invoke-GitHubJson -Method "Delete" -Uri "https://api.github.com/repos/$RepoUser/$RepoName/releases/assets/$($asset.id)" | Out-Null
+    }
+  }
+}
+
+function Upload-GitHubAsset($Release, [string]$Path) {
+  if (!(Test-Path $Path)) { throw "No existe asset para subir: $Path" }
+
+  $assetName = Split-Path $Path -Leaf
+  Remove-GitHubAssetIfExists -Release $Release -AssetName $assetName
+
+  $uploadBase = ([string]$Release.upload_url) -replace '\{\?name,label\}$', ''
+  $nameEsc = [System.Uri]::EscapeDataString($assetName)
+  $uploadUri = "$uploadBase?name=$nameEsc"
+
+  Write-Host "Subiendo asset: $assetName"
+  Invoke-RestMethod `
+    -Method Post `
+    -Uri $uploadUri `
+    -Headers (Get-GitHubHeaders) `
+    -ContentType "application/octet-stream" `
+    -InFile $Path | Out-Null
+}
+
+function Publish-GitHubReleaseAssets([string]$Owner, [string]$Repo, [string]$Tag, [string]$Name, [bool]$IsDraft, [string[]]$Paths) {
+  $release = Ensure-GitHubRelease -Owner $Owner -Repo $Repo -Tag $Tag -Name $Name -IsDraft $IsDraft
+
+  foreach ($path in $Paths) {
+    Upload-GitHubAsset -Release $release -Path $path
+  }
+
+  return $release
+}
+
+function New-UpdateArchive([string]$SourceRoot, [array]$FilesList, [string]$ArchivePath) {
+  if (Test-Path $ArchivePath) { Remove-Item -LiteralPath $ArchivePath -Force }
+
+  $stage = Join-Path $env:LOCALAPPDATA ("Cotizador\release_archive\" + [System.IO.Path]::GetFileNameWithoutExtension($ArchivePath))
+  Remove-Dir-Robust $stage
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+  foreach ($it in @($FilesList)) {
+    $rel = [string]$it.path
+    if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+
+    $src = Join-Path $SourceRoot ($rel.Replace("/", "\"))
+    if (!(Test-Path $src)) { throw "No existe archivo para zip de update: $src" }
+
+    $dst = Join-Path $stage ($rel.Replace("/", "\"))
+    $dstDir = Split-Path $dst -Parent
+    New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+    Copy-Item -Force $src $dst
+  }
+
+  if ((Get-ChildItem -Path $stage -Recurse -File | Measure-Object).Count -eq 0) {
+    Set-ContentUtf8NoBOM -Path (Join-Path $stage "__empty_update.txt") -Text "empty"
+  }
+
+  Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $ArchivePath -Force
+  Remove-Dir-Robust $stage
+
+  return (Get-FileHash $ArchivePath -Algorithm SHA256).Hash.ToUpper()
+}
+
 # --- venv ---
 if (-not $VenvPath -or -not (Test-Path $VenvPath)) {
   $cand1 = Join-Path $ProjectRoot ".venv"
@@ -227,11 +388,18 @@ Write-Host "OK: changelog actualizado (Versión/Fecha) -> $changelogPath"
 $issFull = Join-Path $ProjectRoot $IssPath
 $issTxt  = Get-Content -Raw $issFull
 $issTxt  = $issTxt -replace '#define\s+MyAppVersion\s+"[^"]+"', "#define MyAppVersion `"$next`""
-$manifestUrl = "https://raw.githubusercontent.com/$RepoUser/$RepoName/main/config/cotizador.json"
+$manifestUrl = "https://github.com/$RepoUser/$RepoName/releases/latest/download/cotizador.json"
 if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
   $issTxt = $issTxt -replace '#define\s+UpdateManifestUrl\s+"[^"]+"', "#define UpdateManifestUrl `"$manifestUrl`""
 }
 Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
+
+$appConfigPath = Join-Path $ProjectRoot "config\config.json"
+if (Test-Path $appConfigPath) {
+  $appConfigTxt = Get-Content -Raw $appConfigPath
+  $appConfigTxt = $appConfigTxt -replace '"update_manifest_url"\s*:\s*"[^"]+"', "`"update_manifest_url`": `"$manifestUrl`""
+  Set-ContentUtf8NoBOM -Path $appConfigPath -Text $appConfigTxt
+}
 
 # 3) PyInstaller build main app
 $distRoot = Join-Path $ProjectRoot "dist"
@@ -328,7 +496,9 @@ $setupLocal = Join-Path $ProjectRoot "Output\$setupName"
 if (!(Test-Path $setupLocal)) { throw "No se encontró $setupLocal" }
 $setupSha = (Get-FileHash $setupLocal -Algorithm SHA256).Hash.ToUpper()
 
-$exeUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Output/$setupName"
+$releaseTag = Get-ReleaseTag $next
+$releaseBaseUrl = "https://github.com/$RepoUser/$RepoName/releases/download/$releaseTag"
+$exeUrl = "$releaseBaseUrl/$setupName"
 
 # 6) build updates/<version> (FILES)
 $updatesRoot = Join-Path $ProjectRoot "Output\updates"
@@ -413,14 +583,23 @@ $isDeltaManifest = $hasPrevUpdate -and -not $isMajorRelease
 
 # 6.4 manifest cotizador.json
 $manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
-$baseUrl = "https://media.githubusercontent.com/media/$RepoUser/$RepoName/main/Output/updates/$next/"
-$manifestType = if ($isMajorRelease) { "installer" } else { "files" }
+$archiveName = "SistemaCotizaciones_Update_{0}.zip" -f $next
+$archiveLocal = Join-Path $ProjectRoot "Output\$archiveName"
+$archiveSha = ""
+$archiveUrl = "$releaseBaseUrl/$archiveName"
+$manifestType = if ($isMajorRelease) { "installer" } else { "archive" }
+
+if ($manifestType -eq "archive") {
+  $archiveSha = New-UpdateArchive -SourceRoot $updateVerDir -FilesList $filesList -ArchivePath $archiveLocal
+  Write-Host "OK: update archive -> $archiveLocal"
+}
 
 $manifestObj = [ordered]@{}
 $manifestObj["version"] = $next
 $manifestObj["type"] = $manifestType
-if ($manifestType -eq "files") {
-  $manifestObj["base_url"] = $baseUrl
+if ($manifestType -eq "archive") {
+  $manifestObj["archive_url"] = $archiveUrl
+  $manifestObj["archive_sha256"] = $archiveSha
   if ($isDeltaManifest) { $manifestObj["from_version"] = $prev }
   $manifestObj["files"] = $filesList
   $manifestObj["delete"] = $deleteList
@@ -433,9 +612,10 @@ Set-ContentUtf8NoBOM -Path $manifestPath -Text ($manifestObj | ConvertTo-Json -D
 
 Write-Host "Manifest actualizado: $manifestPath"
 Write-Host "  type   = $manifestType"
-if ($manifestType -eq "files") {
+if ($manifestType -eq "archive") {
   Write-Host "  files  = $($filesList.Count) (cambiados de $($newEntries.Count))"
   Write-Host "  delete = $($deleteList.Count)"
+  Write-Host "  zip    = $archiveName"
   if ($isDeltaManifest) {
     Write-Host "  from_version = $prev"
   } else {
@@ -445,20 +625,7 @@ if ($manifestType -eq "files") {
   Write-Host "  compat  = instalador completo (release mayor)"
 }
 
-# 7) git lfs + commit
-try { git lfs env | Out-Null } catch { git lfs install | Out-Null }
-
-$attrPath = Join-Path $ProjectRoot ".gitattributes"
-if (!(Test-Path $attrPath)) { New-Item -ItemType File -Path $attrPath | Out-Null }
-$attrTxt = Get-Content -Raw $attrPath
-
-if ($attrTxt -notmatch 'Output/\*\.exe\s+filter=lfs') {
-  'Output/*.exe filter=lfs diff=lfs merge=lfs -text' | Add-Content $attrPath
-}
-if ($attrTxt -notmatch 'Output/updates/\*\*\s+filter=lfs') {
-  'Output/updates/** filter=lfs diff=lfs merge=lfs -text' | Add-Content $attrPath
-}
-git -C $ProjectRoot add .gitattributes
+# 7) commit source metadata only. Release binaries go to GitHub Releases.
 
 $filesToAdd = @(
   "src/version.py",
@@ -467,13 +634,33 @@ $filesToAdd = @(
   "tools/apply_update.py",
   $IssPath,
   "changelog.txt",                 # ✅ se commitea con versión/fecha actualizadas
-  ("Output\" + $setupName),
-  ("Output/updates/" + $next),
+  "config/config.json",
   "config/cotizador.json"
 )
 
 git -C $ProjectRoot add -- $filesToAdd
 $commitMode = if ($manifestType -eq "installer") { "full-installer-updater" } else { "silent files-updater" }
 git -C $ProjectRoot commit -m ("Release {0}: {1}" -f $next, $commitMode)
+
+# 8) publish GitHub Release assets when requested.
+if ($Publish) {
+  $assetPaths = @($manifestPath, $setupLocal)
+  if ($manifestType -eq "archive") { $assetPaths += $archiveLocal }
+
+  $releaseName = "Sistema de Cotizaciones $next"
+  Publish-GitHubReleaseAssets `
+    -Owner $RepoUser `
+    -Repo $RepoName `
+    -Tag $releaseTag `
+    -Name $releaseName `
+    -IsDraft $Draft `
+    -Paths $assetPaths | Out-Null
+
+  if ($Draft) {
+    Write-Host "GitHub recibio un draft release en $RepoUser/$RepoName. Publicalo cuando lo valides."
+  } else {
+    Write-Host "GitHub release publicado en $RepoUser/$RepoName."
+  }
+}
 
 Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)

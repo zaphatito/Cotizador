@@ -26,6 +26,7 @@ import time
 import urllib.request
 import urllib.error
 import shutil
+import zipfile
 from typing import Dict, Any, Tuple, Optional, Callable
 
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
@@ -186,6 +187,25 @@ def _download(url: str, dest: str, timeout: int = 180, log=None, ui: UiCb = None
         raise DownloadNetError(rel or dest, u, str(getattr(e, "reason", e))) from e
     except Exception as e:
         raise RuntimeError(f"{rel or dest}: Error descargando | URL={u} | {e}") from e
+
+
+def _safe_extract_zip(zip_path: str, dest_dir: str) -> None:
+    dest_abs = os.path.abspath(dest_dir)
+    os.makedirs(dest_abs, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            name = str(info.filename or "").replace("\\", "/").strip()
+            if not name:
+                continue
+            if not _is_safe_relpath(name.rstrip("/")):
+                raise RuntimeError(f"ZIP con ruta insegura: {name}")
+
+            target = os.path.abspath(os.path.join(dest_abs, *name.split("/")))
+            if os.path.commonpath([dest_abs, target]) != dest_abs:
+                raise RuntimeError(f"ZIP intenta escribir fuera del destino: {name}")
+
+        zf.extractall(dest_abs)
 
 
 def _sha256_file(path: str) -> str:
@@ -476,6 +496,113 @@ def _plan_files_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log
     return plan
 
 
+def _plan_archive_update(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
+    archive_url = str(manifest.get("archive_url") or manifest.get("zip_url") or "").strip()
+    if not archive_url:
+        raise RuntimeError("Manifiesto ARCHIVE sin archive_url")
+
+    archive_sha = str(manifest.get("archive_sha256") or manifest.get("zip_sha256") or "").strip().lower()
+    version = str(manifest.get("version") or "0.0.0").strip()
+
+    staging_root = os.path.join(tempfile.gettempdir(), "CotizadorUpdate", f"{version}_archive")
+    if os.path.isdir(staging_root):
+        shutil.rmtree(staging_root, ignore_errors=True)
+    os.makedirs(staging_root, exist_ok=True)
+
+    fd, tmp_zip = tempfile.mkstemp(suffix=".zip", prefix="CotizadorUpdate_")
+    os.close(fd)
+
+    _emit(ui, "status", text="Descargando paquete de actualizacion...")
+    _download(archive_url, tmp_zip, timeout=240, log=log, ui=ui, rel="Update archive")
+
+    if archive_sha:
+        _emit(ui, "status", text="Verificando paquete de actualizacion...")
+        calc = _sha256_file(tmp_zip).lower()
+        if calc != archive_sha:
+            raise RuntimeError("Paquete de actualizacion no supero verificacion SHA-256")
+
+    _emit(ui, "status", text="Preparando paquete de actualizacion...")
+    _safe_extract_zip(tmp_zip, staging_root)
+
+    files = manifest.get("files", [])
+    if not isinstance(files, list):
+        raise RuntimeError("Manifiesto ARCHIVE invalido: files no es lista")
+
+    ignore = _build_ignore_set(app_config)
+
+    plan: Dict[str, Any] = {
+        "version": version,
+        "staging_root": staging_root,
+        "files": [],
+        "delete": [],
+        "changelog_rel": _changelog_rel(manifest, app_config),
+        "skipped": [],
+    }
+
+    deletes = manifest.get("delete", [])
+    if isinstance(deletes, list):
+        for rel in deletes:
+            if not isinstance(rel, str):
+                continue
+            if not _is_safe_relpath(rel):
+                continue
+
+            rel_n = _normalize_rel(rel)
+            if rel_n == "sqlmodels" or rel_n.startswith("sqlmodels/"):
+                continue
+            if rel_n in ignore:
+                continue
+
+            plan["delete"].append(_dst_for_rel(rel))
+
+    need_items: list[dict[str, str]] = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        rel = str(f.get("path", "") or "").replace("\\", "/").strip()
+        sha = str(f.get("sha256", "") or "").strip().lower()
+        if not rel or not sha:
+            continue
+        if not _is_safe_relpath(rel):
+            continue
+        if _normalize_rel(rel) in ignore:
+            continue
+
+        dst = _dst_for_rel(rel)
+        need = True
+        if os.path.exists(dst):
+            try:
+                need = (_sha256_file(dst).lower() != sha)
+            except Exception:
+                need = True
+        if need:
+            need_items.append({"rel": rel, "sha": sha})
+
+    _emit(ui, "progress_total", total=len(need_items))
+    _emit(ui, "status", text=f"Archivos a actualizar: {len(need_items)}")
+
+    for idx, it in enumerate(need_items, start=1):
+        rel = it["rel"]
+        sha = it["sha"]
+        staged = os.path.join(staging_root, rel.replace("/", os.sep))
+
+        _emit(ui, "progress", current=idx - 1, total=len(need_items), text=f"Verificando {idx}/{len(need_items)}: {rel}")
+
+        if not os.path.exists(staged):
+            raise RuntimeError(f"El paquete no contiene el archivo requerido: {rel}")
+        if _is_git_lfs_pointer_file(staged):
+            raise RuntimeError(f"Pointer LFS en {rel}")
+
+        calc = _sha256_file(staged).lower()
+        if calc != sha:
+            raise RuntimeError(f"SHA mismatch en {rel} (esperado {sha}, obt {calc})")
+
+        plan["files"].append({"src": staged, "dst": _dst_for_rel(rel)})
+        _emit(ui, "progress", current=idx, total=len(need_items), text=f"Listo: {rel}")
+
+    return plan
+
+
 # ----------------- INSTALLER (descarga + plan para apply_update) -----------------
 
 def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=None, ui: UiCb = None) -> Dict[str, Any]:
@@ -619,6 +746,36 @@ def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = N
                         if log:
                             log.exception("Updater: fallo incremental; se usa instalador completo")
                         _emit(ui, "status", text="La actualización incremental no pudo aplicarse. Cambiando a instalador completo…")
+                        return _start_installer_update("installer_fallback")
+                    raise
+
+            if pkg_type in ("archive", "zip"):
+                from_version = str(manifest.get("from_version", "") or "").strip()
+                if from_version and not _same_version(local_version, from_version):
+                    msg = f"Paquete incremental requiere base {from_version}; local={local_version}"
+                    if installer_url:
+                        if log:
+                            log.info("Updater: %s. Se usa instalador completo.", msg)
+                        _emit(ui, "status", text=f"{msg}. Se usará instalador completo.")
+                        return _start_installer_update("installer_due_to_base_mismatch")
+                    raise RuntimeError(msg)
+
+                try:
+                    _emit(ui, "status", text="Preparando actualización (archive)…")
+                    plan = _plan_archive_update(manifest, app_config, log=log, ui=ui)
+
+                    if not plan.get("files") and not plan.get("delete"):
+                        _clear_failure(state, log=log)
+                        _emit(ui, "status", text="No hay cambios que aplicar.")
+                        return {"status": "NO_CHANGES"}
+
+                    _spawn_apply(plan, app_config, ui=ui, log=log)
+                    return {"status": "UPDATE_STARTED", "method": "archive", "remote": remote_version}
+                except Exception as e:
+                    if installer_url:
+                        if log:
+                            log.exception("Updater: fallo archive; se usa instalador completo")
+                        _emit(ui, "status", text="La actualización comprimida no pudo aplicarse. Cambiando a instalador completo…")
                         return _start_installer_update("installer_fallback")
                     raise
 

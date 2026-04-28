@@ -9,6 +9,6 @@
   "enable_ai": false,
   "update_mode": "ASK",
   "update_check_on_startup": true,
-  "update_manifest_url": "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json",
+  "update_manifest_url": "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json",
   "update_flags": "/CLOSEAPPLICATIONS"
 }

@@ -8,8 +8,8 @@
 ; === Versionado (lo sobrescribe release.ps1) ===
 #define MyAppVersion "2.0.9"
 
-; === Manifiesto público para el updater (RAW GitHub) ===
-#define UpdateManifestUrl "https://raw.githubusercontent.com/zaphatito/Cotizador/main/config/cotizador.json"
+; === Manifiesto publico para el updater (GitHub Releases) ===
+#define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
 
 ; Rutas locales de build
 #define ProjectRoot  "C:\Users\Samuel\OneDrive\Escritorio\Cotizador"
