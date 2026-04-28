@@ -27,4 +27,5 @@ vendor/ollama/
 # Artefactos generados por releases; se publican en GitHub Releases.
 /Output/Setup_SistemaCotizaciones_*.exe
 /Output/SistemaCotizaciones_Update_*.zip
+/Output/cotizador.json
 /Output/updates/

@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.0.10"
+#define MyAppVersion "2.0.11"
 
 ; === Manifiesto publico para el updater (GitHub Releases) ===
 #define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
@@ -829,6 +829,7 @@ begin
 
   end;
 end;
+
 
 
 

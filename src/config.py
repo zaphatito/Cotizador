@@ -48,6 +48,12 @@ DEFAULT_CONFIG_STR: dict[str, str | None] = {
     "chat_send_bg": "",
 }
 
+RELEASE_MANIFEST_URL = "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
+LEGACY_MANIFEST_URLS = {
+    "https://raw.githubusercontent.com/zaphatito/cotizador/main/config/cotizador.json",
+    "https://media.githubusercontent.com/media/zaphatito/cotizador/main/config/cotizador.json",
+}
+
 # Categorías granel
 CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
 
@@ -252,6 +258,17 @@ def _set_meta(con, key: str, value: str) -> None:
     )
 
 
+def _migrate_update_manifest_url(con) -> None:
+    current = str(get_setting(con, "update_manifest_url", "") or "").strip()
+    if not current:
+        set_setting(con, "update_manifest_url", RELEASE_MANIFEST_URL)
+        return
+
+    normalized = current.lower().split("?", 1)[0].rstrip("/")
+    if normalized in LEGACY_MANIFEST_URLS:
+        set_setting(con, "update_manifest_url", RELEASE_MANIFEST_URL)
+
+
 def _seed_settings_once(con) -> None:
     """
     Regla (robusta):
@@ -294,6 +311,8 @@ def _seed_settings_once(con) -> None:
     else:
         if settings_is_empty(con):
             ensure_defaults(con, DEFAULT_CONFIG_STR)
+
+    _migrate_update_manifest_url(con)
 
 
 def _parse_optional_bool_setting(value: str | None) -> bool | None:

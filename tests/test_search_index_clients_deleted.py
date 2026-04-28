@@ -1,7 +1,57 @@
 from __future__ import annotations
 
 from sqlModels.db import connect, ensure_schema, tx
-from src.ai.search_index import LocalSearchIndex, _FTS_CLIENTS, ensure_ai_schema
+from src.ai.search_index import (
+    LocalSearchIndex,
+    _FTS_CLIENTS,
+    _FTS_PRODUCTS,
+    _SEARCH_CACHE_TABLE,
+    ensure_ai_schema,
+)
+
+
+def _table_exists(con, name: str) -> bool:
+    row = con.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        LIMIT 1
+        """,
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def test_search_clients_direct_mode_does_not_create_ai_tables(tmp_path):
+    db_path = str(tmp_path / "search_clients_direct.sqlite3")
+    con = connect(db_path)
+    ensure_schema(con)
+    with tx(con):
+        con.execute(
+            """
+            INSERT INTO clients(
+                country_code, tipo_documento, documento, documento_norm,
+                nombre, telefono, direccion, email,
+                source_quote_id, source_created_at
+            )
+            VALUES('PE','DNI','12345678','12345678',
+                   'Cliente Activo','900111222','Av Test','test@example.com',
+                   NULL,'2026-02-24T10:00:00')
+            """
+        )
+    con.close()
+
+    idx = LocalSearchIndex(db_path, auto_create_fts=False)
+    rows = idx.search_clients("Activo", limit=10)
+    assert any(str(r.get("cliente") or "") == "Cliente Activo" for r in rows)
+
+    con = connect(db_path)
+    ensure_schema(con)
+    assert not _table_exists(con, _FTS_PRODUCTS)
+    assert not _table_exists(con, _FTS_CLIENTS)
+    assert not _table_exists(con, _SEARCH_CACHE_TABLE)
+    con.close()
 
 
 def test_search_clients_excludes_deleted_even_with_stale_fts(tmp_path):
@@ -163,7 +213,7 @@ def test_search_clients_does_not_force_generic_first_when_query_is_other_client(
     assert str(rows[0].get("cliente") or "").strip().upper() != "CLIENTE GENERICO"
 
 
-def test_search_clients_prioritizes_more_similar_client_over_generic(tmp_path):
+def test_search_clients_keeps_generic_first_when_query_matches_generic_name(tmp_path):
     db_path = str(tmp_path / "search_clients_similarity_priority.sqlite3")
     con = connect(db_path)
     ensure_schema(con)
@@ -203,7 +253,7 @@ def test_search_clients_prioritizes_more_similar_client_over_generic(tmp_path):
     idx = LocalSearchIndex(db_path)
     rows = idx.search_clients("cliente", limit=10)
     assert rows
-    assert str(rows[0].get("cliente") or "").strip().upper() == "CLIENTE"
+    assert str(rows[0].get("cliente") or "").strip().upper() == "CLIENTE GENERICO"
 
 
 def test_search_clients_hides_when_query_has_no_real_match(tmp_path):

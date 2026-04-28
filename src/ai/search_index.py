@@ -710,8 +710,9 @@ _GLOBAL_FUZZY_CACHE_LOCK = threading.Lock()
 
 
 class LocalSearchIndex:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, *, auto_create_fts: bool = True):
         self.db_path = os.path.abspath(str(db_path))
+        self._auto_create_fts = bool(auto_create_fts)
         self._lock = threading.Lock()
         self._fts_available: Optional[bool] = None
         self._fuzzy: Optional[_FuzzyCache] = None
@@ -725,6 +726,11 @@ class LocalSearchIndex:
         con.execute("PRAGMA synchronous = NORMAL")
         con.execute("PRAGMA busy_timeout = 5000")
         return con
+
+    def _ensure_fts_state(self, con: sqlite3.Connection) -> bool:
+        if self._fts_available is None:
+            self._fts_available = ensure_ai_schema(con) if self._auto_create_fts else False
+        return bool(self._fts_available)
 
     @staticmethod
     def _finalize_fuzzy_cache(
@@ -931,7 +937,7 @@ class LocalSearchIndex:
             if self._fts_available is None:
                 con = self._connect()
                 try:
-                    self._fts_available = ensure_ai_schema(con)
+                    self._ensure_fts_state(con)
                 finally:
                     con.close()
             self._ensure_fuzzy_cache()
@@ -1549,8 +1555,7 @@ class LocalSearchIndex:
 
         con = self._connect()
         try:
-            if self._fts_available is None:
-                self._fts_available = ensure_ai_schema(con)
+            self._ensure_fts_state(con)
 
             seen = set()
             out: List[Dict[str, Any]] = []
@@ -1783,8 +1788,7 @@ class LocalSearchIndex:
 
         con = self._connect()
         try:
-            if self._fts_available is None:
-                self._fts_available = ensure_ai_schema(con)
+            self._ensure_fts_state(con)
 
             seen = set()
             out: List[Dict[str, Any]] = []
@@ -2030,7 +2034,11 @@ class LocalSearchIndex:
                 gkey = _client_key(generic_row)
                 generic_rows = [r for r in out if _client_key(r) == gkey]
                 non_generic_rows = [r for r in out if _client_key(r) != gkey]
-                generic_candidate = generic_rows[0] if generic_rows else generic_row
+                generic_candidate = dict(generic_rows[0]) if generic_rows else dict(generic_row)
+                for k in ("country_code", "tipo_documento"):
+                    if not str(generic_candidate.get(k) or "").strip():
+                        generic_candidate[k] = generic_row.get(k, "")
+                q_ns = re.sub(r"\s+", "", qn)
                 generic_blob = _norm_query(
                     " ".join(
                         [
@@ -2042,13 +2050,21 @@ class LocalSearchIndex:
                         ]
                     ).strip()
                 )
-                q_ns = re.sub(r"\s+", "", qn)
-                blob_ns = re.sub(r"\s+", "", generic_blob)
-                # Relevancia estricta: solo mostrar/poner primero al generico
-                # cuando el texto ingresado coincide de forma textual.
+                generic_blob_ns = re.sub(r"\s+", "", generic_blob)
+                generic_name = _norm_query(generic_candidate.get("cliente") or "")
+                generic_doc_ns = re.sub(r"\s+", "", _norm_query(generic_candidate.get("cedula") or ""))
+                generic_tel_ns = re.sub(r"\s+", "", _norm_query(generic_candidate.get("telefono") or ""))
+                generic_email_ns = re.sub(r"\s+", "", _norm_query(generic_candidate.get("email") or ""))
+                q_tokens = set(qn.split())
+                # El cliente generico es una opcion del sistema: si el texto
+                # escrito matchea su nombre/datos, debe quedar primero.
                 generic_is_relevant = (
-                    (bool(qn) and qn in generic_blob)
-                    or (bool(q_ns) and q_ns in blob_ns)
+                    (bool(qn) and qn == generic_name)
+                    or (bool(qn) and qn in generic_blob)
+                    or (bool(q_ns) and q_ns in generic_blob_ns)
+                    or ("generico" in q_tokens)
+                    or (bool(q_ns) and q_ns in {generic_doc_ns, generic_tel_ns, generic_email_ns})
+                    or (len(q_ns) >= 4 and bool(generic_doc_ns) and q_ns in generic_doc_ns)
                 )
 
                 # Si el generico hace match con lo ingresado, siempre primero.

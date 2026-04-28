@@ -190,7 +190,29 @@ class CompleterMixin:
         self._sug_model = None
 
     def _teardown_ai_completers(self):
-        for attr in ("_ai_prod", "_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
+        self._teardown_ai_product_completer()
+        self._teardown_client_completers()
+        self._ai_index = None
+        self._client_index = None
+
+    def _teardown_ai_product_completer(self):
+        comp = getattr(self, "_ai_prod", None)
+        if comp is None:
+            return
+        try:
+            if hasattr(comp, "hide_popup"):
+                comp.hide_popup()
+        except Exception:
+            pass
+        try:
+            comp.deleteLater()
+        except Exception:
+            pass
+        self._ai_prod = None
+        self._ai_index = None
+
+    def _teardown_client_completers(self):
+        for attr in ("_ai_cli", "_ai_doc", "_ai_tel", "_ai_dir", "_ai_email"):
             comp = getattr(self, attr, None)
             if comp is None:
                 continue
@@ -205,11 +227,11 @@ class CompleterMixin:
                 pass
             setattr(self, attr, None)
 
-        self._ai_index = None
+        self._client_index = None
 
     def _rebuild_search_completers(self):
         self._teardown_plain_completer()
-        self._teardown_ai_completers()
+        self._teardown_ai_product_completer()
         self._build_completer()
 
     def _hide_all_client_popups(self):
@@ -262,6 +284,11 @@ class CompleterMixin:
             pass
 
     def _build_completer(self):
+        try:
+            self._setup_client_completers()
+        except Exception:
+            pass
+
         if bool(getattr(self, "_use_ai_completer", False)):
             try:
                 self._setup_ai_completers()
