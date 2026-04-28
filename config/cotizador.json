@@ -1,43 +1,136 @@
 {
-    "version":  "2.0.9",
-    "type":  "files",
-    "base_url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/updates/2.0.9/",
-    "from_version":  "2.0.8",
+    "version":  "2.0.10",
+    "type":  "archive",
+    "archive_url":  "https://github.com/zaphatito/CotizadorReleases/releases/download/v2.0.10/SistemaCotizaciones_Update_2.0.10.zip",
+    "archive_sha256":  "5470D9E2B165739E296B14CA08333BC8B46C43940069ADB7F31043E8AC4E6659",
+    "from_version":  "2.0.9",
     "files":  [
                   {
+                      "path":  "_internal/_asyncio.pyd",
+                      "sha256":  "423007b8c7d63b4cb5f23665a761dd5de1c7e15a65c8013391de0d18c89ce417"
+                  },
+                  {
+                      "path":  "_internal/_bz2.pyd",
+                      "sha256":  "1bf985b54f529a3cbb3e52532791cc4d4c64009142d37b54eb3521adec203d5c"
+                  },
+                  {
+                      "path":  "_internal/_ctypes.pyd",
+                      "sha256":  "96b07339d52c74f2a1dd043df5eb931e4072eed90a3a8715ffec751d818e4117"
+                  },
+                  {
+                      "path":  "_internal/_decimal.pyd",
+                      "sha256":  "398117a6af493e34f56ec0d78ced9901b20b8e895686ce5966edeadb23507056"
+                  },
+                  {
+                      "path":  "_internal/_elementtree.pyd",
+                      "sha256":  "fbce9a1190a228c59767bde785c27cc4d18ee3a1f6b46e9da042fc86f8d0def7"
+                  },
+                  {
+                      "path":  "_internal/_hashlib.pyd",
+                      "sha256":  "50f3ce7a2281fd32f378f3ba5067bdd13e18ee95877db5199c6a0babdc9c516a"
+                  },
+                  {
+                      "path":  "_internal/_lzma.pyd",
+                      "sha256":  "51815b6474d4216c6a2aeaffdae5d2ff4acb7a0236254f2cfe43247022f3d781"
+                  },
+                  {
+                      "path":  "_internal/_multiprocessing.pyd",
+                      "sha256":  "4df0d8f9da454831e96389c145ac9ea0093e09749627a3717ff60d21218670c8"
+                  },
+                  {
+                      "path":  "_internal/_overlapped.pyd",
+                      "sha256":  "53fe68819f23fea7f6deb0054623e936cc2500241061f29bd5288cf4a511278f"
+                  },
+                  {
+                      "path":  "_internal/_queue.pyd",
+                      "sha256":  "b5b5368026c33ade7651fb4cf4c6c1ca7eecc9c8cdad0af007da8a3ac0e067f7"
+                  },
+                  {
+                      "path":  "_internal/_socket.pyd",
+                      "sha256":  "8676f3cebd9d01c7ad51a29b3f7ff429c0a8f6bc564cab21eb6cdaa2e26fd259"
+                  },
+                  {
+                      "path":  "_internal/_sqlite3.pyd",
+                      "sha256":  "bb80e54f2de8aa3cddc00a2a2f893c432d45ecd64a5c55758a4eb6d2e3007127"
+                  },
+                  {
+                      "path":  "_internal/_ssl.pyd",
+                      "sha256":  "b8118580b461801df12ec12d3d666aa0ebc2b3750bcf92b90b92789b152bf856"
+                  },
+                  {
+                      "path":  "_internal/_uuid.pyd",
+                      "sha256":  "0116497261edadfe42ba7daf367c8a9ea27a1db210c8384943c890f532e3ce72"
+                  },
+                  {
+                      "path":  "_internal/_wmi.pyd",
+                      "sha256":  "9a7255064ea143895b28efea6d78e9e518bac290900aec52a6a0435c36a172fb"
+                  },
+                  {
                       "path":  "_internal/base_library.zip",
-                      "sha256":  "2b2a8934f7575161194206d4890ef6d642e4c8f3e7b250dae374b7f69a14dd80"
+                      "sha256":  "413e6896f0e9a6df67a2bcede705b8e09ed3d34f24a1b91bdb137b6426e28386"
                   },
                   {
                       "path":  "_internal/changelog.txt",
-                      "sha256":  "e7a73b198049edc2d5c8a6acd0d9c87d34340a21fc21a135ed5bbf47ff425e15"
+                      "sha256":  "416bb1e43bb642ad7b468f1a01bff2d461188f8c70c152a8927913ac2e9778be"
                   },
                   {
                       "path":  "_internal/config/cotizador.json",
-                      "sha256":  "b1784a4e573820f1e343061369405c98c81d1fad84d233d4d6d0c58f0bb69177"
+                      "sha256":  "55973224b70d3c107784197f9591abc483ceafd52b5aad4725c14676a4a6b538"
+                  },
+                  {
+                      "path":  "_internal/libcrypto-3.dll",
+                      "sha256":  "eaf6d613b95b61a39558d84c50e72630a66c99914292df88e7b54ebd60c5bd34"
+                  },
+                  {
+                      "path":  "_internal/libssl-3.dll",
+                      "sha256":  "cf1a5fdcefa3daf69041f31f98ece1d7911ca4fcb8e9f1043b4d0f459ae4c936"
+                  },
+                  {
+                      "path":  "_internal/pyexpat.pyd",
+                      "sha256":  "b5f57327418750229656c30a809308669797cf30d7da3705f8cd584c2b8a038b"
+                  },
+                  {
+                      "path":  "_internal/python3.dll",
+                      "sha256":  "cbc4876275178244905ee45a9ee6ec9fa4bfb9aad6209a03b756d38a186f80d1"
+                  },
+                  {
+                      "path":  "_internal/python313.dll",
+                      "sha256":  "6964e590037c41d631fd1215f05af154f7fa68105993c6f573a20689b473f1ac"
+                  },
+                  {
+                      "path":  "_internal/select.pyd",
+                      "sha256":  "ddf1221851814943a82ed8a986d228463404da2ada969661bdd69223f14fc050"
+                  },
+                  {
+                      "path":  "_internal/sqlite3.dll",
+                      "sha256":  "aaae3fe73a4dda249da1ed740c087d1548a1ff7b73eaa7aa62c2354a581ee299"
+                  },
+                  {
+                      "path":  "_internal/unicodedata.pyd",
+                      "sha256":  "b965a80346ee95dbec0b147faab329f3276ba24fceb8df5df171367649f116f3"
                   },
                   {
                       "path":  "changelog.txt",
-                      "sha256":  "e7a73b198049edc2d5c8a6acd0d9c87d34340a21fc21a135ed5bbf47ff425e15"
+                      "sha256":  "416bb1e43bb642ad7b468f1a01bff2d461188f8c70c152a8927913ac2e9778be"
                   },
                   {
                       "path":  "SistemaCotizaciones.exe",
-                      "sha256":  "3ba92614f2d7599446d350635009e16ece429d3038a56aeb4b39fe1d92c17fa9"
+                      "sha256":  "e60600ff7f391a3c873a94a3b65c9978b2fcb3243834933530f251a00077321a"
                   },
                   {
                       "path":  "updater/apply_update.exe",
-                      "sha256":  "d4aefc7744e8a2d13e30d0fe39b3b1d787a858d848a100bfa520f2c211428a16"
+                      "sha256":  "adea156b03e81f4cac2466d1a2c26688a3e99232b66f0e38e785e27f9f7fd2d0"
                   },
                   {
                       "path":  "version.txt",
-                      "sha256":  "41deb4f831a4d02c80b1f65338ae034cf8c827a697163caa721e3e6fb7dfe9fd"
+                      "sha256":  "6e492c17bf8579931347c11f96d09428964d41a1da424c9249761bc2f736a9dc"
                   }
               ],
     "delete":  [
 
                ],
     "mandatory":  false,
-    "notes":  "Release 2.0.9",
-    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_2.0.9.exe",
-    "sha256":  "14A346034B1E09796BF7CDEBA2E01E2DFC3A1F10FB1FF3461385329C3A4136AF"
+    "notes":  "Release 2.0.10",
+    "url":  "https://github.com/zaphatito/CotizadorReleases/releases/download/v2.0.10/Setup_SistemaCotizaciones_2.0.10.exe",
+    "sha256":  "323043A27A69032FE7C38B7F918CCD8A44789533BE8A38404D4100D08DDE2DA6"
 }
