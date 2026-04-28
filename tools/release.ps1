@@ -10,7 +10,7 @@ param(
   [string]$IssPath  = "Output\script inno.iss",
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
   [switch]$Publish,
-  [bool]$Draft = $true,
+  [switch]$NoDraft,
   [switch]$Mandatory,
   [switch]$PruneOpenGLSW
 )
@@ -48,6 +48,8 @@ function Assert-PublishBranch() {
 }
 
 Assert-PublishBranch
+
+$publishAsDraft = -not [bool]$NoDraft
 
 function Normalize-BumpKind([string]$kind) {
   if ($null -eq $kind) { $kind = "" }
@@ -277,9 +279,9 @@ function Upload-GitHubAsset($Release, [string]$Path) {
   $assetName = Split-Path $Path -Leaf
   Remove-GitHubAssetIfExists -Release $Release -AssetName $assetName
 
-  $uploadBase = ([string]$Release.upload_url) -replace '\{\?name,label\}$', ''
+  $uploadBase = ([string]$Release.upload_url) -replace '\{\?name,label\}.*$', ''
   $nameEsc = [System.Uri]::EscapeDataString($assetName)
-  $uploadUri = "$uploadBase?name=$nameEsc"
+  $uploadUri = '{0}?name={1}' -f $uploadBase, $nameEsc
 
   Write-Host "Subiendo asset: $assetName"
   Invoke-RestMethod `
@@ -653,10 +655,10 @@ if ($Publish) {
     -Repo $RepoName `
     -Tag $releaseTag `
     -Name $releaseName `
-    -IsDraft $Draft `
+    -IsDraft $publishAsDraft `
     -Paths $assetPaths | Out-Null
 
-  if ($Draft) {
+  if ($publishAsDraft) {
     Write-Host "GitHub recibio un draft release en $RepoUser/$RepoName. Publicalo cuando lo valides."
   } else {
     Write-Host "GitHub release publicado en $RepoUser/$RepoName."

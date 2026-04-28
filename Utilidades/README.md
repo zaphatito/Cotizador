@@ -29,7 +29,7 @@ $env:GH_TOKEN='github_pat_con_permiso_contents_write_del_repo_de_releases'
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch -Publish
 
 # publicar directamente, sin draft
-powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch -Publish -Draft:$false
+powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch -Publish -NoDraft
 
 # El codigo puede estar privado en zaphatito/Cotizador.
 # El updater de clientes lee el manifiesto publico desde:
