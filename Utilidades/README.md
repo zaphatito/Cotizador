@@ -25,7 +25,6 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch
 
 # draft release en GitHub Releases publico
-$env:GH_TOKEN='github_pat_con_permiso_contents_write_del_repo_de_releases'
 powershell.exe -ExecutionPolicy Bypass -File "tools/release.ps1" -Bump patch -Publish
 
 # publicar directamente, sin draft

@@ -338,51 +338,85 @@ class UiMixin:
         except Exception:
             self._rec_engine = None
 
-    def _setup_ai_completers(self):
-        if getattr(self, "_ai_prod", None) is not None:
+    def _ensure_ai_search_index(self):
+        idx = getattr(self, "_ai_index", None)
+        if idx is not None:
+            return idx
+
+        from ..db_path import resolve_db_path
+        from ..ai.search_index import LocalSearchIndex
+
+        idx = LocalSearchIndex(resolve_db_path())
+        self._ai_index = idx
+        try:
+            idx.prewarm_async()
+        except Exception:
+            pass
+        return idx
+
+    def _ensure_client_search_index(self):
+        idx = getattr(self, "_client_index", None)
+        if idx is not None:
+            return idx
+
+        from ..db_path import resolve_db_path
+        from ..ai.search_index import LocalSearchIndex
+
+        idx = LocalSearchIndex(resolve_db_path(), auto_create_fts=False)
+        self._client_index = idx
+        return idx
+
+    def _setup_client_completers(self):
+        if getattr(self, "_ai_cli", None) is not None:
             return
 
         try:
-            from ..db_path import resolve_db_path
-            from ..ai.search_index import LocalSearchIndex
             from ..ai.smart_completer import SmartCompleter
 
-            dbp = resolve_db_path()
-            self._ai_index = LocalSearchIndex(dbp)
-            try:
-                self._ai_index.prewarm_async()
-            except Exception:
-                pass
+            idx = self._ensure_client_search_index()
 
-            self._ai_prod = SmartCompleter(
-                self.entry_producto,
-                index=self._ai_index,
-                kind="product",
-                parent=self,
-                debounce_ms=0,
-            )
-            self._ai_prod.picked.connect(self._on_ai_product_picked)
-
-            self._ai_cli = SmartCompleter(self.entry_cliente, index=self._ai_index, kind="client", parent=self)
+            self._ai_cli = SmartCompleter(self.entry_cliente, index=idx, kind="client", parent=self)
             self._ai_cli.picked.connect(self._on_ai_client_picked)
 
-            self._ai_doc = SmartCompleter(self.entry_cedula, index=self._ai_index, kind="client", parent=self)
+            self._ai_doc = SmartCompleter(self.entry_cedula, index=idx, kind="client", parent=self)
             self._ai_doc.picked.connect(self._on_ai_client_picked)
 
-            self._ai_tel = SmartCompleter(self.entry_telefono, index=self._ai_index, kind="client", parent=self)
+            self._ai_tel = SmartCompleter(self.entry_telefono, index=idx, kind="client", parent=self)
             self._ai_tel.picked.connect(self._on_ai_client_picked)
 
-            self._ai_dir = SmartCompleter(self.entry_direccion, index=self._ai_index, kind="client", parent=self)
+            self._ai_dir = SmartCompleter(self.entry_direccion, index=idx, kind="client", parent=self)
             self._ai_dir.picked.connect(self._on_ai_client_picked)
 
-            self._ai_email = SmartCompleter(self.entry_email, index=self._ai_index, kind="client", parent=self)
+            self._ai_email = SmartCompleter(self.entry_email, index=idx, kind="client", parent=self)
             self._ai_email.picked.connect(self._on_ai_client_picked)
-
-            # ✅ al activar AI, pinta preview de recomendaciones si hay
-            self._schedule_refresh_recs_preview()
 
         except Exception:
             return
+
+    def _setup_ai_completers(self):
+        if getattr(self, "_ai_prod", None) is None:
+            try:
+                from ..ai.smart_completer import SmartCompleter
+
+                idx = self._ensure_ai_search_index()
+                self._ai_prod = SmartCompleter(
+                    self.entry_producto,
+                    index=idx,
+                    kind="product",
+                    parent=self,
+                    debounce_ms=0,
+                )
+                self._ai_prod.picked.connect(self._on_ai_product_picked)
+            except Exception:
+                return
+
+        try:
+            self._setup_client_completers()
+        except Exception:
+            pass
+
+        # al activar AI, pinta preview de recomendaciones si hay
+        self._schedule_refresh_recs_preview()
 
     def _center_on_screen(self):
         scr = self.screen()
