@@ -38,16 +38,57 @@ function Get-CurrentGitBranch() {
   return $branch
 }
 
-function Assert-PublishBranch() {
-  if (-not $Publish) { return }
-
-  $branch = Get-CurrentGitBranch
-  if ($branch -ne "main") {
-    throw "Estas en la rama '$branch'. Para publicar instaladores debes hacer merge a prod (main) y ejecutar el release desde main."
+function Invoke-GitStep([string]$Description, [string[]]$Args) {
+  Write-Host ""
+  Write-Host "==> $Description"
+  & git -C $ProjectRoot @Args
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Description fallo con codigo $LASTEXITCODE"
   }
 }
 
-Assert-PublishBranch
+function Assert-NoTrackedGitChanges([string]$Branch) {
+  $trackedChanges = @(& git -C $ProjectRoot status --porcelain | Where-Object { $_ -notmatch '^\?\? ' })
+  if ($trackedChanges.Count -gt 0) {
+    throw "Hay cambios sin commit en '$Branch'. Haz commit primero; el release solo puede subir y mergear cambios ya versionados."
+  }
+}
+
+function Prepare-PublishBranch() {
+  if (-not $Publish) { return }
+
+  $branch = Get-CurrentGitBranch
+  if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq "HEAD") {
+    throw "No se puede publicar desde un HEAD detached."
+  }
+
+  Assert-NoTrackedGitChanges $branch
+  $script:ReleaseSourceBranch = $branch
+
+  if ($branch -eq "main") {
+    Invoke-GitStep "Subiendo main" @("push", "origin", "main")
+    return
+  }
+
+  Invoke-GitStep "Subiendo rama actual '$branch'" @("push", "-u", "origin", $branch)
+  Invoke-GitStep "Actualizando referencias remotas" @("fetch", "origin")
+  Invoke-GitStep "Cambiando a main" @("switch", "main")
+  Invoke-GitStep "Actualizando main desde origin/main" @("pull", "--ff-only", "origin", "main")
+  Invoke-GitStep "Merge de '$branch' a main" @("merge", "--no-edit", $branch)
+  Invoke-GitStep "Subiendo main con cambios de '$branch'" @("push", "origin", "main")
+}
+
+function Sync-SourceBranchAfterRelease() {
+  if (-not $Publish) { return }
+  if ([string]::IsNullOrWhiteSpace($script:ReleaseSourceBranch)) { return }
+  if ($script:ReleaseSourceBranch -eq "main") { return }
+
+  Invoke-GitStep "Volviendo a '$script:ReleaseSourceBranch'" @("switch", $script:ReleaseSourceBranch)
+  Invoke-GitStep "Sincronizando '$script:ReleaseSourceBranch' con main" @("merge", "--ff-only", "main")
+  Invoke-GitStep "Subiendo '$script:ReleaseSourceBranch' sincronizada" @("push", "origin", $script:ReleaseSourceBranch)
+}
+
+Prepare-PublishBranch
 
 $publishAsDraft = -not [bool]$NoDraft
 
@@ -663,6 +704,11 @@ if ($Publish) {
   } else {
     Write-Host "GitHub release publicado en $RepoUser/$RepoName."
   }
+
+  Invoke-GitStep "Subiendo main con release $next" @("push", "origin", "main")
+  Sync-SourceBranchAfterRelease
 }
 
-Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
+if (-not $Publish) {
+  Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
+}
