@@ -39,12 +39,60 @@ function Get-CurrentGitBranch() {
   return $branch
 }
 
+function Normalize-Answer([string]$Value) {
+  $s = ([string]$Value).Trim().ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($s)) { return "" }
+
+  try {
+    $d = $s.Normalize([System.Text.NormalizationForm]::FormD)
+    $chars = New-Object System.Collections.Generic.List[char]
+    foreach ($ch in $d.ToCharArray()) {
+      if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark) {
+        $chars.Add($ch)
+      }
+    }
+    return (-join $chars).Normalize([System.Text.NormalizationForm]::FormC)
+  } catch {
+    return $s
+  }
+}
+
+function Read-YesNo([string]$Question) {
+  while ($true) {
+    $answer = Normalize-Answer (Read-Host $Question)
+
+    if ($answer -in @("s", "si", "y", "yes", "1", "ok", "dale", "continuar")) {
+      return $true
+    }
+
+    if ([string]::IsNullOrWhiteSpace($answer) -or $answer -in @("n", "no", "0", "cancelar", "abortar")) {
+      return $false
+    }
+
+    Write-Host "Respuesta no reconocida. Escribe 'si'/'s' o 'no'/'n'."
+  }
+}
+
 function Assert-PublishBranch() {
   if (-not $Publish) { return }
 
   $branch = Get-CurrentGitBranch
   if ($branch -ne "main") {
-    throw "Estas en la rama '$branch'. Para publicar instaladores debes hacer merge a prod (main) y ejecutar el release desde main."
+    Write-Host "Estas en la rama '$branch'. Para publicar instaladores se debe ejecutar desde main."
+    $switchToMain = Read-YesNo "Quieres cambiar a main y continuar? [s/N]"
+    if (-not $switchToMain) {
+      throw "Release abortado por el usuario. Rama actual: '$branch'."
+    }
+
+    & git -C $ProjectRoot switch main
+    if ($LASTEXITCODE -ne 0) {
+      throw "No se pudo cambiar a main. Revisa cambios pendientes o conflictos antes de publicar."
+    }
+
+    $branch = Get-CurrentGitBranch
+    if ($branch -ne "main") {
+      throw "No se pudo confirmar la rama main. Rama actual: '$branch'."
+    }
   }
 }
 
