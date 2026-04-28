@@ -131,6 +131,6 @@
                ],
     "mandatory":  false,
     "notes":  "Release 2.0.10",
-    "url":  "https://github.com/zaphatito/CotizadorReleases/releases/download/v2.0.10/Setup_SistemaCotizaciones_2.0.10.exe",
+    "url":  "https://media.githubusercontent.com/media/zaphatito/Cotizador/main/Output/Setup_SistemaCotizaciones_2.0.10.exe",
     "sha256":  "323043A27A69032FE7C38B7F918CCD8A44789533BE8A38404D4100D08DDE2DA6"
 }
