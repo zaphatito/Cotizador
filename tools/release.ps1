@@ -9,6 +9,7 @@ param(
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
   [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
+  [string]$ReleaseManifestPath = "Output\cotizador.json",
   [switch]$Publish,
   [switch]$NoDraft,
   [switch]$Mandatory,
@@ -583,8 +584,14 @@ $deleteList = @($deleteList | Sort-Object -Unique)
 $isMajorRelease = $normalizedBump -eq "major"
 $isDeltaManifest = $hasPrevUpdate -and -not $isMajorRelease
 
-# 6.4 manifest cotizador.json
-$manifestPath = Join-Path $ProjectRoot "config\cotizador.json"
+# 6.4 manifest cotizador.json para GitHub Releases.
+# No escribir config\cotizador.json: ese archivo queda como puente legacy 2.0.10
+# para clientes viejos que aun consultan raw.githubusercontent.com.
+$manifestPath = Join-Path $ProjectRoot $ReleaseManifestPath
+$manifestDir = Split-Path $manifestPath -Parent
+if ($manifestDir -and !(Test-Path $manifestDir)) {
+  New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+}
 $archiveName = "SistemaCotizaciones_Update_{0}.zip" -f $next
 $archiveLocal = Join-Path $ProjectRoot "Output\$archiveName"
 $archiveSha = ""
@@ -612,7 +619,8 @@ $manifestObj["url"] = $exeUrl
 $manifestObj["sha256"] = $setupSha
 Set-ContentUtf8NoBOM -Path $manifestPath -Text ($manifestObj | ConvertTo-Json -Depth 10)
 
-Write-Host "Manifest actualizado: $manifestPath"
+Write-Host "Manifest de release actualizado: $manifestPath"
+Write-Host "Manifest legacy conservado: config\cotizador.json"
 Write-Host "  type   = $manifestType"
 if ($manifestType -eq "archive") {
   Write-Host "  files  = $($filesList.Count) (cambiados de $($newEntries.Count))"
@@ -628,6 +636,8 @@ if ($manifestType -eq "archive") {
 }
 
 # 7) commit source metadata only. Release binaries go to GitHub Releases.
+# El manifest de release se genera en Output\cotizador.json y se sube como asset.
+# No se commitea config\cotizador.json para no mover el puente legacy de 2.0.10.
 
 $filesToAdd = @(
   "src/version.py",
@@ -636,8 +646,7 @@ $filesToAdd = @(
   "tools/apply_update.py",
   $IssPath,
   "changelog.txt",                 # ✅ se commitea con versión/fecha actualizadas
-  "config/config.json",
-  "config/cotizador.json"
+  "config/config.json"
 )
 
 git -C $ProjectRoot add -- $filesToAdd
