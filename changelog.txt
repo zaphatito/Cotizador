@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.12
-Fecha: 2026-04-28
+Versión: 2.0.13
+Fecha: 2026-04-29
 
 Resumen
 - Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
