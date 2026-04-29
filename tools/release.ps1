@@ -39,57 +39,64 @@ function Get-CurrentGitBranch() {
   return $branch
 }
 
-function Invoke-GitStep([string]$Description, [string[]]$Args) {
-  Write-Host ""
-  Write-Host "==> $Description"
-  & git -C $ProjectRoot @Args
-  if ($LASTEXITCODE -ne 0) {
-    throw "$Description fallo con codigo $LASTEXITCODE"
+function Normalize-Answer([string]$Value) {
+  $s = ([string]$Value).Trim().ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($s)) { return "" }
+
+  try {
+    $d = $s.Normalize([System.Text.NormalizationForm]::FormD)
+    $chars = New-Object System.Collections.Generic.List[char]
+    foreach ($ch in $d.ToCharArray()) {
+      if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark) {
+        $chars.Add($ch)
+      }
+    }
+    return (-join $chars).Normalize([System.Text.NormalizationForm]::FormC)
+  } catch {
+    return $s
   }
 }
 
-function Assert-NoTrackedGitChanges([string]$Branch) {
-  $trackedChanges = @(& git -C $ProjectRoot status --porcelain | Where-Object { $_ -notmatch '^\?\? ' })
-  if ($trackedChanges.Count -gt 0) {
-    throw "Hay cambios sin commit en '$Branch'. Haz commit primero; el release solo puede subir y mergear cambios ya versionados."
+function Read-YesNo([string]$Question) {
+  while ($true) {
+    $answer = Normalize-Answer (Read-Host $Question)
+
+    if ($answer -in @("s", "si", "y", "yes", "1", "ok", "dale", "continuar")) {
+      return $true
+    }
+
+    if ([string]::IsNullOrWhiteSpace($answer) -or $answer -in @("n", "no", "0", "cancelar", "abortar")) {
+      return $false
+    }
+
+    Write-Host "Respuesta no reconocida. Escribe 'si'/'s' o 'no'/'n'."
   }
 }
 
-function Prepare-PublishBranch() {
+function Assert-PublishBranch() {
   if (-not $Publish) { return }
 
   $branch = Get-CurrentGitBranch
-  if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq "HEAD") {
-    throw "No se puede publicar desde un HEAD detached."
+  if ($branch -ne "main") {
+    Write-Host "Estas en la rama '$branch'. Para publicar instaladores se debe ejecutar desde main."
+    $switchToMain = Read-YesNo "Quieres cambiar a main y continuar? [s/N]"
+    if (-not $switchToMain) {
+      throw "Release abortado por el usuario. Rama actual: '$branch'."
+    }
+
+    & git -C $ProjectRoot switch main
+    if ($LASTEXITCODE -ne 0) {
+      throw "No se pudo cambiar a main. Revisa cambios pendientes o conflictos antes de publicar."
+    }
+
+    $branch = Get-CurrentGitBranch
+    if ($branch -ne "main") {
+      throw "No se pudo confirmar la rama main. Rama actual: '$branch'."
+    }
   }
-
-  Assert-NoTrackedGitChanges $branch
-  $script:ReleaseSourceBranch = $branch
-
-  if ($branch -eq "main") {
-    Invoke-GitStep "Subiendo main" @("push", "origin", "main")
-    return
-  }
-
-  Invoke-GitStep "Subiendo rama actual '$branch'" @("push", "-u", "origin", $branch)
-  Invoke-GitStep "Actualizando referencias remotas" @("fetch", "origin")
-  Invoke-GitStep "Cambiando a main" @("switch", "main")
-  Invoke-GitStep "Actualizando main desde origin/main" @("pull", "--ff-only", "origin", "main")
-  Invoke-GitStep "Merge de '$branch' a main" @("merge", "--no-edit", $branch)
-  Invoke-GitStep "Subiendo main con cambios de '$branch'" @("push", "origin", "main")
 }
 
-function Sync-SourceBranchAfterRelease() {
-  if (-not $Publish) { return }
-  if ([string]::IsNullOrWhiteSpace($script:ReleaseSourceBranch)) { return }
-  if ($script:ReleaseSourceBranch -eq "main") { return }
-
-  Invoke-GitStep "Volviendo a '$script:ReleaseSourceBranch'" @("switch", $script:ReleaseSourceBranch)
-  Invoke-GitStep "Sincronizando '$script:ReleaseSourceBranch' con main" @("merge", "--ff-only", "main")
-  Invoke-GitStep "Subiendo '$script:ReleaseSourceBranch' sincronizada" @("push", "origin", $script:ReleaseSourceBranch)
-}
-
-Prepare-PublishBranch
+Assert-PublishBranch
 
 $publishAsDraft = -not [bool]$NoDraft
 
@@ -713,11 +720,6 @@ if ($Publish) {
   } else {
     Write-Host "GitHub release publicado en $RepoUser/$RepoName."
   }
-
-  Invoke-GitStep "Subiendo main con release $next" @("push", "origin", "main")
-  Sync-SourceBranchAfterRelease
 }
 
-if (-not $Publish) {
-  Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
-}
+Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
