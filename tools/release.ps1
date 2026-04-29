@@ -60,7 +60,12 @@ function Assert-NoTrackedGitChanges([string]$Context) {
   }
 }
 
-function Prepare-PublishBranch() {
+function Test-OriginBranchExists([string]$Branch) {
+  & git -C $ProjectRoot rev-parse --verify --quiet "origin/$Branch" | Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Prepare-ReleaseOnMain() {
   if (-not $Publish) { return }
 
   $branch = Get-CurrentGitBranch
@@ -78,14 +83,16 @@ function Prepare-PublishBranch() {
     return
   }
 
-  Invoke-GitStep -Description "Actualizando main antes de integrar en '$branch'" -GitArgs @("switch", "main")
+  if (Test-OriginBranchExists -Branch $branch) {
+    Invoke-GitStep -Description "Actualizando '$branch' desde origin/$branch" -GitArgs @("pull", "--ff-only", "origin", $branch)
+  }
+  Invoke-GitStep -Description "Subiendo '$branch' antes de integrarlo a main" -GitArgs @("push", "-u", "origin", $branch)
+  Invoke-GitStep -Description "Cambiando a main para preparar release desde main" -GitArgs @("switch", "main")
   Invoke-GitStep -Description "Actualizando main desde origin/main" -GitArgs @("pull", "--ff-only", "origin", "main")
-  Invoke-GitStep -Description "Volviendo a '$branch'" -GitArgs @("switch", $branch)
-  Invoke-GitStep -Description "Integrando main en '$branch' antes del release" -GitArgs @("merge", "--no-edit", "main")
-  Invoke-GitStep -Description "Subiendo '$branch' antes del release" -GitArgs @("push", "-u", "origin", $branch)
+  Invoke-GitStep -Description "Integrando '$branch' en main antes del release" -GitArgs @("merge", "--no-edit", $branch)
 }
 
-function Sync-ReleaseBranchToMain([string]$Version) {
+function Publish-MainReleaseAndSyncSource([string]$Version) {
   if (-not $Publish) { return }
 
   $sourceBranch = [string]$script:ReleaseSourceBranch
@@ -93,20 +100,24 @@ function Sync-ReleaseBranchToMain([string]$Version) {
     $sourceBranch = Get-CurrentGitBranch
   }
 
+  $currentBranch = Get-CurrentGitBranch
+  if ($currentBranch -ne "main") {
+    throw "El release final debe publicarse desde main, pero la rama actual es '$currentBranch'."
+  }
+
+  Invoke-GitStep -Description "Subiendo main con release $Version" -GitArgs @("push", "origin", "main")
+
   if ($sourceBranch -eq "main") {
-    Invoke-GitStep -Description "Subiendo main con release $Version" -GitArgs @("push", "origin", "main")
     return
   }
 
-  Invoke-GitStep -Description "Subiendo '$sourceBranch' con release $Version" -GitArgs @("push", "origin", $sourceBranch)
-  Invoke-GitStep -Description "Cambiando a main para integrar release $Version" -GitArgs @("switch", "main")
-  Invoke-GitStep -Description "Actualizando main desde origin/main" -GitArgs @("pull", "--ff-only", "origin", "main")
-  Invoke-GitStep -Description "Merge de '$sourceBranch' a main" -GitArgs @("merge", "--no-edit", $sourceBranch)
-  Invoke-GitStep -Description "Subiendo main con release $Version" -GitArgs @("push", "origin", "main")
-  Invoke-GitStep -Description "Volviendo a '$sourceBranch'" -GitArgs @("switch", $sourceBranch)
+  Invoke-GitStep -Description "Volviendo a '$sourceBranch' para sincronizar release $Version" -GitArgs @("switch", $sourceBranch)
+  Invoke-GitStep -Description "Sincronizando '$sourceBranch' con main release $Version" -GitArgs @("merge", "--no-edit", "main")
+  Invoke-GitStep -Description "Subiendo '$sourceBranch' sincronizado con release $Version" -GitArgs @("push", "origin", $sourceBranch)
+  Invoke-GitStep -Description "Volviendo a main para publicar assets del release $Version" -GitArgs @("switch", "main")
 }
 
-Prepare-PublishBranch
+Prepare-ReleaseOnMain
 
 $publishAsDraft = -not [bool]$NoDraft
 
@@ -713,7 +724,7 @@ git -C $ProjectRoot commit -m ("Release {0}: {1}" -f $next, $commitMode)
 
 # 8) publish GitHub Release assets when requested.
 if ($Publish) {
-  Sync-ReleaseBranchToMain -Version $next
+  Publish-MainReleaseAndSyncSource -Version $next
 
   $assetPaths = @($manifestPath, $setupLocal)
   if ($manifestType -eq "archive") { $assetPaths += $archiveLocal }
@@ -735,7 +746,7 @@ if ($Publish) {
 }
 
 if ($Publish) {
-  Write-Host "Listo. Release $next publicado y main sincronizado."
+  Write-Host "Listo. Release $next publicado desde main y rama origen sincronizada."
 } else {
   Write-Host ("Listo. Haz: git -C `"{0}`" push origin main" -f $ProjectRoot)
 }
