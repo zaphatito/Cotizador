@@ -1,4 +1,5 @@
 import os
+import unicodedata
 import pandas as pd
 
 from .utils import to_float, nz
@@ -8,7 +9,9 @@ _HEADER_TRY_ORDER = [4, 0, 1, 2, 3, 5]
 
 
 def _norm_header(x) -> str:
-    return str(x or "").strip().lower()
+    t = unicodedata.normalize("NFD", str(x or ""))
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+    return t.strip().lower()
 
 
 def _pick_sheet_name(xls: pd.ExcelFile, desired_index: int, name_candidates: list[str]) -> str:
@@ -75,9 +78,16 @@ def _parse_price_type_id(v, default: int = 1) -> int:
         return int(default)
 
 
-def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, required_tokens: list[str]) -> pd.DataFrame:
-    best_df = None
+def _read_sheet_with_header_fallback(
+    xls: pd.ExcelFile,
+    sheet_name: str,
+    required_tokens: list[str],
+    *,
+    sheet_label: str,
+) -> pd.DataFrame:
     best_score = -1
+    saw_content = False
+    min_score = max(1, len(required_tokens) // 2)
 
     for h in _HEADER_TRY_ORDER:
         try:
@@ -85,11 +95,17 @@ def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, require
         except Exception:
             continue
 
-        if df is None or df.empty:
+        if df is None:
             continue
 
         df = df.dropna(how="all")
-        cols_lower = {_norm_header(c): c for c in df.columns}
+        cols_lower = {
+            _norm_header(c): c
+            for c in df.columns
+            if _norm_header(c) and not _norm_header(c).startswith("unnamed")
+        }
+        if cols_lower or not df.empty:
+            saw_content = True
 
         score = 0
         for tok in required_tokens:
@@ -99,15 +115,23 @@ def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, require
 
         if score > best_score:
             best_score = score
-            best_df = df
 
-        if score >= max(1, len(required_tokens) // 2):
+        if score >= min_score:
             return df
 
-    if best_df is not None:
-        return best_df
+    if saw_content:
+        expected = ", ".join(required_tokens)
+        raise ValueError(
+            f"Formato invalido en hoja {sheet_label}: no se encontraron columnas esperadas ({expected})."
+        )
 
     return pd.DataFrame()
+
+
+def _raise_missing_columns(sheet_label: str, missing: list[str]) -> None:
+    if missing:
+        cols = ", ".join(missing)
+        raise ValueError(f"Formato invalido en hoja {sheet_label}: faltan columnas requeridas ({cols}).")
 
 
 def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
@@ -127,11 +151,18 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
         xls,
         sheet1,
         required_tokens=["codigo", "nombre", "departamento", "genero", "precio maximo"],
+        sheet_label="Inventario",
     )
-    if df is None or df.empty:
+    if df is None:
         return pd.DataFrame()
 
-    cols_lower = {_norm_header(c): c for c in df.columns}
+    cols_lower = {
+        _norm_header(c): c
+        for c in df.columns
+        if _norm_header(c) and not _norm_header(c).startswith("unnamed")
+    }
+    if df.empty and not cols_lower:
+        return pd.DataFrame()
 
     col_codigo = _find_col(cols_lower, "codigo", "código", "cod")
     col_nombre = _find_col(cols_lower, "nombre", "descripcion", "descripción")
@@ -151,6 +182,25 @@ def _leer_inventario_xlsx(path: str, fuente: str) -> pd.DataFrame:
         "p venta",
         "p_venta",
     )
+    _raise_missing_columns(
+        "Inventario",
+        [
+            label
+            for label, col in (
+                ("Codigo", col_codigo),
+                ("Nombre", col_nombre),
+                ("Departamento", col_depto),
+                ("Genero", col_genero),
+                ("Cantidad Disponible", col_cant),
+                ("Precio Maximo", col_p_max),
+                ("Precio Minimo", col_p_min),
+                ("Precio Oferta", col_p_oferta),
+            )
+            if col is None
+        ],
+    )
+    if df.empty:
+        return pd.DataFrame()
 
     records: list[dict] = []
 

@@ -74,6 +74,9 @@ def upsert_presentations_snapshot(
     Compat:
       REQUIERE_BOTELLA
     """
+    if replace_current:
+        con.execute("DELETE FROM presentations_current")
+
     if df is None or df.empty:
         return
 
@@ -137,9 +140,6 @@ def upsert_presentations_snapshot(
             )
     )
 
-    if replace_current:
-        con.execute("DELETE FROM presentations_current")
-
     if rows_hist:
         con.executemany(
             """
@@ -198,6 +198,9 @@ def upsert_presentacion_prod_snapshot(
     Espera columnas:
       COD_PRODUCTO, COD_PRESENTACION, DEPARTAMENTO, GENERO, CANTIDAD
     """
+    if replace_current:
+        con.execute("DELETE FROM presentacion_prod_current")
+
     if df is None or df.empty:
         return
 
@@ -239,9 +242,6 @@ def upsert_presentacion_prod_snapshot(
                 now,
             )
         )
-
-    if replace_current:
-        con.execute("DELETE FROM presentacion_prod_current")
 
     if rows_hist:
         con.executemany(

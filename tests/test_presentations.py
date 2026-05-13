@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 import src.presentations as pres
 
@@ -65,6 +66,68 @@ def test_read_sheet2_presentations_columns(monkeypatch):
     ]
     assert out.loc[0, "p_max"] == 10
     assert out.loc[1, "p_oferta"] == 10
+
+
+def test_read_sheet2_presentations_empty_sheet_returns_empty(monkeypatch):
+    class DummyXls:
+        sheet_names = ["Inventario", "Presentaciones"]
+
+    def fake_excel_file(path, engine=None):
+        return DummyXls()
+
+    def fake_read_excel(xls, sheet_name=None, header=0):
+        return pd.DataFrame(
+            columns=[
+                "Codigo",
+                "Departamento",
+                "Genero",
+                "Nombre",
+                "Descripcion",
+                "Precio Minimo",
+                "Precio Oferta",
+                "Precio Maximo",
+            ]
+        )
+
+    monkeypatch.setattr(pres.pd, "ExcelFile", fake_excel_file)
+    monkeypatch.setattr(pres.pd, "read_excel", fake_read_excel)
+
+    out = pres.read_sheet2_presentations("fake.xlsx")
+    assert out.empty
+
+
+def test_read_sheet2_presentations_bad_columns_raises(monkeypatch):
+    class DummyXls:
+        sheet_names = ["Inventario", "Presentaciones"]
+
+    def fake_excel_file(path, engine=None):
+        return DummyXls()
+
+    def fake_read_excel(xls, sheet_name=None, header=0):
+        return pd.DataFrame({"Otra Columna": ["x"], "Dato": [1]})
+
+    monkeypatch.setattr(pres.pd, "ExcelFile", fake_excel_file)
+    monkeypatch.setattr(pres.pd, "read_excel", fake_read_excel)
+
+    with pytest.raises(ValueError, match="Formato invalido"):
+        pres.read_sheet2_presentations("fake.xlsx")
+
+
+def test_read_sheet2_presentations_partial_empty_headers_raise(monkeypatch):
+    class DummyXls:
+        sheet_names = ["Inventario", "Presentaciones"]
+
+    def fake_excel_file(path, engine=None):
+        return DummyXls()
+
+    def fake_read_excel(xls, sheet_name=None, header=0):
+        return pd.DataFrame(columns=["Codigo", "Departamento"])
+
+    monkeypatch.setattr(pres.pd, "ExcelFile", fake_excel_file)
+    monkeypatch.setattr(pres.pd, "read_excel", fake_read_excel)
+
+    with pytest.raises(ValueError, match="faltan columnas"):
+        pres.read_sheet2_presentations("fake.xlsx")
 
 
 def test_read_sheet3_presentacion_prod(monkeypatch):

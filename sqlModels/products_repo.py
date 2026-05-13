@@ -86,6 +86,7 @@ def upsert_products_snapshot(
     *,
     replace_current: bool = False,
     replace_sources: bool = False,
+    replace_source: str | None = None,
 ) -> None:
     """
     Espera columnas de producto (estructura excel):
@@ -97,84 +98,88 @@ def upsert_products_snapshot(
     Modos:
       - replace_current=True: reemplaza todo el current por este snapshot.
       - replace_sources=True: reemplaza solo las filas current de las fuentes
-        presentes en este snapshot.
+        presentes en este snapshot. Si el snapshot viene vacio, replace_source
+        permite borrar la fuente importada.
     """
-    if df is None or df.empty:
-        return
-
     now = now_iso()
 
     rows_hist: list[tuple] = []
     rows_cur: list[tuple] = []
     fuentes_snapshot: set[str] = set()
 
-    for _, r in df.iterrows():
-        codigo = _to_text(r.get("CODIGO") or r.get("codigo") or r.get("id"))
-        if not codigo:
-            continue
+    if df is not None:
+        for _, r in df.iterrows():
+            codigo = _to_text(r.get("CODIGO") or r.get("codigo") or r.get("id"))
+            if not codigo:
+                continue
 
-        nombre = _to_text(r.get("NOMBRE") or r.get("nombre"))
-        depto = _to_text(r.get("DEPARTAMENTO") or r.get("departamento") or r.get("categoria"))
-        genero = _to_text(r.get("GENERO") or r.get("genero"))
+            nombre = _to_text(r.get("NOMBRE") or r.get("nombre"))
+            depto = _to_text(r.get("DEPARTAMENTO") or r.get("departamento") or r.get("categoria"))
+            genero = _to_text(r.get("GENERO") or r.get("genero"))
 
-        cantidad = _to_float(r.get("CANTIDAD_DISPONIBLE") if "CANTIDAD_DISPONIBLE" in r else r.get("cantidad_disponible"), 0.0)
-        p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("p_max"), 0.0)
-        p_min = _to_float(r.get("P_MIN") if "P_MIN" in r else r.get("p_min"), 0.0)
-        p_oferta = _to_float(r.get("P_OFERTA") if "P_OFERTA" in r else r.get("p_oferta"), 0.0)
-        precio_venta = _to_price_id(
-            r.get("PRECIO_VENTA") if "PRECIO_VENTA" in r else r.get("precio_venta"),
-            1,
-        )
-
-        fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
-        fuentes_snapshot.add(fuente)
-
-        depto_u = depto.upper()
-        categoria = depto_u
-
-        ml = _to_text(r.get("ml"))
-
-        rows_hist.append(
-            (
-                int(import_id),
-                codigo,
-                codigo,
-                nombre,
-                categoria,
-                depto,
-                genero,
-                ml,
-                float(cantidad),
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                int(precio_venta),
-                fuente,
+            cantidad = _to_float(r.get("CANTIDAD_DISPONIBLE") if "CANTIDAD_DISPONIBLE" in r else r.get("cantidad_disponible"), 0.0)
+            p_max = _to_float(r.get("P_MAX") if "P_MAX" in r else r.get("p_max"), 0.0)
+            p_min = _to_float(r.get("P_MIN") if "P_MIN" in r else r.get("p_min"), 0.0)
+            p_oferta = _to_float(r.get("P_OFERTA") if "P_OFERTA" in r else r.get("p_oferta"), 0.0)
+            precio_venta = _to_price_id(
+                r.get("PRECIO_VENTA") if "PRECIO_VENTA" in r else r.get("precio_venta"),
+                1,
             )
-        )
-        rows_cur.append(
-            (
-                codigo,
-                codigo,
-                nombre,
-                categoria,
-                depto,
-                genero,
-                ml,
-                float(cantidad),
-                float(p_max),
-                float(p_min),
-                float(p_oferta),
-                int(precio_venta),
-                fuente,
-                now,
+
+            fuente = _to_text(r.get("__FUENTE") or r.get("__fuente") or r.get("fuente"))
+            fuentes_snapshot.add(fuente)
+
+            depto_u = depto.upper()
+            categoria = depto_u
+
+            ml = _to_text(r.get("ml"))
+
+            rows_hist.append(
+                (
+                    int(import_id),
+                    codigo,
+                    codigo,
+                    nombre,
+                    categoria,
+                    depto,
+                    genero,
+                    ml,
+                    float(cantidad),
+                    float(p_max),
+                    float(p_min),
+                    float(p_oferta),
+                    int(precio_venta),
+                    fuente,
+                )
             )
-        )
+            rows_cur.append(
+                (
+                    codigo,
+                    codigo,
+                    nombre,
+                    categoria,
+                    depto,
+                    genero,
+                    ml,
+                    float(cantidad),
+                    float(p_max),
+                    float(p_min),
+                    float(p_oferta),
+                    int(precio_venta),
+                    fuente,
+                    now,
+                )
+            )
 
     if replace_current:
         con.execute("DELETE FROM products_current")
     elif replace_sources:
+        if replace_source:
+            fuentes_snapshot.add(replace_source)
         _delete_current_products_by_sources(con, fuentes_snapshot)
+
+    if not rows_hist and not rows_cur:
+        return
 
     if rows_hist:
         con.executemany(

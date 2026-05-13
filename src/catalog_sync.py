@@ -219,10 +219,10 @@ def sync_catalog_from_excel_path(con, excel_path: str) -> None:
     # Productos
     need, meta = imports_repo.needs_import(con, "products", excel_path)
     if need:
+        df_prod = _leer_inventario_xlsx(excel_path, os.path.basename(excel_path))
         import_id = imports_repo.create_import(con, "products", excel_path, meta["mtime"], meta["size"], meta["hash"])
         log.info("Import productos (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id)
 
-        df_prod = _leer_inventario_xlsx(excel_path, os.path.basename(excel_path))
         products_repo.upsert_products_snapshot(
             con,
             import_id,
@@ -234,20 +234,20 @@ def sync_catalog_from_excel_path(con, excel_path: str) -> None:
     # Presentaciones
     need2, meta2 = imports_repo.needs_import(con, "presentations", excel_path)
     if need2:
+        df_pres = cargar_presentaciones(excel_path)
         import_id2 = imports_repo.create_import(con, "presentations", excel_path, meta2["mtime"], meta2["size"], meta2["hash"])
         log.info("Import presentaciones (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id2)
 
-        df_pres = cargar_presentaciones(excel_path)
         presentations_repo.upsert_presentations_snapshot(con, import_id2, df_pres, replace_current=True)
         changed_for_rollup = True
 
     # PresentacionesProd (relacion)
     need3, meta3 = imports_repo.needs_import(con, "presentacion_prod", excel_path)
     if need3:
+        df_pres_prod = cargar_presentaciones_prod(excel_path)
         import_id3 = imports_repo.create_import(con, "presentacion_prod", excel_path, meta3["mtime"], meta3["size"], meta3["hash"])
         log.info("Import presentacion_prod (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id3)
 
-        df_pres_prod = cargar_presentaciones_prod(excel_path)
         presentations_repo.upsert_presentacion_prod_snapshot(con, import_id3, df_pres_prod, replace_current=True)
         changed_for_rollup = True
 
@@ -273,34 +273,35 @@ def sync_catalog_from_excel_to_db(con, data_dir: str) -> None:
         if not need:
             continue
 
+        df_prod = _leer_inventario_xlsx(path, os.path.basename(path))
         import_id = imports_repo.create_import(con, "products", path, meta["mtime"], meta["size"], meta["hash"])
         log.info("Import productos: %s (import_id=%s)", os.path.basename(path), import_id)
 
-        df_prod = _leer_inventario_xlsx(path, os.path.basename(path))
         products_repo.upsert_products_snapshot(
             con,
             import_id,
             df_prod,
             replace_sources=True,
+            replace_source=os.path.basename(path),
         )
         changed_for_rollup = True
 
     if os.path.exists(inv_lcdp):
         need2, meta2 = imports_repo.needs_import(con, "presentations", inv_lcdp)
         if need2:
+            df_pres = cargar_presentaciones(inv_lcdp)
             import_id2 = imports_repo.create_import(con, "presentations", inv_lcdp, meta2["mtime"], meta2["size"], meta2["hash"])
             log.info("Import presentaciones: %s (import_id=%s)", os.path.basename(inv_lcdp), import_id2)
 
-            df_pres = cargar_presentaciones(inv_lcdp)
             presentations_repo.upsert_presentations_snapshot(con, import_id2, df_pres, replace_current=True)
             changed_for_rollup = True
 
         need3, meta3 = imports_repo.needs_import(con, "presentacion_prod", inv_lcdp)
         if need3:
+            df_pres_prod = cargar_presentaciones_prod(inv_lcdp)
             import_id3 = imports_repo.create_import(con, "presentacion_prod", inv_lcdp, meta3["mtime"], meta3["size"], meta3["hash"])
             log.info("Import presentacion_prod: %s (import_id=%s)", os.path.basename(inv_lcdp), import_id3)
 
-            df_pres_prod = cargar_presentaciones_prod(inv_lcdp)
             presentations_repo.upsert_presentacion_prod_snapshot(con, import_id3, df_pres_prod, replace_current=True)
             changed_for_rollup = True
 

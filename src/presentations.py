@@ -51,9 +51,16 @@ def _find_col(cols_lower: dict[str, str], *cands: str) -> str | None:
     return None
 
 
-def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, required_tokens: list[str]) -> pd.DataFrame:
-    best_df = None
+def _read_sheet_with_header_fallback(
+    xls: pd.ExcelFile,
+    sheet_name: str,
+    required_tokens: list[str],
+    *,
+    sheet_label: str,
+) -> pd.DataFrame:
     best_score = -1
+    saw_content = False
+    min_score = max(1, len(required_tokens) // 2)
 
     for h in _HEADER_TRY_ORDER:
         try:
@@ -61,11 +68,17 @@ def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, require
         except Exception:
             continue
 
-        if df is None or df.empty:
+        if df is None:
             continue
 
         df = df.dropna(how="all")
-        cols_lower = {_norm_txt(c): c for c in df.columns}
+        cols_lower = {
+            _norm_txt(c): c
+            for c in df.columns
+            if _norm_txt(c) and not _norm_txt(c).startswith("unnamed")
+        }
+        if cols_lower or not df.empty:
+            saw_content = True
 
         score = 0
         for tok in required_tokens:
@@ -75,15 +88,23 @@ def _read_sheet_with_header_fallback(xls: pd.ExcelFile, sheet_name: str, require
 
         if score > best_score:
             best_score = score
-            best_df = df
 
-        if score >= max(1, len(required_tokens) // 2):
+        if score >= min_score:
             return df
 
-    if best_df is not None:
-        return best_df
+    if saw_content:
+        expected = ", ".join(required_tokens)
+        raise ValueError(
+            f"Formato invalido en hoja {sheet_label}: no se encontraron columnas esperadas ({expected})."
+        )
 
     return pd.DataFrame()
+
+
+def _raise_missing_columns(sheet_label: str, missing: list[str]) -> None:
+    if missing:
+        cols = ", ".join(missing)
+        raise ValueError(f"Formato invalido en hoja {sheet_label}: faltan columnas requeridas ({cols}).")
 
 
 def _norm_codigo_val(v) -> str:
@@ -132,11 +153,18 @@ def read_sheet2_presentations(path_xlsx: str) -> pd.DataFrame:
         xls,
         sheet2,
         required_tokens=["codigo", "departamento", "genero", "precio maximo"],
+        sheet_label="Presentaciones",
     )
-    if df is None or df.empty:
+    if df is None:
         return pd.DataFrame()
 
-    cols_lower = {_norm_txt(c): c for c in df.columns}
+    cols_lower = {
+        _norm_txt(c): c
+        for c in df.columns
+        if _norm_txt(c) and not _norm_txt(c).startswith("unnamed")
+    }
+    if df.empty and not cols_lower:
+        return pd.DataFrame()
 
     col_codigo = _find_col(cols_lower, "codigo", "código", "cod")
     col_depto = _find_col(cols_lower, "departamento", "categoria", "categoría")
@@ -147,6 +175,24 @@ def read_sheet2_presentations(path_xlsx: str) -> pd.DataFrame:
     col_p_max = _find_col(cols_lower, "precio maximo", "precio máximo")
     col_p_min = _find_col(cols_lower, "precio minimo", "precio mínimo")
     col_p_oferta = _find_col(cols_lower, "precio oferta", "oferta")
+    _raise_missing_columns(
+        "Presentaciones",
+        [
+            label
+            for label, col in (
+                ("Codigo", col_codigo),
+                ("Departamento", col_depto),
+                ("Genero", col_genero),
+                ("Nombre", col_nombre),
+                ("Precio Maximo", col_p_max),
+                ("Precio Minimo", col_p_min),
+                ("Precio Oferta", col_p_oferta),
+            )
+            if col is None
+        ],
+    )
+    if df.empty:
+        return pd.DataFrame()
 
     out_rows: list[dict] = []
     for _, row in df.iterrows():
@@ -213,17 +259,40 @@ def read_sheet3_presentacion_prod(path_xlsx: str) -> pd.DataFrame:
         xls,
         sheet3,
         required_tokens=["cod producto", "cod presentacion", "cantidad"],
+        sheet_label="PresentacionesProd",
     )
-    if df is None or df.empty:
+    if df is None:
         return pd.DataFrame()
 
-    cols_lower = {_norm_txt(c): c for c in df.columns}
+    cols_lower = {
+        _norm_txt(c): c
+        for c in df.columns
+        if _norm_txt(c) and not _norm_txt(c).startswith("unnamed")
+    }
+    if df.empty and not cols_lower:
+        return pd.DataFrame()
 
     col_cod_prod = _find_col(cols_lower, "cod producto", "codigo producto", "producto", "cod_prod")
     col_cod_pres = _find_col(cols_lower, "cod presentacion", "codigo presentacion", "presentacion", "cod_pres")
     col_depto = _find_col(cols_lower, "departamento", "categoria", "categoría")
     col_genero = _find_col(cols_lower, "genero", "género")
     col_cantidad = _find_col(cols_lower, "cantidad", "cant")
+    _raise_missing_columns(
+        "PresentacionesProd",
+        [
+            label
+            for label, col in (
+                ("Cod Producto", col_cod_prod),
+                ("Cod Presentacion", col_cod_pres),
+                ("Departamento", col_depto),
+                ("Genero", col_genero),
+                ("Cantidad", col_cantidad),
+            )
+            if col is None
+        ],
+    )
+    if df.empty:
+        return pd.DataFrame()
 
     out_rows: list[dict] = []
     for _, row in df.iterrows():
@@ -346,11 +415,15 @@ def cargar_presentaciones(path_xlsx: str) -> pd.DataFrame:
                 "P_MAX": float(p_max),
                 "P_MIN": float(p_min),
                 "P_OFERTA": float(p_oferta),
+                "PRECIO_PRESENT": float(p_max),
                 "REQUIERE_BOTELLA": bool(req_bot),
             }
         )
 
-    return pd.DataFrame(out)
+    df_out = pd.DataFrame(out)
+    if not df_out.empty and "REQUIERE_BOTELLA" in df_out.columns:
+        df_out["REQUIERE_BOTELLA"] = df_out["REQUIERE_BOTELLA"].astype(object)
+    return df_out
 
 
 def cargar_presentaciones_prod(path_xlsx: str) -> pd.DataFrame:
