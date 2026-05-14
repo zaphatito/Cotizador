@@ -289,10 +289,14 @@ class SmartCompleter(QObject):
             for r in rows or []:
                 cli = str(r.get("cliente") or "").strip()
                 doc = str(r.get("cedula") or "").strip()
+                tipo = str(r.get("tipo_documento") or "").strip().upper()
                 tel = str(r.get("telefono") or "").strip()
                 addr = str(r.get("direccion") or "").strip()
                 mail = str(r.get("email") or "").strip()
-                title = " - ".join([x for x in [cli, doc, tel, addr, mail] if x]).strip()
+                doc_label = doc
+                if tipo and doc and not doc.upper().startswith(f"{tipo}-"):
+                    doc_label = f"{tipo}-{doc}"
+                title = " - ".join([x for x in [cli, doc_label, tel, addr, mail] if x]).strip()
                 subtitle = ""
                 items.append(SuggestItem(title=title, subtitle=subtitle, payload=dict(r)))
 

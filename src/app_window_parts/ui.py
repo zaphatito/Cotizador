@@ -46,6 +46,18 @@ from sqlModels.quotes_repo import (
 )
 
 
+class _DocTypeComboBox(QComboBox):
+    def wheelEvent(self, event):
+        try:
+            view = self.view()
+            if view is not None and view.isVisible():
+                super().wheelEvent(event)
+                return
+        except Exception:
+            pass
+        event.accept()
+
+
 _DOC_REGEX_BY_COUNTRY: dict[str, str] = {
     # VE: V/E/J/P/G
     "VENEZUELA": doc_regex_for_country("VE"),
@@ -235,6 +247,20 @@ class UiMixin:
                 doc = body
         elif doc_type and doc.upper().startswith(f"{doc_type}-"):
             doc = doc[len(doc_type) + 1 :].strip()
+
+        if not doc_type:
+            current_doc_type = self._selected_doc_type()
+            if current_doc_type:
+                try:
+                    ok_current, _msg_current = validate_document_for_type(
+                        COUNTRY_CODE,
+                        current_doc_type,
+                        doc,
+                    )
+                except Exception:
+                    ok_current = False
+                if ok_current:
+                    doc_type = current_doc_type
 
         doc_type = self._resolve_doc_type_for_form(doc, doc_type)
 
@@ -1508,7 +1534,7 @@ class UiMixin:
         self.entry_telefono = QLineEdit()
         self.entry_direccion = QLineEdit()
         self.entry_email = QLineEdit()
-        self.combo_tipo_documento = QComboBox()
+        self.combo_tipo_documento = _DocTypeComboBox()
         self.entry_cliente.setClearButtonEnabled(True)
         self.entry_cedula.setClearButtonEnabled(True)
         self.entry_telefono.setClearButtonEnabled(True)

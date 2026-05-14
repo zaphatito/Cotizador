@@ -7,6 +7,7 @@ from src.ai.search_index import (
     _FTS_PRODUCTS,
     _SEARCH_CACHE_TABLE,
     ensure_ai_schema,
+    rebuild_clients_index,
 )
 
 
@@ -282,3 +283,76 @@ def test_search_clients_hides_when_query_has_no_real_match(tmp_path):
     idx = LocalSearchIndex(db_path)
     rows = idx.search_clients("qqqzxyw-no-match", limit=10)
     assert rows == []
+
+
+def test_search_clients_preserves_document_type_for_ambiguous_paraguay_number(tmp_path):
+    db_path = str(tmp_path / "search_clients_doc_type_py.sqlite3")
+    con = connect(db_path)
+    ensure_schema(con)
+    with tx(con):
+        con.execute(
+            """
+            INSERT INTO settings(key, value) VALUES('country', 'PARAGUAY')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO clients(
+                country_code, tipo_documento, documento, documento_norm,
+                nombre, telefono, direccion, email,
+                source_quote_id, source_created_at
+            )
+            VALUES('PY','RUC','1234567','1234567',
+                   'Empresa RUC','0981123456','Av Test','ruc@example.com',
+                   NULL,'2026-02-24T10:00:00')
+            """
+        )
+        rebuild_clients_index(con)
+    con.close()
+
+    idx = LocalSearchIndex(db_path)
+    rows = idx.search_clients("Empresa RUC", limit=10)
+    hit = next(r for r in rows if str(r.get("cliente") or "") == "Empresa RUC")
+    assert str(hit.get("country_code") or "") == "PY"
+    assert str(hit.get("tipo_documento") or "") == "RUC"
+
+
+def test_search_clients_keeps_same_number_clients_separate_by_document_type(tmp_path):
+    db_path = str(tmp_path / "search_clients_same_doc_different_type.sqlite3")
+    con = connect(db_path)
+    ensure_schema(con)
+    with tx(con):
+        con.execute(
+            """
+            INSERT INTO settings(key, value) VALUES('country', 'PARAGUAY')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        con.executemany(
+            """
+            INSERT INTO clients(
+                country_code, tipo_documento, documento, documento_norm,
+                nombre, telefono, direccion, email,
+                source_quote_id, source_created_at
+            )
+            VALUES('PY', ?, '7654321', '7654321',
+                   'Cliente Mismo Numero','0981123456','Av Test','same@example.com',
+                   NULL, ?)
+            """,
+            [
+                ("CI", "2026-02-24T10:00:00"),
+                ("RUC", "2026-02-24T11:00:00"),
+            ],
+        )
+    con.close()
+
+    idx = LocalSearchIndex(db_path, auto_create_fts=False)
+    rows = idx.search_clients("7654321", limit=10)
+    tipos = {
+        str(r.get("tipo_documento") or "")
+        for r in rows
+        if str(r.get("cliente") or "") == "Cliente Mismo Numero"
+        and str(r.get("cedula") or "") == "7654321"
+    }
+    assert {"CI", "RUC"}.issubset(tipos)
