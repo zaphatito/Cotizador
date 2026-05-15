@@ -1,4 +1,4 @@
-# src/widgets_parts/quote_history_dialog.py
+﻿# src/widgets_parts/quote_history_dialog.py
 from __future__ import annotations
 
 import os
@@ -57,6 +57,12 @@ from ..ui_theme import (
     normalize_theme_mode,
     set_theme_mode,
 )
+from ..label_printing_service import (
+    ZplEtiqueta,
+    generar_zpl_lote,
+    imprimir_zpl_red,
+    resolve_logo_path_for_company,
+)
 
 from ..app_window import SistemaCotizaciones
 from ..app_window_parts.ticket_actions import generar_ticket_para_cotizacion
@@ -65,16 +71,17 @@ from ..pdfgen import generar_pdf
 from .menu import MainMenuWindow, RatesDialog
 from .rates_history_dialog import RatesHistoryDialog
 from .quote_status_dialog import QuoteStatusDialog
+from .labels_dialog import LabelsDialog
 from .status_colors import bg_for_status, best_text_color_for_bg
 from .status_colors_dialog import StatusColorsDialog
 
-# ✅ NUEVO: dock assistant
+# âœ… NUEVO: dock assistant
 
 log = get_logger(__name__)
 
 
 def center_on_screen(w):
-    """Centra un widget en la pantalla (availableGeometry) donde esté."""
+    """Centra un widget en la pantalla (availableGeometry) donde estÃ©."""
     try:
         screen = w.screen() or QApplication.primaryScreen()
         if not screen:
@@ -242,7 +249,7 @@ class HistoryConfigDialog(QDialog):
     def __init__(self, history_window: "QuoteHistoryWindow"):
         super().__init__(history_window)
         self._history = history_window
-        self.setWindowTitle("Configuración")
+        self.setWindowTitle("ConfiguraciÃ³n")
         self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
@@ -296,20 +303,29 @@ class HistoryConfigDialog(QDialog):
         self.ed_username.setPlaceholderText("Nombre de usuario")
         self.chk_tienda = QCheckBox("Este equipo es tienda")
         self.chk_tienda.setToolTip("Marcado: si. Desmarcado: no.")
+        self.ed_label_printer_ip = QLineEdit()
+        self.ed_label_printer_ip.setPlaceholderText("Ej: 192.168.1.50")
+        self.ed_label_printer_port = QLineEdit()
+        self.ed_label_printer_port.setPlaceholderText("9100")
 
         form.addRow("", self.chk_ai)
-        form.addRow("País:", self.cmb_country)
+        form.addRow("PaÃ­s:", self.cmb_country)
         form.addRow("Tipo de listado:", self.cmb_listing_type)
         form.addRow("", self.chk_allow_no_stock)
         form.addRow("Store ID:", self.ed_store_id)
-        form.addRow("Compañía:", self.cmb_company_type)
+        form.addRow("CompaÃ±Ã­a:", self.cmb_company_type)
         form.addRow("Nombre de usuario:", self.ed_username)
         form.addRow("Tienda:", self.chk_tienda)
+        form.addRow("IP impresora etiquetas:", self.ed_label_printer_ip)
+        form.addRow("Puerto impresora etiquetas:", self.ed_label_printer_port)
 
         row_actions = QHBoxLayout()
+        self.btn_test_label_printer = QPushButton("Probar impresora")
+        self.btn_test_label_printer.clicked.connect(self._test_label_printer)
         self.btn_save_app_values = QPushButton("Guardar valores del sistema")
         self.btn_save_app_values.setProperty("variant", "primary")
         self.btn_save_app_values.clicked.connect(self._save_app_values)
+        row_actions.addWidget(self.btn_test_label_printer)
         row_actions.addStretch(1)
         row_actions.addWidget(self.btn_save_app_values)
         form.addRow(row_actions)
@@ -445,6 +461,8 @@ class HistoryConfigDialog(QDialog):
         company_type = str(APP_CONFIG.get("company_type", ALLOWED_COMPANY_TYPES[0])).strip().upper()
         username = str(APP_CONFIG.get("username", "")).strip()
         tienda = self._parse_optional_bool(APP_CONFIG.get("tienda"))
+        label_printer_ip = "192.168.1.50"
+        label_printer_port = "9100"
 
         con = None
         try:
@@ -459,6 +477,8 @@ class HistoryConfigDialog(QDialog):
             username = get_setting(con, "username", username).strip()
             tienda_default = None if tienda is None else ("1" if tienda else "0")
             tienda = self._parse_optional_bool(get_setting(con, "tienda", tienda_default))
+            label_printer_ip = get_setting(con, "label_printer_ip", label_printer_ip).strip() or "192.168.1.50"
+            label_printer_port = get_setting(con, "label_printer_port", label_printer_port).strip() or "9100"
         except Exception:
             log.exception("No se pudieron cargar los valores protegidos de configuracion.")
         finally:
@@ -474,7 +494,8 @@ class HistoryConfigDialog(QDialog):
         self.ed_store_id.setText(store_id)
         self._set_combo_value(self.cmb_company_type, company_type)
         self.ed_username.setText(username)
-        self.chk_tienda.setCheckState(self._optional_bool_to_check_state(tienda))
+        self.ed_label_printer_ip.setText(label_printer_ip)
+        self.ed_label_printer_port.setText(label_printer_port)
 
     def _load_theme_setting(self):
         mode = "system"
@@ -533,7 +554,7 @@ class HistoryConfigDialog(QDialog):
             return
 
         if str(text or "").strip() != self._ADMIN_PASSWORD:
-            log.warning("Intento de desbloqueo de configuración con clave incorrecta.")
+            log.warning("Intento de desbloqueo de configuraciÃ³n con clave incorrecta.")
             QMessageBox.warning(self, "Clave incorrecta", "La clave ingresada no es valida.")
             return
 
@@ -541,7 +562,7 @@ class HistoryConfigDialog(QDialog):
         self.grp_app_values.setEnabled(True)
         self.btn_unlock_app_values.setEnabled(False)
         self.btn_unlock_app_values.setText("Valores del sistema habilitados")
-        log.info("Se habilitaron los valores protegidos de configuración.")
+        log.info("Se habilitaron los valores protegidos de configuraciÃ³n.")
 
     def _save_app_values(self) -> None:
         allowed_countries = {"PARAGUAY", "PERU", "VENEZUELA"}
@@ -555,22 +576,34 @@ class HistoryConfigDialog(QDialog):
         company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
         username = str(self.ed_username.text() or "").strip()
         tienda = self._check_state_to_optional_bool(self.chk_tienda.checkState())
+        label_printer_ip = str(self.ed_label_printer_ip.text() or "").strip()
+        label_printer_port = str(self.ed_label_printer_port.text() or "").strip()
 
         if country not in allowed_countries:
-            QMessageBox.warning(self, "Validación", "País inválido.")
+            QMessageBox.warning(self, "ValidaciÃ³n", "PaÃ­s invÃ¡lido.")
             return
         if listing_type not in allowed_listing_types:
-            QMessageBox.warning(self, "Validación", "Tipo de listado inválido.")
+            QMessageBox.warning(self, "ValidaciÃ³n", "Tipo de listado invÃ¡lido.")
             return
         if company_type not in allowed_company_types:
-            QMessageBox.warning(self, "Validación", "Compañía inválida.")
+            QMessageBox.warning(self, "ValidaciÃ³n", "CompaÃ±Ã­a invÃ¡lida.")
             return
         if store_id and not re.fullmatch(r"[A-Za-z0-9]+", store_id):
             QMessageBox.warning(
                 self,
-                "Validación",
-                "Store ID inválido. Use solo letras y números.",
+                "ValidaciÃ³n",
+                "Store ID invÃ¡lido. Use solo letras y nÃºmeros.",
             )
+            return
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", label_printer_ip):
+            QMessageBox.warning(self, "ValidaciÃ³n", "IP de impresora invÃ¡lida.")
+            return
+        if not re.fullmatch(r"\d{1,5}", label_printer_port):
+            QMessageBox.warning(self, "ValidaciÃ³n", "Puerto de impresora invÃ¡lido.")
+            return
+        port_num = int(label_printer_port)
+        if port_num <= 0 or port_num > 65535:
+            QMessageBox.warning(self, "ValidaciÃ³n", "Puerto de impresora fuera de rango.")
             return
 
         con = None
@@ -585,6 +618,8 @@ class HistoryConfigDialog(QDialog):
                 set_setting(con, "company_type", company_type)
                 set_setting(con, "username", username)
                 set_setting(con, "tienda", "1" if tienda else "0")
+                set_setting(con, "label_printer_ip", label_printer_ip)
+                set_setting(con, "label_printer_port", str(port_num))
                 api_vals = build_api_settings(
                     country=country,
                     company_type=company_type,
@@ -593,7 +628,7 @@ class HistoryConfigDialog(QDialog):
                 for k, v in api_vals.items():
                     set_setting(con, k, v)
         except Exception as e:
-            log.exception("No se pudieron guardar los valores protegidos de configuración.")
+            log.exception("No se pudieron guardar los valores protegidos de configuraciÃ³n.")
             QMessageBox.critical(self, "Error", f"No se pudieron guardar los cambios:\n{e}")
             return
         finally:
@@ -615,7 +650,7 @@ class HistoryConfigDialog(QDialog):
         APP_CONFIG["password_api_hash"] = str(api_vals.get("password_api_hash", ""))
 
         log.info(
-            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s tienda=%s",
+            "ConfiguraciÃ³n protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s tienda=%s",
             country,
             listing_type,
             allow_no_stock,
@@ -631,9 +666,47 @@ class HistoryConfigDialog(QDialog):
             pass
         QMessageBox.information(
             self,
-            "Configuración guardada",
-            "Los cambios fueron guardados.\nReinicie la aplicación para aplicar todos los cambios globales.",
+            "ConfiguraciÃ³n guardada",
+            "Los cambios fueron guardados.\nReinicie la aplicaciÃ³n para aplicar todos los cambios globales.",
         )
+
+    def _test_label_printer(self) -> None:
+        ip = str(self.ed_label_printer_ip.text() or "").strip()
+        port_txt = str(self.ed_label_printer_port.text() or "").strip()
+        company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
+
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", ip):
+            QMessageBox.warning(self, "ValidaciÃ³n", "IP de impresora invÃ¡lida.")
+            return
+        if not re.fullmatch(r"\d{1,5}", port_txt):
+            QMessageBox.warning(self, "ValidaciÃ³n", "Puerto de impresora invÃ¡lido.")
+            return
+        port = int(port_txt)
+        if port <= 0 or port > 65535:
+            QMessageBox.warning(self, "ValidaciÃ³n", "Puerto de impresora fuera de rango.")
+            return
+
+        try:
+            logo = resolve_logo_path_for_company(company_type)
+            zpl = generar_zpl_lote(
+                [
+                    ZplEtiqueta(
+                        nombre=f"PRUEBA {company_type}",
+                        codigo="TEST001",
+                        gramos="100g",
+                        copias=1,
+                    )
+                ],
+                logo_path=logo,
+            )
+            imprimir_zpl_red(zpl, ip=ip, port=port)
+            QMessageBox.information(
+                self,
+                "Prueba enviada",
+                f"Etiqueta de prueba enviada a {ip}:{port}.",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo enviar la prueba:\n{e}")
 
 
 class QuotesTableModel(QAbstractTableModel):
@@ -645,12 +718,12 @@ class QuotesTableModel(QAbstractTableModel):
 
         if self.show_payment:
             self.HEADERS = [
-                "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
+                "Fecha/Hora", "NÂ°", "Cliente", doc_hdr, "TelÃ©fono",
                 "Estado", "Pago", "Total", "Moneda", "Items", "PDF"
             ]
         else:
             self.HEADERS = [
-                "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
+                "Fecha/Hora", "NÂ°", "Cliente", doc_hdr, "TelÃ©fono",
                 "Estado", "Total", "Moneda", "Items", "PDF"
             ]
 
@@ -934,7 +1007,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         self._restore_window_state()
 
-        # ✅ Asistente dock (reemplaza ChatQuoteDialog)
+        # âœ… Asistente dock (reemplaza ChatQuoteDialog)
         self.assistant = None
         if is_ai_enabled(refresh=True):
             self._attach_assistant()
@@ -989,29 +1062,29 @@ class QuoteHistoryWindow(QMainWindow):
 
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText(
-            "Filtrar (cualquier columna): cliente / doc / teléfono / N° / estado / pago / total / moneda / items / PDF…"
+            "Filtrar (cualquier columna): cliente / doc / telÃ©fono / NÂ° / estado / pago / total / moneda / items / PDFâ€¦"
         )
         self.txt_search.setClearButtonEnabled(True)
         self.txt_search.textChanged.connect(self._on_filters_changed)
 
         self.txt_prod = QLineEdit()
-        self.txt_prod.setPlaceholderText("Contiene producto: código o nombre")
+        self.txt_prod.setPlaceholderText("Contiene producto: cÃ³digo o nombre")
         self.txt_prod.setClearButtonEnabled(True)
         self.txt_prod.textChanged.connect(self._on_filters_changed)
 
-        self.btn_new = QPushButton("➕ Nueva cotización")
+        self.btn_new = QPushButton("âž• Nueva cotizaciÃ³n")
         self.btn_new.setProperty("variant", "primary")
         self.btn_new.setMinimumHeight(30)
         self.btn_new.setMinimumWidth(165)
         self.btn_new.clicked.connect(self._open_new_quote)
 
-        self.btn_chat = QPushButton("💬 Chat")
+        self.btn_chat = QPushButton("ðŸ’¬ Chat")
         self.btn_chat.setMinimumHeight(30)
         self.btn_chat.setMinimumWidth(110)
         self.btn_chat.setToolTip("Asistente (dock). Ctrl+K abre/cierra.")
         self.btn_chat.clicked.connect(self._open_chat)
 
-        self.btn_menu = QPushButton("☰ Menú")
+        self.btn_menu = QPushButton("â˜° MenÃº")
         self.btn_menu.setMinimumHeight(30)
         self.btn_menu.setMinimumWidth(104)
         self.btn_menu.clicked.connect(self._open_main_menu)
@@ -1075,7 +1148,7 @@ class QuoteHistoryWindow(QMainWindow):
         main.addWidget(self.table)
 
         self.btn_pdf = QPushButton("Abrir PDF")
-        self.btn_dup = QPushButton("Abrir cotización")
+        self.btn_dup = QPushButton("Abrir cotizaciÃ³n")
         self.btn_hide = QPushButton("Eliminar")
         self.btn_hide.setProperty("variant", "danger")
         self.btn_pdf.setMinimumHeight(30)
@@ -1092,9 +1165,9 @@ class QuoteHistoryWindow(QMainWindow):
         nav = QHBoxLayout()
         nav.setContentsMargins(0, 0, 0, 0)
         nav.setSpacing(8)
-        self.lbl_page = QLabel("—")
-        btn_prev = QPushButton("◀")
-        btn_next = QPushButton("▶")
+        self.lbl_page = QLabel("â€”")
+        btn_prev = QPushButton("â—€")
+        btn_next = QPushButton("â–¶")
         btn_prev.setMinimumHeight(30)
         btn_next.setMinimumHeight(30)
         btn_prev.setMinimumWidth(34)
@@ -1117,7 +1190,7 @@ class QuoteHistoryWindow(QMainWindow):
         QTimer.singleShot(1500, self._start_background_api_sync)
 
     # -----------------------------
-    #  ✅ CONTROL DE VENTANAS HIJAS
+    #  âœ… CONTROL DE VENTANAS HIJAS
     # -----------------------------
     def _is_qt_alive(self, obj) -> bool:
         if obj is None:
@@ -1523,7 +1596,7 @@ class QuoteHistoryWindow(QMainWindow):
         self.btn_new.setToolTip("" if ok else tip)
         self.btn_dup.setToolTip("" if ok else tip)
         if not ai_on:
-            self.btn_chat.setToolTip("Asistente desactivado por configuración (enable_ai=0).")
+            self.btn_chat.setToolTip("Asistente desactivado por configuraciÃ³n (enable_ai=0).")
         elif not ok:
             self.btn_chat.setToolTip(tip)
         elif self.assistant is None:
@@ -1632,7 +1705,7 @@ class QuoteHistoryWindow(QMainWindow):
             )
         except Exception as e:
             log.exception("Error listando cotizaciones")
-            QMessageBox.critical(self, "Error", f"No se pudo cargar el histórico:\n{e}")
+            QMessageBox.critical(self, "Error", f"No se pudo cargar el histÃ³rico:\n{e}")
             return
         finally:
             if con is not None:
@@ -1688,16 +1761,16 @@ class QuoteHistoryWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        act_dup = QAction("🧾 Abrir Cotización", self)
-        act_pdf = QAction("📄 Abrir PDF", self)
-        act_state = QAction("🔄 Cambiar estado…", self)
-        act_ticket = QAction("🖨️ Reimprimir ticket", self)
-        act_regen = QAction("♻️ Regenerar PDF", self)
-        act_hide = QAction("🗑️ Eliminar", self)
+        act_dup = QAction("ðŸ§¾ Abrir CotizaciÃ³n", self)
+        act_pdf = QAction("ðŸ“„ Abrir PDF", self)
+        act_state = QAction("ðŸ”„ Cambiar estadoâ€¦", self)
+        act_ticket = QAction("ðŸ–¨ï¸ Reimprimir ticket", self)
+        act_regen = QAction("â™»ï¸ Regenerar PDF", self)
+        act_hide = QAction("ðŸ—‘ï¸ Eliminar", self)
 
         act_edit_pay = None
         if APP_COUNTRY == "PERU":
-            act_edit_pay = QAction("💳 Editar pago…", self)
+            act_edit_pay = QAction("ðŸ’³ Editar pagoâ€¦", self)
             act_edit_pay.setEnabled(has_sel)
 
         act_dup.setEnabled(has_sel and has_catalog)
@@ -1754,7 +1827,7 @@ class QuoteHistoryWindow(QMainWindow):
             return
         self.refresh_ai_controls()
         if (not is_ai_enabled(refresh=True)) or (self.assistant is None):
-            QMessageBox.information(self, "Chat desactivado", "El asistente está desactivado en configuración.")
+            QMessageBox.information(self, "Chat desactivado", "El asistente estÃ¡ desactivado en configuraciÃ³n.")
             return
         try:
             self.assistant.toggle()
@@ -1764,7 +1837,7 @@ class QuoteHistoryWindow(QMainWindow):
     def _change_status(self):
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
 
         con = None
@@ -1813,7 +1886,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
 
         con = None
@@ -1821,8 +1894,8 @@ class QuoteHistoryWindow(QMainWindow):
             con = connect(self._db_path)
             header = get_quote_header(con, qid)
         except Exception as e:
-            log.exception("Error leyendo cotización")
-            QMessageBox.critical(self, "Error", f"No se pudo leer la cotización:\n{e}")
+            log.exception("Error leyendo cotizaciÃ³n")
+            QMessageBox.critical(self, "Error", f"No se pudo leer la cotizaciÃ³n:\n{e}")
             return
         finally:
             if con is not None:
@@ -1836,7 +1909,7 @@ class QuoteHistoryWindow(QMainWindow):
         text, ok = QInputDialog.getText(
             self,
             "Editar pago",
-            "Método de pago (opcional):",
+            "MÃ©todo de pago (opcional):",
             QLineEdit.Normal,
             current_mp,
         )
@@ -1905,7 +1978,7 @@ class QuoteHistoryWindow(QMainWindow):
     def _open_pdf(self):
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
         try:
             con = connect(self._db_path)
@@ -1919,10 +1992,10 @@ class QuoteHistoryWindow(QMainWindow):
                 mb = QMessageBox(self)
                 mb.setIcon(QMessageBox.Warning)
                 mb.setWindowTitle("PDF no encontrado")
-                mb.setText("No se encontró el archivo PDF.")
+                mb.setText("No se encontrÃ³ el archivo PDF.")
                 mb.setInformativeText(
                     f"Archivo: {pdf_name}"
-                    + (f"\nUbicación: {pdf_dir}" if pdf_dir else "")
+                    + (f"\nUbicaciÃ³n: {pdf_dir}" if pdf_dir else "")
                 )
                 if pdf:
                     mb.setDetailedText(pdf)
@@ -1944,7 +2017,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
         try:
             con = connect(self._db_path)
@@ -2025,16 +2098,16 @@ class QuoteHistoryWindow(QMainWindow):
                     pass
 
         except Exception as e:
-            log.exception("Error duplicando cotización")
+            log.exception("Error duplicando cotizaciÃ³n")
             QMessageBox.critical(self, "Error", f"No se pudo duplicar:\n{e}")
 
     def _soft_delete(self):
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
 
-        if QMessageBox.question(self, "Eliminar", "Eliminar esta cotización del historial?") != QMessageBox.Yes:
+        if QMessageBox.question(self, "Eliminar", "Eliminar esta cotizaciÃ³n del historial?") != QMessageBox.Yes:
             return
 
         try:
@@ -2045,13 +2118,13 @@ class QuoteHistoryWindow(QMainWindow):
 
             self._reload_first_page()
         except Exception as e:
-            log.exception("Error eliminando cotización")
+            log.exception("Error eliminando cotizaciÃ³n")
             QMessageBox.critical(self, "Error", f"No se pudo eliminar:\n{e}")
 
     def _reprint_ticket(self):
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
 
         try:
@@ -2084,7 +2157,7 @@ class QuoteHistoryWindow(QMainWindow):
 
             cmd = ticket_paths.get("ticket_cmd")
             if cmd and os.path.exists(cmd):
-                QMessageBox.information(self, "Ticket", f"Se creó el .cmd:\n{cmd}\n\nDoble click para imprimir.")
+                QMessageBox.information(self, "Ticket", f"Se creÃ³ el .cmd:\n{cmd}\n\nDoble click para imprimir.")
                 QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(os.path.dirname(cmd))))
             else:
                 QMessageBox.warning(self, "Ticket", "No se pudo generar el ticket.")
@@ -2095,7 +2168,7 @@ class QuoteHistoryWindow(QMainWindow):
     def _regen_pdf_overwrite(self):
         qid = self._selected_quote_id()
         if not qid:
-            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            QMessageBox.information(self, "AtenciÃ³n", "Selecciona una cotizaciÃ³n.")
             return
 
         try:
@@ -2106,7 +2179,7 @@ class QuoteHistoryWindow(QMainWindow):
 
             old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
             if not old_out_path:
-                QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
+                QMessageBox.warning(self, "Error", "La cotizaciÃ³n no tiene ruta de PDF.")
                 return
 
             quote_code = format_quote_code(
@@ -2173,7 +2246,7 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "PDF regenerado",
-                f"PDF actualizado:\n{pdf_name}\n\nUbicación:\n{pdf_dir}\n\nCódigo: {quote_code}",
+                f"PDF actualizado:\n{pdf_name}\n\nUbicaciÃ³n:\n{pdf_dir}\n\nCÃ³digo: {quote_code}",
             )
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
         except Exception as e:
@@ -2195,7 +2268,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
         if not old_out_path:
-            raise RuntimeError("La cotización no tiene ruta de PDF.")
+            raise RuntimeError("La cotizaciÃ³n no tiene ruta de PDF.")
 
         quote_code = format_quote_code(
             country_code=header.get("country_code") or COUNTRY_CODE,
@@ -2324,11 +2397,11 @@ class QuoteHistoryWindow(QMainWindow):
 
         mb = QMessageBox(self)
         mb.setIcon(QMessageBox.Warning)
-        mb.setWindowTitle("Cerrar histórico")
+        mb.setWindowTitle("Cerrar histÃ³rico")
         mb.setText(
-            f"Hay {n} cotización{'es' if plural else ''} abierta{'s' if plural else ''}.\n\n"
-            f"Si cierras el histórico, se cerrarán {'todas' if plural else 'la'} "
-            f"{'las' if plural else 'la'} cotización{'es' if plural else ''} abierta{'s' if plural else ''}."
+            f"Hay {n} cotizaciÃ³n{'es' if plural else ''} abierta{'s' if plural else ''}.\n\n"
+            f"Si cierras el histÃ³rico, se cerrarÃ¡n {'todas' if plural else 'la'} "
+            f"{'las' if plural else 'la'} cotizaciÃ³n{'es' if plural else ''} abierta{'s' if plural else ''}."
         )
         btn_close_all = mb.addButton("Cerrar todas", QMessageBox.AcceptRole)
         btn_cancel = mb.addButton("Cancelar", QMessageBox.RejectRole)
@@ -2347,8 +2420,8 @@ class QuoteHistoryWindow(QMainWindow):
         if not ok:
             QMessageBox.warning(
                 self,
-                "Atención",
-                "No se pudo cerrar el histórico porque aún hay cotizaciones abiertas."
+                "AtenciÃ³n",
+                "No se pudo cerrar el histÃ³rico porque aÃºn hay cotizaciones abiertas."
             )
             event.ignore()
             return
@@ -2430,4 +2503,5 @@ class QuoteHistoryWindow(QMainWindow):
                     con.close()
                 except Exception:
                     pass
+
 
