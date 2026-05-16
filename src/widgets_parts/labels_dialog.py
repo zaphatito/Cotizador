@@ -4,21 +4,24 @@ import math
 import re
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
 )
 
 from ..config import APP_COMPANY_TYPE, CATS
+from ..db_path import resolve_db_path
 from ..product_rules import is_py_unit_product
 from ..utils import nz
 from sqlModels.db import connect
@@ -43,12 +46,23 @@ def _fmt_num(x: float) -> str:
 
 
 def _esencia_a_gramos(item: dict, qty: float, country: str) -> float:
-    country_u = str(country or "").strip().upper()
+    country_u = _normalize_country(country)
     if is_py_unit_product(item, country=country_u):
         return 0.0
     if country_u in ("VENEZUELA", "PARAGUAY"):
         return float(qty) * 50.0
     return float(qty) * 1000.0
+
+
+def _normalize_country(country: str) -> str:
+    c = str(country or "").strip().upper()
+    if c == "PY":
+        return "PARAGUAY"
+    if c == "PE":
+        return "PERU"
+    if c == "VE":
+        return "VENEZUELA"
+    return c
 
 
 def _parse_labels_grams(raw: str) -> list[float]:
@@ -64,11 +78,59 @@ def _parse_labels_grams(raw: str) -> list[float]:
     return out
 
 
+def _parse_label_count(raw: str) -> int:
+    s = str(raw or "").strip()
+    if not s:
+        return 0
+    if not re.fullmatch(r"\d+", s):
+        raise ValueError("Numero de etiquetas invalido")
+    return int(s)
+
+
+def _split_grams(total_g: float, count: int) -> list[float]:
+    if count <= 0:
+        return []
+    total_mg = int(round(float(total_g) * 1000.0))
+    base = total_mg // count
+    remainder = total_mg % count
+    return [(base + (1 if i < remainder else 0)) / 1000.0 for i in range(count)]
+
+
+def _is_dark_widget(widget) -> bool:
+    base = widget.palette().base().color()
+    lum = (0.2126 * base.redF()) + (0.7152 * base.greenF()) + (0.0722 * base.blueF())
+    return lum < 0.45
+
+
+def _invalid_cell_color(widget) -> QColor:
+    return QColor("#5a1f23") if _is_dark_widget(widget) else QColor("#ffd7d7")
+
+
+class _LabelsTableDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        pal = parent.palette()
+        base = pal.base().color().name()
+        text = pal.text().color().name()
+        highlight = pal.highlight().color().name()
+        editor.setFrame(False)
+        editor.setStyleSheet(
+            "QLineEdit {"
+            f"background-color: {base};"
+            f"color: {text};"
+            f"selection-background-color: {highlight};"
+            "border: 1px solid transparent;"
+            "padding: 0px 6px;"
+            "}"
+        )
+        return editor
+
 
 class LabelsDialog(QDialog):
     def __init__(self, parent, *, quote_code: str, country: str, items: list[dict]):
         super().__init__(parent)
         self._country = str(country or "").strip().upper()
+        self._updating_table = False
         self.setWindowTitle(f"Etiquetas - {quote_code}".strip(" -"))
         self.resize(860, 500)
 
@@ -76,14 +138,17 @@ class LabelsDialog(QDialog):
         v.addWidget(QLabel("Define los gramos por etiqueta separados por coma, espacio o '+'."))
 
         self.table = QTableWidget(0, 4, self)
+        self.table.setObjectName("labelsTable")
         self.table.setHorizontalHeaderLabels(["Codigo", "Gramos Totales", "Numero Etiq.", "Etiquetas"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setItemDelegate(_LabelsTableDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
         v.addWidget(self.table, 1)
 
@@ -129,53 +194,96 @@ class LabelsDialog(QDialog):
             it_grams.setFlags(it_grams.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(r, 1, it_grams)
 
-            it_n = QTableWidgetItem("0")
-            it_n.setFlags(it_n.flags() & ~Qt.ItemIsEditable)
+            it_n = QTableWidgetItem("1")
             self.table.setItem(r, 2, it_n)
 
-            self.table.setItem(r, 3, QTableWidgetItem(""))
+            self.table.setItem(r, 3, QTableWidgetItem(_fmt_num(gramos_tot)))
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
-        if item is None or item.column() != 3:
+        if item is None or self._updating_table:
             return
-        self._revalidate_row(item.row())
+        if item.column() == 2:
+            self._apply_label_count(item.row())
+        elif item.column() == 3:
+            self._sync_count_from_labels(item.row())
         self._revalidate_all()
+
+    def _total_grams_for_row(self, row: int) -> float:
+        total_item = self.table.item(row, 1)
+        return float(total_item.data(Qt.UserRole) or 0.0) if total_item else 0.0
+
+    def _set_cell_text(self, row: int, col: int, value: str) -> None:
+        item = self.table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.table.setItem(row, col, item)
+        item.setText(value)
+
+    def _apply_label_count(self, row: int) -> None:
+        item = self.table.item(row, 2)
+        try:
+            count = _parse_label_count(item.text() if item else "")
+        except Exception:
+            return
+
+        grams = _split_grams(self._total_grams_for_row(row), count)
+        labels_text = " ".join(_fmt_num(g) for g in grams)
+        self._updating_table = True
+        try:
+            self._set_cell_text(row, 2, str(count))
+            self._set_cell_text(row, 3, labels_text)
+        finally:
+            self._updating_table = False
+
+    def _sync_count_from_labels(self, row: int) -> None:
+        raw = str(self.table.item(row, 3).text() if self.table.item(row, 3) else "")
+        try:
+            count = len(_parse_labels_grams(raw))
+        except Exception:
+            return
+
+        self._updating_table = True
+        try:
+            self._set_cell_text(row, 2, str(count))
+        finally:
+            self._updating_table = False
 
     def _revalidate_row(self, row: int) -> bool:
         raw = str(self.table.item(row, 3).text() if self.table.item(row, 3) else "")
-        total_item = self.table.item(row, 1)
-        total_g = float(total_item.data(Qt.UserRole) or 0.0) if total_item else 0.0
+        total_g = self._total_grams_for_row(row)
 
         ok = True
-        n_labels = 0
-        bg = QColor("#ffffff")
-        status = ""
+        clear_bg = QBrush()
+        count_bg = clear_bg
+        labels_bg = clear_bg
+        invalid_bg = QBrush(_invalid_cell_color(self.table))
 
         try:
+            expected_count = _parse_label_count(self.table.item(row, 2).text() if self.table.item(row, 2) else "")
             grams = _parse_labels_grams(raw)
             n_labels = len(grams)
             s = float(sum(grams))
-            if n_labels == 0:
-                ok = True
-                status = "sin etiquetas"
+            if expected_count != n_labels:
+                ok = False
+                count_bg = invalid_bg
+            if expected_count == 0 and n_labels == 0:
+                pass
             else:
-                ok = math.isclose(s, total_g, abs_tol=1e-6)
-                status = f"suma {_fmt_num(s)} g"
-                if not ok:
-                    status += f" (debe ser {_fmt_num(total_g)} g)"
+                sum_ok = math.isclose(s, total_g, abs_tol=1e-6)
+                ok = ok and sum_ok
+                if not sum_ok:
+                    labels_bg = invalid_bg
         except Exception:
             ok = False
-            status = "formato invalido"
+            count_bg = invalid_bg
+            labels_bg = invalid_bg
 
-        if not ok:
-            bg = QColor("#ffd7d7")
         lbl_n = self.table.item(row, 2)
         if lbl_n is not None:
-            lbl_n.setText(str(n_labels))
+            lbl_n.setBackground(count_bg)
         cell = self.table.item(row, 3)
         if cell is not None:
-            cell.setBackground(bg)
-            cell.setData(Qt.UserRole, status)
+            cell.setBackground(labels_bg)
         return ok
 
     def _revalidate_all(self) -> None:
@@ -221,7 +329,7 @@ class LabelsDialog(QDialog):
 
             con = None
             try:
-                con = connect()
+                con = connect(resolve_db_path())
                 ip = str(get_setting(con, "label_printer_ip", ZEBRA_IP_DEFAULT) or ZEBRA_IP_DEFAULT).strip()
                 port_raw = get_setting(con, "label_printer_port", str(ZEBRA_PORT_DEFAULT))
                 port = int(str(port_raw or ZEBRA_PORT_DEFAULT).strip())
