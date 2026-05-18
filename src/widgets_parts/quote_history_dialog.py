@@ -31,7 +31,11 @@ from ..utils import nz
 from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
 
 from ..db_path import resolve_db_path
-from ..api.presupuesto_client import sync_pending_history_quotes_once, verify_cotizador_signature_once
+from ..api.presupuesto_client import (
+    sync_pending_history_quotes_once,
+    sync_pending_label_print_logs_once,
+    verify_cotizador_signature_once,
+)
 from ..catalog_sync import (
     sync_catalog_from_excel_to_db,
     load_catalog_from_db,
@@ -1501,19 +1505,26 @@ class QuoteHistoryWindow(QMainWindow):
                 sent = int(res.get("sent") or 0)
                 skipped = int(res.get("skipped") or 0)
                 failed = int(res.get("failed") or 0)
+                label_res = sync_pending_label_print_logs_once(limit=batch_limit)
+                label_found = int(label_res.get("found") or 0)
+                label_sent = int(label_res.get("sent") or 0)
+                label_failed = int(label_res.get("failed") or 0)
 
-                if sent or failed:
+                if sent or failed or label_sent or label_failed:
                     log.info(
-                        "Sync API automatico: found=%s sent=%s skipped=%s failed=%s",
+                        "Sync API automatico: found=%s sent=%s skipped=%s failed=%s labels_found=%s labels_sent=%s labels_failed=%s",
                         found,
                         sent,
                         skipped,
                         failed,
+                        label_found,
+                        label_sent,
+                        label_failed,
                     )
 
-                if found >= batch_limit:
+                if found >= batch_limit or label_found >= batch_limit:
                     wait_s = interval_batch_s
-                elif failed > 0:
+                elif failed > 0 or label_failed > 0:
                     wait_s = interval_error_s
                 else:
                     wait_s = interval_idle_s

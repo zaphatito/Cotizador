@@ -21,6 +21,7 @@ from sqlModels.api_identity import (
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.label_print_logs_repo import (
     insert_label_print_log,
+    list_pending_label_print_logs,
     mark_label_print_log_error,
     mark_label_print_log_sent,
 )
@@ -992,6 +993,27 @@ def build_label_print_log_payload(
     }
 
 
+def _post_label_print_log_payload(
+    payload: dict[str, Any],
+    *,
+    login_password: str | None = None,
+) -> tuple[Any, Any]:
+    token, login_resp = _login_api(
+        user_id=int(payload.get("id_user_api") or 0),
+        api_username=str(payload.get("api_username") or ""),
+        login_password=login_password,
+    )
+    post_resp = post(
+        API_CASE_POST_LABEL_PRINT_LOG,
+        json_data={"registro_etiquetas": payload},
+        headers=_auth_headers(token),
+        expected_status=(200, 201, 202),
+        timeout=12,
+        raise_for_status=True,
+    )
+    return login_resp, post_resp
+
+
 def record_and_send_label_print_log(
     *,
     quote_code: str,
@@ -1011,19 +1033,7 @@ def record_and_send_label_print_log(
         con.close()
 
     try:
-        token, login_resp = _login_api(
-            user_id=int(payload.get("id_user_api") or 0),
-            api_username=str(payload.get("api_username") or ""),
-            login_password=login_password,
-        )
-        post_resp = post(
-            API_CASE_POST_LABEL_PRINT_LOG,
-            json_data={"registro_etiquetas": payload},
-            headers=_auth_headers(token),
-            expected_status=(200, 201, 202),
-            timeout=12,
-            raise_for_status=True,
-        )
+        login_resp, post_resp = _post_label_print_log_payload(payload, login_password=login_password)
     except Exception as exc:
         err_at = _now_iso_local()
         err_msg = _normalize_error_message(exc)
@@ -1063,6 +1073,91 @@ def record_and_send_label_print_log(
         "post_status": int(post_resp.status_code),
         "response": raw_response,
         "payload": payload,
+    }
+
+
+def sync_pending_label_print_logs_once(
+    *,
+    retry_before_iso: str | None = None,
+    limit: int = 50,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    db_path = resolve_db_path()
+    batch_size = max(1, int(limit))
+    retry_cutoff = str(retry_before_iso or _now_iso_local()).strip()
+
+    store_id_cfg = str(APP_CONFIG.get("store_id", "") or "").strip()
+    username_cfg = str(APP_CONFIG.get("username", "") or "").strip()
+    if (not store_id_cfg) or (not username_cfg):
+        return {
+            "found": 0,
+            "sent": 0,
+            "failed": 0,
+            "disabled": True,
+            "reason": "missing_username_or_store_id",
+        }
+
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        store_id_db = str(get_setting(con, "store_id", "") or "").strip()
+        username_db = str(get_setting(con, "username", "") or "").strip()
+        if (not store_id_db) or (not username_db):
+            return {
+                "found": 0,
+                "sent": 0,
+                "failed": 0,
+                "disabled": True,
+                "reason": "missing_username_or_store_id",
+            }
+        pending = list_pending_label_print_logs(con, retry_before_iso=retry_cutoff, limit=batch_size)
+    finally:
+        con.close()
+
+    found = len(pending)
+    sent = 0
+    failed = 0
+
+    for row in pending:
+        payload = dict(row.get("payload") or {})
+        event_id = str(row.get("event_id") or payload.get("event_id") or "").strip()
+        try:
+            _login_resp, post_resp = _post_label_print_log_payload(payload, login_password=login_password)
+            raw_response = post_resp.data if post_resp.data is not None else post_resp.text
+            con = connect(db_path)
+            _ensure_schema_once(con)
+            try:
+                with tx(con):
+                    mark_label_print_log_sent(
+                        con,
+                        event_id=event_id,
+                        sent_at=_now_iso_local(),
+                        response=raw_response,
+                    )
+            finally:
+                con.close()
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            err_msg = _normalize_error_message(exc)
+            con = connect(db_path)
+            _ensure_schema_once(con)
+            try:
+                with tx(con):
+                    mark_label_print_log_error(
+                        con,
+                        event_id=event_id,
+                        error_at=_now_iso_local(),
+                        error_message=err_msg,
+                    )
+            finally:
+                con.close()
+            log.warning("Reintento de registro de etiquetas fallo event_id=%s: %s", event_id, err_msg)
+
+    return {
+        "found": int(found),
+        "sent": int(sent),
+        "failed": int(failed),
     }
 
 

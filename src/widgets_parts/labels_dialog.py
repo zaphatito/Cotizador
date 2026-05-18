@@ -311,6 +311,14 @@ class LabelsDialog(QDialog):
             self.lbl_status.setText("Todo listo para imprimir.")
             self.lbl_status.setStyleSheet("color: #027a48;")
 
+    def _wake_background_api_sync(self) -> None:
+        try:
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "_wake_background_api_sync"):
+                parent._wake_background_api_sync()
+        except Exception:
+            pass
+
     def _on_print_clicked(self) -> None:
         try:
             labels: list[ZplEtiqueta] = []
@@ -362,11 +370,12 @@ class LabelsDialog(QDialog):
                     f"Impresion enviada a {ip}:{port}.\nRegistro enviado al servidor.",
                 )
             else:
+                self._wake_background_api_sync()
                 QMessageBox.warning(
                     self,
                     "Etiquetas",
                     "Impresion enviada, pero no se pudo enviar el registro al servidor.\n"
-                    "El registro quedo guardado localmente.",
+                    "El registro quedo guardado localmente y se reintentara en segundo plano.",
                 )
         except Exception as e:
             QMessageBox.critical(self, "Etiquetas", f"No se pudo imprimir etiquetas:\n{e}")

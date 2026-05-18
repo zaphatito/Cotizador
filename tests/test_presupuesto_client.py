@@ -646,3 +646,79 @@ def test_record_and_send_label_print_log_groups_items_and_marks_local_sent(monke
     assert row["total_labels"] == 3
     assert row["api_sent_at"]
     assert not row["api_error_at"]
+
+
+def test_sync_pending_label_print_logs_once_retries_failed_record(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from sqlModels.db import connect, ensure_schema, tx
+    from sqlModels.settings_repo import set_setting
+
+    db_path = str(tmp_path / "label_retry.sqlite3")
+    con = connect(db_path)
+    ensure_schema(con)
+    with tx(con):
+        set_setting(con, "store_id", "001")
+        set_setting(con, "username", "samuel")
+    con.close()
+
+    state = {"fail_first_label_post": True}
+    sent_payloads: list[dict] = []
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_POST_LABEL_PRINT_LOG):
+            sent_payloads.append(kwargs["json_data"]["registro_etiquetas"])
+            if state["fail_first_label_post"]:
+                state["fail_first_label_post"] = False
+                raise RuntimeError("timed out")
+            return SimpleNamespace(
+                status_code=201,
+                data={"data": {"id": 9}, "message": "ok"},
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    monkeypatch.setitem(pc.APP_CONFIG, "store_id", "001")
+    monkeypatch.setitem(pc.APP_CONFIG, "username", "samuel")
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1003, "cotizador_pe", "samuel", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    first = pc.record_and_send_label_print_log(
+        quote_code="PE-001-0000001",
+        labels=[{"codigo": "DD001", "nombre": "LCDP DD212MUJER", "gramos": "50g", "copias": 1}],
+    )
+
+    assert first["status"] == "SENT_ERROR"
+    assert len(sent_payloads) == 1
+
+    retry = pc.sync_pending_label_print_logs_once(limit=10)
+
+    assert retry == {"found": 1, "sent": 1, "failed": 0}
+    assert len(sent_payloads) == 2
+    assert sent_payloads[0]["event_id"] == sent_payloads[1]["event_id"]
+
+    con = connect(db_path)
+    ensure_schema(con)
+    try:
+        row = con.execute(
+            """
+            SELECT api_sent_at, api_error_at, api_error_message
+            FROM label_print_logs
+            WHERE event_id = ?
+            """,
+            (first["event_id"],),
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row is not None
+    assert row["api_sent_at"]
+    assert not row["api_error_at"]
+    assert not row["api_error_message"]

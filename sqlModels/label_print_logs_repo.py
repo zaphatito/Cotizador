@@ -40,10 +40,14 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             tienda,
             total_labels,
             items_json,
+            hostname,
+            ip_local,
+            usuario_sistema,
+            app_version,
             created_at,
             updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         ON CONFLICT(event_id) DO UPDATE SET
             quote_code=excluded.quote_code,
             printed_at=excluded.printed_at,
@@ -56,6 +60,10 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             tienda=excluded.tienda,
             total_labels=excluded.total_labels,
             items_json=excluded.items_json,
+            hostname=excluded.hostname,
+            ip_local=excluded.ip_local,
+            usuario_sistema=excluded.usuario_sistema,
+            app_version=excluded.app_version,
             updated_at=datetime('now')
         """,
         (
@@ -71,6 +79,10 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             1 if bool(payload.get("tienda")) else 0,
             int(payload.get("total_etiquetas") or payload.get("total_labels") or 0),
             _json_dumps(items),
+            str(payload.get("hostname") or "").strip(),
+            str(payload.get("ip_local") or "").strip(),
+            str(payload.get("usuario_sistema") or "").strip(),
+            str(payload.get("app_version") or "").strip(),
         ),
     )
     if cur.lastrowid:
@@ -80,6 +92,82 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
         (event_id,),
     ).fetchone()
     return int(row["id"]) if row else 0
+
+
+def _json_loads_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except Exception:
+        parsed = []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _row_to_payload(row: sqlite3.Row) -> dict[str, Any]:
+    items = _json_loads_list(row["items_json"])
+    return {
+        "event_id": str(row["event_id"] or "").strip(),
+        "codigo": str(row["quote_code"] or "").strip(),
+        "quote_code": str(row["quote_code"] or "").strip(),
+        "printed_at": str(row["printed_at"] or "").strip(),
+        "id_cotizador": str(row["id_cotizador"] or "").strip(),
+        "user": str(row["user"] or "").strip(),
+        "api_username": str(row["api_username"] or "").strip(),
+        "id_user_api": int(row["id_user_api"]) if row["id_user_api"] is not None else None,
+        "cod_pais": str(row["cod_pais"] or "").strip().upper(),
+        "empresa": str(row["company"] or "").strip(),
+        "tienda": bool(row["tienda"]),
+        "total_etiquetas": int(row["total_labels"] or 0),
+        "etiquetas": items,
+        "hostname": str(row["hostname"] or "").strip(),
+        "ip_local": str(row["ip_local"] or "").strip(),
+        "usuario_sistema": str(row["usuario_sistema"] or "").strip(),
+        "app_version": str(row["app_version"] or "").strip(),
+    }
+
+
+def list_pending_label_print_logs(
+    con: sqlite3.Connection,
+    *,
+    retry_before_iso: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = con.execute(
+        """
+        SELECT
+            id,
+            event_id,
+            quote_code,
+            printed_at,
+            user,
+            api_username,
+            id_user_api,
+            cod_pais,
+            id_cotizador,
+            company,
+            tienda,
+            total_labels,
+            items_json,
+            hostname,
+            ip_local,
+            usuario_sistema,
+            app_version
+        FROM label_print_logs
+        WHERE COALESCE(TRIM(api_sent_at), '') = ''
+          AND (
+              COALESCE(TRIM(api_error_at), '') = ''
+              OR COALESCE(TRIM(api_error_at), '') <= ?
+          )
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (str(retry_before_iso or "").strip(), max(1, int(limit))),
+    ).fetchall()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _row_to_payload(row)
+        out.append({"id": int(row["id"]), "event_id": payload["event_id"], "payload": payload})
+    return out
 
 
 def mark_label_print_log_sent(

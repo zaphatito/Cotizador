@@ -2031,6 +2031,10 @@ def mig_33(con: sqlite3.Connection) -> None:
             tienda INTEGER NOT NULL DEFAULT 0,
             total_labels INTEGER NOT NULL DEFAULT 0,
             items_json TEXT NOT NULL DEFAULT '[]',
+            hostname TEXT NOT NULL DEFAULT '',
+            ip_local TEXT NOT NULL DEFAULT '',
+            usuario_sistema TEXT NOT NULL DEFAULT '',
+            app_version TEXT NOT NULL DEFAULT '',
             api_sent_at TEXT,
             api_error_at TEXT,
             api_error_message TEXT,
@@ -2044,6 +2048,20 @@ def mig_33(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_quote_code ON label_print_logs(quote_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_sent_at ON label_print_logs(api_sent_at)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_error_at ON label_print_logs(api_error_at)")
+
+
+def mig_34(con: sqlite3.Connection) -> None:
+    """
+    v34: conserva datos del equipo para reintentos de auditoria de etiquetas.
+    """
+    if not _table_exists(con, "label_print_logs"):
+        mig_33(con)
+        return
+
+    _add_column_if_missing(con, "label_print_logs", "hostname", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(con, "label_print_logs", "ip_local", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(con, "label_print_logs", "usuario_sistema", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(con, "label_print_logs", "app_version", "TEXT NOT NULL DEFAULT ''")
 
 
 MIGRATIONS: dict[int, callable] = {
@@ -2080,4 +2098,5 @@ MIGRATIONS: dict[int, callable] = {
     31: mig_31,
     32: mig_32,
     33: mig_33,
+    34: mig_34,
 }

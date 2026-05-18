@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 DDL = [
     # =========================
@@ -323,6 +323,10 @@ DDL = [
         tienda INTEGER NOT NULL DEFAULT 0,
         total_labels INTEGER NOT NULL DEFAULT 0,
         items_json TEXT NOT NULL DEFAULT '[]',
+        hostname TEXT NOT NULL DEFAULT '',
+        ip_local TEXT NOT NULL DEFAULT '',
+        usuario_sistema TEXT NOT NULL DEFAULT '',
+        app_version TEXT NOT NULL DEFAULT '',
         api_sent_at TEXT,
         api_error_at TEXT,
         api_error_message TEXT,
