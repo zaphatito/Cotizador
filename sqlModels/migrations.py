@@ -2011,6 +2011,41 @@ def mig_32(con: sqlite3.Connection) -> None:
     con.execute("DROP TABLE IF EXISTS presentacion_hist")
 
 
+def mig_33(con: sqlite3.Connection) -> None:
+    """
+    v33: auditoria local de etiquetas impresas.
+    """
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS label_print_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            quote_code TEXT NOT NULL DEFAULT '',
+            printed_at TEXT NOT NULL,
+            user TEXT NOT NULL DEFAULT '',
+            api_username TEXT NOT NULL DEFAULT '',
+            id_user_api INTEGER,
+            cod_pais TEXT NOT NULL DEFAULT '',
+            id_cotizador TEXT NOT NULL DEFAULT '',
+            company TEXT NOT NULL DEFAULT '',
+            tienda INTEGER NOT NULL DEFAULT 0,
+            total_labels INTEGER NOT NULL DEFAULT 0,
+            items_json TEXT NOT NULL DEFAULT '[]',
+            api_sent_at TEXT,
+            api_error_at TEXT,
+            api_error_message TEXT,
+            api_response TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_printed_at ON label_print_logs(printed_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_quote_code ON label_print_logs(quote_code)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_sent_at ON label_print_logs(api_sent_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_error_at ON label_print_logs(api_error_at)")
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2044,4 +2079,5 @@ MIGRATIONS: dict[int, callable] = {
     30: mig_30,
     31: mig_31,
     32: mig_32,
+    33: mig_33,
 }

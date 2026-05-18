@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 DDL = [
     # =========================
@@ -304,6 +304,37 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_quotes_id_cliente ON quotes(id_cliente)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_api_sent_at ON quotes(api_sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_api_error_at ON quotes(api_error_at)",
+
+    # =========================
+    # Label print logs (auditoria local)
+    # =========================
+    """
+    CREATE TABLE IF NOT EXISTS label_print_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        quote_code TEXT NOT NULL DEFAULT '',
+        printed_at TEXT NOT NULL,
+        user TEXT NOT NULL DEFAULT '',
+        api_username TEXT NOT NULL DEFAULT '',
+        id_user_api INTEGER,
+        cod_pais TEXT NOT NULL DEFAULT '',
+        id_cotizador TEXT NOT NULL DEFAULT '',
+        company TEXT NOT NULL DEFAULT '',
+        tienda INTEGER NOT NULL DEFAULT 0,
+        total_labels INTEGER NOT NULL DEFAULT 0,
+        items_json TEXT NOT NULL DEFAULT '[]',
+        api_sent_at TEXT,
+        api_error_at TEXT,
+        api_error_message TEXT,
+        api_response TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_label_print_logs_printed_at ON label_print_logs(printed_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_label_print_logs_quote_code ON label_print_logs(quote_code)",
+    "CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_sent_at ON label_print_logs(api_sent_at)",
+    "CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_error_at ON label_print_logs(api_error_at)",
 
     """
     CREATE TABLE IF NOT EXISTS quote_items (

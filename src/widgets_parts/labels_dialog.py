@@ -26,6 +26,7 @@ from ..product_rules import is_py_unit_product
 from ..utils import nz
 from sqlModels.db import connect
 from sqlModels.settings_repo import get_setting
+from ..api.presupuesto_client import record_and_send_label_print_log
 from ..label_printing_service import (
     ZEBRA_IP_DEFAULT,
     ZEBRA_PORT_DEFAULT,
@@ -129,6 +130,7 @@ class _LabelsTableDelegate(QStyledItemDelegate):
 class LabelsDialog(QDialog):
     def __init__(self, parent, *, quote_code: str, country: str, items: list[dict]):
         super().__init__(parent)
+        self._quote_code = str(quote_code or "").strip()
         self._country = str(country or "").strip().upper()
         self._updating_table = False
         self.setWindowTitle(f"Etiquetas - {quote_code}".strip(" -"))
@@ -343,6 +345,28 @@ class LabelsDialog(QDialog):
             logo_path = resolve_logo_path_for_company(APP_COMPANY_TYPE)
             zpl = generar_zpl_lote(labels, logo_path=logo_path)
             imprimir_zpl_red(zpl, ip=ip, port=port)
-            QMessageBox.information(self, "Etiquetas", f"Impresion enviada a {ip}:{port}.")
+            try:
+                sync_result = record_and_send_label_print_log(quote_code=self._quote_code, labels=labels)
+            except Exception as sync_exc:
+                QMessageBox.warning(
+                    self,
+                    "Etiquetas",
+                    "Impresion enviada, pero no se pudo guardar o enviar el registro.\n"
+                    f"{sync_exc}",
+                )
+                return
+            if str(sync_result.get("status") or "") == "SENT":
+                QMessageBox.information(
+                    self,
+                    "Etiquetas",
+                    f"Impresion enviada a {ip}:{port}.\nRegistro enviado al servidor.",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Etiquetas",
+                    "Impresion enviada, pero no se pudo enviar el registro al servidor.\n"
+                    "El registro quedo guardado localmente.",
+                )
         except Exception as e:
             QMessageBox.critical(self, "Etiquetas", f"No se pudo imprimir etiquetas:\n{e}")

@@ -19,6 +19,11 @@ from sqlModels.api_identity import (
     verify_password_scrypt,
 )
 from sqlModels.db import connect, ensure_schema, tx
+from sqlModels.label_print_logs_repo import (
+    insert_label_print_log,
+    mark_label_print_log_error,
+    mark_label_print_log_sent,
+)
 from sqlModels.quotes_repo import (
     get_quote_header,
     get_quote_items,
@@ -37,6 +42,7 @@ from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
     API_CASE_GET_NEXT_QUOTE_CODE,
     API_CASE_LOGIN,
+    API_CASE_POST_LABEL_PRINT_LOG,
     API_CASE_POST_PRESUPUESTO,
     API_CASE_VERIFY_COTIZADOR,
 )
@@ -479,9 +485,18 @@ def _country_code_from_country(country: str) -> str:
 
 
 def _infer_tipo_documento_for_api(doc_cliente: str, cod_pais: str) -> str:
+    cod = str(cod_pais or "").strip().upper()
+    doc = str(doc_cliente or "").strip()
+    compact = re.sub(r"\s+", "", doc).upper()
+    if cod == "PE" and compact.isdigit():
+        if len(compact) == 8:
+            return "DNI"
+        if len(compact) == 11:
+            return "RUC"
+        return ""
     return infer_tipo_documento_from_doc(
-        str(cod_pais or "").strip().upper(),
-        str(doc_cliente or ""),
+        cod,
+        doc,
     )
 
 
@@ -908,6 +923,147 @@ def _login_api(
         raise PresupuestoApiError("No se pudo obtener access token desde busLogin.")
 
     return token, login_resp
+
+
+def _label_attr(item: Any, key: str, default: Any = "") -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _normalize_label_print_items(labels: list[Any]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for label in labels or []:
+        codigo = str(_label_attr(label, "codigo", "") or "").strip().upper()
+        nombre = str(_label_attr(label, "nombre", "") or "").strip()
+        gramos = str(_label_attr(label, "gramos", "") or "").strip()
+        if not codigo:
+            continue
+        key = (codigo, nombre, gramos)
+        row = grouped.setdefault(
+            key,
+            {
+                "codigo": codigo,
+                "nombre": nombre or codigo,
+                "gramos": gramos,
+                "cantidad": 0,
+            },
+        )
+        try:
+            row["cantidad"] = int(row["cantidad"]) + max(1, int(_label_attr(label, "copias", 1) or 1))
+        except Exception:
+            row["cantidad"] = int(row["cantidad"]) + 1
+    return list(grouped.values())
+
+
+def build_label_print_log_payload(
+    *,
+    quote_code: str,
+    labels: list[Any],
+    printed_at: str | None = None,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
+        _load_api_identity()
+    )
+    cod_pais = _country_code_from_country(country)
+    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
+    items = _normalize_label_print_items(labels)
+    total_labels = sum(int(x.get("cantidad") or 0) for x in items)
+
+    return {
+        "event_id": str(event_id or uuid.uuid4()).strip(),
+        "codigo": str(quote_code or "").strip().upper(),
+        "quote_code": str(quote_code or "").strip().upper(),
+        "printed_at": str(printed_at or _now_iso_local()).strip(),
+        "id_cotizador": _extract_id_cotizador(quote_code, store_id),
+        "user": user_for_payload,
+        "api_username": str(api_username or "").strip(),
+        "id_user_api": int(user_id),
+        "cod_pais": str(cod_pais or "").strip().upper(),
+        "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
+        "tienda": bool(tienda),
+        "total_etiquetas": int(total_labels),
+        "etiquetas": items,
+        "hostname": str(socket.gethostname() or "").strip(),
+        "ip_local": _resolve_local_ip(),
+        "usuario_sistema": str(getpass.getuser() or "").strip(),
+        "app_version": _resolve_app_version(),
+    }
+
+
+def record_and_send_label_print_log(
+    *,
+    quote_code: str,
+    labels: list[Any],
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    payload = build_label_print_log_payload(quote_code=quote_code, labels=labels)
+    event_id = str(payload.get("event_id") or "").strip()
+
+    db_path = resolve_db_path()
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        with tx(con):
+            local_id = insert_label_print_log(con, payload)
+    finally:
+        con.close()
+
+    try:
+        token, login_resp = _login_api(
+            user_id=int(payload.get("id_user_api") or 0),
+            api_username=str(payload.get("api_username") or ""),
+            login_password=login_password,
+        )
+        post_resp = post(
+            API_CASE_POST_LABEL_PRINT_LOG,
+            json_data={"registro_etiquetas": payload},
+            headers=_auth_headers(token),
+            expected_status=(200, 201, 202),
+            timeout=12,
+            raise_for_status=True,
+        )
+    except Exception as exc:
+        err_at = _now_iso_local()
+        err_msg = _normalize_error_message(exc)
+        con = connect(db_path)
+        _ensure_schema_once(con)
+        try:
+            with tx(con):
+                mark_label_print_log_error(con, event_id=event_id, error_at=err_at, error_message=err_msg)
+        finally:
+            con.close()
+        log.warning("No se pudo enviar registro de etiquetas event_id=%s: %s", event_id, err_msg)
+        return {
+            "status": "SENT_ERROR",
+            "event_id": event_id,
+            "local_id": local_id,
+            "api_error_at": err_at,
+            "api_error_message": err_msg,
+            "payload": payload,
+        }
+
+    sent_at = _now_iso_local()
+    raw_response = post_resp.data if post_resp.data is not None else post_resp.text
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        with tx(con):
+            mark_label_print_log_sent(con, event_id=event_id, sent_at=sent_at, response=raw_response)
+    finally:
+        con.close()
+
+    return {
+        "status": "SENT",
+        "event_id": event_id,
+        "local_id": local_id,
+        "api_sent_at": sent_at,
+        "login_status": int(login_resp.status_code),
+        "post_status": int(post_resp.status_code),
+        "response": raw_response,
+        "payload": payload,
+    }
 
 
 def _auth_headers(token: str) -> dict[str, str]:

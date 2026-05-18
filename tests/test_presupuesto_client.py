@@ -571,3 +571,78 @@ def test_sync_pending_history_quotes_once_ignores_quotes_without_items(tmp_path,
     assert processed_ids == [quote_with_items]
     assert int(res.get("found") or 0) == 1
     assert int(res.get("sent") or 0) == 1
+
+
+def test_record_and_send_label_print_log_groups_items_and_marks_local_sent(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from sqlModels.db import connect, ensure_schema
+
+    db_path = str(tmp_path / "label_logs.sqlite3")
+    sent_payloads: list[dict] = []
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_POST_LABEL_PRINT_LOG):
+            sent_payloads.append(kwargs["json_data"]["registro_etiquetas"])
+            return SimpleNamespace(
+                status_code=201,
+                data={"data": {"id": 7}, "message": "ok"},
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    labels = [
+        {"codigo": "dd001", "nombre": "LCDP DD212MUJER", "gramos": "50g", "copias": 1},
+        {"codigo": "DD001", "nombre": "LCDP DD212MUJER", "gramos": "50g", "copias": 2},
+    ]
+
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1003, "cotizador_pe", "samuel", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.record_and_send_label_print_log(quote_code="PE-001-0000001", labels=labels)
+
+    assert res["status"] == "SENT"
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["codigo"] == "PE-001-0000001"
+    assert payload["user"] == "samuel"
+    assert payload["cod_pais"] == "PE"
+    assert payload["total_etiquetas"] == 3
+    assert payload["etiquetas"] == [
+        {
+            "codigo": "DD001",
+            "nombre": "LCDP DD212MUJER",
+            "gramos": "50g",
+            "cantidad": 3,
+        }
+    ]
+
+    con = connect(db_path)
+    ensure_schema(con)
+    try:
+        row = con.execute(
+            """
+            SELECT quote_code, user, api_username, cod_pais, total_labels, api_sent_at, api_error_at
+            FROM label_print_logs
+            WHERE event_id = ?
+            """,
+            (res["event_id"],),
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row is not None
+    assert row["quote_code"] == "PE-001-0000001"
+    assert row["user"] == "samuel"
+    assert row["api_username"] == "cotizador_pe"
+    assert row["cod_pais"] == "PE"
+    assert row["total_labels"] == 3
+    assert row["api_sent_at"]
+    assert not row["api_error_at"]
