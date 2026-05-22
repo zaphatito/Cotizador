@@ -963,6 +963,14 @@ def build_label_print_log_payload(
     labels: list[Any],
     printed_at: str | None = None,
     event_id: str | None = None,
+    requested_labels: int | None = None,
+    printed_labels: int | None = None,
+    printer_counter_before: int | None = None,
+    printer_counter_after: int | None = None,
+    printer_counter_delta: int | None = None,
+    printer_status: str = "",
+    printer_ip: str = "",
+    printer_port: int | None = None,
 ) -> dict[str, Any]:
     user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
         _load_api_identity()
@@ -970,7 +978,23 @@ def build_label_print_log_payload(
     cod_pais = _country_code_from_country(country)
     user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
     items = _normalize_label_print_items(labels)
-    total_labels = sum(int(x.get("cantidad") or 0) for x in items)
+    requested_total = int(requested_labels) if requested_labels is not None else sum(int(x.get("cantidad") or 0) for x in items)
+    printed_total = int(printed_labels) if printed_labels is not None else int(requested_total)
+    confirmed_at = _now_iso_local() if printer_counter_after is not None else ""
+    printer_ip_norm = str(printer_ip or "").strip()
+    printer_port_norm = int(printer_port) if printer_port is not None else None
+    printer_event_key = ""
+    if printer_counter_before is not None and printer_counter_after is not None:
+        key_parts = [
+            str(cod_pais or "").strip().upper(),
+            str(quote_code or "").strip().upper(),
+            str(_extract_id_cotizador(quote_code, store_id) or "").strip(),
+            printer_ip_norm,
+            str(printer_port_norm or ""),
+            str(int(printer_counter_before)),
+            str(int(printer_counter_after)),
+        ]
+        printer_event_key = hashlib.sha256("|".join(key_parts).encode("utf-8")).hexdigest()
 
     return {
         "event_id": str(event_id or uuid.uuid4()).strip(),
@@ -984,12 +1008,22 @@ def build_label_print_log_payload(
         "cod_pais": str(cod_pais or "").strip().upper(),
         "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
         "tienda": bool(tienda),
-        "total_etiquetas": int(total_labels),
+        "total_etiquetas": int(requested_total),
+        "total_etiquetas_solicitadas": int(requested_total),
+        "total_etiquetas_impresas": int(printed_total),
         "etiquetas": items,
         "hostname": str(socket.gethostname() or "").strip(),
         "ip_local": _resolve_local_ip(),
         "usuario_sistema": str(getpass.getuser() or "").strip(),
         "app_version": _resolve_app_version(),
+        "printer_counter_before": printer_counter_before,
+        "printer_counter_after": printer_counter_after,
+        "printer_counter_delta": printer_counter_delta,
+        "printer_status": str(printer_status or "").strip(),
+        "printer_confirmed_at": confirmed_at,
+        "printer_ip": printer_ip_norm,
+        "printer_port": printer_port_norm,
+        "printer_event_key": printer_event_key,
     }
 
 
@@ -1019,8 +1053,27 @@ def record_and_send_label_print_log(
     quote_code: str,
     labels: list[Any],
     login_password: str | None = None,
+    requested_labels: int | None = None,
+    printed_labels: int | None = None,
+    printer_counter_before: int | None = None,
+    printer_counter_after: int | None = None,
+    printer_counter_delta: int | None = None,
+    printer_status: str = "",
+    printer_ip: str = "",
+    printer_port: int | None = None,
 ) -> dict[str, Any]:
-    payload = build_label_print_log_payload(quote_code=quote_code, labels=labels)
+    payload = build_label_print_log_payload(
+        quote_code=quote_code,
+        labels=labels,
+        requested_labels=requested_labels,
+        printed_labels=printed_labels,
+        printer_counter_before=printer_counter_before,
+        printer_counter_after=printer_counter_after,
+        printer_counter_delta=printer_counter_delta,
+        printer_status=printer_status,
+        printer_ip=printer_ip,
+        printer_port=printer_port,
+    )
     event_id = str(payload.get("event_id") or "").strip()
 
     db_path = resolve_db_path()

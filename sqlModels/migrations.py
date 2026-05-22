@@ -2030,11 +2030,21 @@ def mig_33(con: sqlite3.Connection) -> None:
             company TEXT NOT NULL DEFAULT '',
             tienda INTEGER NOT NULL DEFAULT 0,
             total_labels INTEGER NOT NULL DEFAULT 0,
+            total_labels_requested INTEGER NOT NULL DEFAULT 0,
+            total_labels_printed INTEGER NOT NULL DEFAULT 0,
             items_json TEXT NOT NULL DEFAULT '[]',
             hostname TEXT NOT NULL DEFAULT '',
             ip_local TEXT NOT NULL DEFAULT '',
             usuario_sistema TEXT NOT NULL DEFAULT '',
             app_version TEXT NOT NULL DEFAULT '',
+            printer_counter_before INTEGER,
+            printer_counter_after INTEGER,
+            printer_counter_delta INTEGER,
+            printer_status TEXT NOT NULL DEFAULT '',
+            printer_confirmed_at TEXT,
+            printer_ip TEXT NOT NULL DEFAULT '',
+            printer_port INTEGER,
+            printer_event_key TEXT NOT NULL DEFAULT '',
             api_sent_at TEXT,
             api_error_at TEXT,
             api_error_message TEXT,
@@ -2062,6 +2072,57 @@ def mig_34(con: sqlite3.Connection) -> None:
     _add_column_if_missing(con, "label_print_logs", "ip_local", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(con, "label_print_logs", "usuario_sistema", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(con, "label_print_logs", "app_version", "TEXT NOT NULL DEFAULT ''")
+
+
+def mig_35(con: sqlite3.Connection) -> None:
+    """
+    v35: totales confirmados por contador de impresora para etiquetas.
+    """
+    if not _table_exists(con, "label_print_logs"):
+        mig_33(con)
+
+    _add_column_if_missing(con, "label_print_logs", "total_labels_requested", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(con, "label_print_logs", "total_labels_printed", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(con, "label_print_logs", "printer_counter_before", "INTEGER")
+    _add_column_if_missing(con, "label_print_logs", "printer_counter_after", "INTEGER")
+    _add_column_if_missing(con, "label_print_logs", "printer_counter_delta", "INTEGER")
+    _add_column_if_missing(con, "label_print_logs", "printer_status", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(con, "label_print_logs", "printer_confirmed_at", "TEXT")
+    con.execute(
+        """
+        UPDATE label_print_logs
+        SET total_labels_requested = total_labels
+        WHERE COALESCE(total_labels_requested, 0) = 0
+          AND COALESCE(total_labels, 0) > 0
+        """
+    )
+    con.execute(
+        """
+        UPDATE label_print_logs
+        SET total_labels_printed = total_labels
+        WHERE COALESCE(total_labels_printed, 0) = 0
+          AND COALESCE(total_labels, 0) > 0
+        """
+    )
+
+
+def mig_36(con: sqlite3.Connection) -> None:
+    """
+    v36: clave idempotente por contador de impresora para no duplicar registros.
+    """
+    if not _table_exists(con, "label_print_logs"):
+        mig_33(con)
+
+    _add_column_if_missing(con, "label_print_logs", "printer_ip", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(con, "label_print_logs", "printer_port", "INTEGER")
+    _add_column_if_missing(con, "label_print_logs", "printer_event_key", "TEXT NOT NULL DEFAULT ''")
+    con.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_label_print_logs_printer_event_key_unique
+        ON label_print_logs(printer_event_key)
+        WHERE TRIM(printer_event_key) <> ''
+        """
+    )
 
 
 MIGRATIONS: dict[int, callable] = {
@@ -2099,4 +2160,6 @@ MIGRATIONS: dict[int, callable] = {
     32: mig_32,
     33: mig_33,
     34: mig_34,
+    35: mig_35,
+    36: mig_36,
 }

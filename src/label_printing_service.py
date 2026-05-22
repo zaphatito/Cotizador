@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,19 @@ class ZplEtiqueta:
     codigo: str
     gramos: str
     copias: int = 1
+
+
+@dataclass(frozen=True)
+class LabelPrintConfirmation:
+    ok: bool
+    requested_labels: int
+    printed_labels: int
+    expected_physical_labels: int
+    counter_before: int | None = None
+    counter_after: int | None = None
+    counter_delta_rows: int | None = None
+    status: str = ""
+    error: str = ""
 
 
 def _clean_zpl_text(texto: str) -> str:
@@ -157,6 +171,26 @@ def _expand_copies(etiquetas: list[ZplEtiqueta]) -> list[ZplEtiqueta]:
     return expanded
 
 
+def count_requested_labels(etiquetas: list[ZplEtiqueta]) -> int:
+    return len(_expand_copies(etiquetas or []))
+
+
+def expected_physical_labels_for_count(requested_labels: int) -> int:
+    requested = max(0, int(requested_labels or 0))
+    if requested <= 0:
+        return 0
+    return ((requested + 1) // 2) * 2
+
+
+def effective_requested_labels_for_printed(*, requested_labels: int, printed_labels: int) -> int:
+    return min(max(0, int(requested_labels or 0)), max(0, int(printed_labels or 0)))
+
+
+def labels_prefix(etiquetas: list[ZplEtiqueta], count: int) -> list[ZplEtiqueta]:
+    expanded = _expand_copies(etiquetas or [])
+    return expanded[: max(0, int(count or 0))]
+
+
 def _generar_zpl_fila(etiquetas: list[ZplEtiqueta], logo_gfa: str) -> str:
     etiqueta_izq = etiquetas[0] if len(etiquetas) >= 1 else None
     etiqueta_der = etiquetas[1] if len(etiquetas) >= 2 else None
@@ -200,3 +234,142 @@ def imprimir_zpl_red(zpl: str, ip: str, port: int) -> None:
         sock.settimeout(12)
         sock.connect((str(ip).strip(), int(port)))
         sock.sendall((zpl or "").encode("utf-8"))
+
+
+def _decode_printer_response(data: bytes) -> str:
+    txt = (data or b"").decode("utf-8", errors="ignore")
+    return txt.replace("\x00", "").strip().strip('"').strip()
+
+
+def get_printer_sgd_value(ip: str, port: int, variable: str, *, timeout: float = 5.0) -> str:
+    cmd = f'! U1 getvar "{str(variable or "").strip()}"\r\n'.encode("ascii", errors="ignore")
+    data = bytearray()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(float(timeout))
+        sock.connect((str(ip).strip(), int(port)))
+        sock.sendall(cmd)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            data.extend(chunk)
+            if b"\n" in chunk or b"\r" in chunk:
+                break
+    return _decode_printer_response(bytes(data))
+
+
+def get_printer_label_counter(ip: str, port: int, *, timeout: float = 5.0) -> int:
+    raw = get_printer_sgd_value(ip, port, "odometer.total_label_count", timeout=timeout)
+    try:
+        return int(str(raw).strip().strip('"'))
+    except Exception as exc:
+        raise RuntimeError(f"La impresora no devolvio contador de etiquetas valido: {raw!r}") from exc
+
+
+def get_printer_status(ip: str, port: int, *, timeout: float = 5.0) -> str:
+    try:
+        return get_printer_sgd_value(ip, port, "device.status", timeout=timeout)
+    except Exception:
+        return ""
+
+
+def wait_for_label_print_confirmation(
+    *,
+    ip: str,
+    port: int,
+    counter_before: int,
+    requested_labels: int,
+    timeout_s: float = 90.0,
+    poll_s: float = 1.5,
+) -> LabelPrintConfirmation:
+    requested = max(0, int(requested_labels or 0))
+    expected_physical = expected_physical_labels_for_count(requested)
+    deadline = time.monotonic() + max(1.0, float(timeout_s))
+    before = int(counter_before)
+    last_counter = before
+    last_change_at = time.monotonic()
+    last_status = ""
+    last_error = ""
+
+    while time.monotonic() < deadline:
+        try:
+            after = get_printer_label_counter(ip, port, timeout=min(5.0, max(1.0, float(poll_s))))
+            status = get_printer_status(ip, port, timeout=2.5)
+            last_status = status or last_status
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(max(0.2, float(poll_s)))
+            continue
+
+        if after != last_counter:
+            last_counter = after
+            last_change_at = time.monotonic()
+
+        delta_rows = max(0, int(after) - before)
+        printed = min(delta_rows * 2, expected_physical)
+        if expected_physical > 0 and printed >= expected_physical:
+            return LabelPrintConfirmation(
+                ok=True,
+                requested_labels=requested,
+                printed_labels=printed,
+                expected_physical_labels=expected_physical,
+                counter_before=before,
+                counter_after=after,
+                counter_delta_rows=delta_rows,
+                status=status,
+            )
+
+        status_l = str(status or "").strip().lower()
+        has_stop_status = any(x in status_l for x in ("paper", "media", "head", "pause", "paused", "error"))
+        stable_for = time.monotonic() - last_change_at
+        if printed > 0 and (has_stop_status or stable_for >= 8.0):
+            effective_requested = effective_requested_labels_for_printed(
+                requested_labels=requested,
+                printed_labels=printed,
+            )
+            return LabelPrintConfirmation(
+                ok=True,
+                requested_labels=effective_requested,
+                printed_labels=printed,
+                expected_physical_labels=expected_physical,
+                counter_before=before,
+                counter_after=after,
+                counter_delta_rows=delta_rows,
+                status=status,
+            )
+
+        time.sleep(max(0.2, float(poll_s)))
+
+    delta_rows = max(0, int(last_counter) - before)
+    printed = min(delta_rows * 2, expected_physical)
+    if printed > 0:
+        effective_requested = effective_requested_labels_for_printed(
+            requested_labels=requested,
+            printed_labels=printed,
+        )
+        return LabelPrintConfirmation(
+            ok=True,
+            requested_labels=effective_requested,
+            printed_labels=printed,
+            expected_physical_labels=expected_physical,
+            counter_before=before,
+            counter_after=last_counter,
+            counter_delta_rows=delta_rows,
+            status=last_status,
+            error="timeout esperando finalizacion completa",
+        )
+
+    return LabelPrintConfirmation(
+        ok=False,
+        requested_labels=0,
+        printed_labels=0,
+        expected_physical_labels=expected_physical,
+        counter_before=before,
+        counter_after=last_counter,
+        counter_delta_rows=delta_rows,
+        status=last_status,
+        error=last_error or "No se confirmo avance del contador de la impresora.",
+    )

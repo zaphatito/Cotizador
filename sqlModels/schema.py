@@ -1,7 +1,7 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 36
 
 DDL = [
     # =========================
@@ -322,11 +322,21 @@ DDL = [
         company TEXT NOT NULL DEFAULT '',
         tienda INTEGER NOT NULL DEFAULT 0,
         total_labels INTEGER NOT NULL DEFAULT 0,
+        total_labels_requested INTEGER NOT NULL DEFAULT 0,
+        total_labels_printed INTEGER NOT NULL DEFAULT 0,
         items_json TEXT NOT NULL DEFAULT '[]',
         hostname TEXT NOT NULL DEFAULT '',
         ip_local TEXT NOT NULL DEFAULT '',
         usuario_sistema TEXT NOT NULL DEFAULT '',
         app_version TEXT NOT NULL DEFAULT '',
+        printer_counter_before INTEGER,
+        printer_counter_after INTEGER,
+        printer_counter_delta INTEGER,
+        printer_status TEXT NOT NULL DEFAULT '',
+        printer_confirmed_at TEXT,
+        printer_ip TEXT NOT NULL DEFAULT '',
+        printer_port INTEGER,
+        printer_event_key TEXT NOT NULL DEFAULT '',
         api_sent_at TEXT,
         api_error_at TEXT,
         api_error_message TEXT,
@@ -339,6 +349,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_label_print_logs_quote_code ON label_print_logs(quote_code)",
     "CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_sent_at ON label_print_logs(api_sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_label_print_logs_api_error_at ON label_print_logs(api_error_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_label_print_logs_printer_event_key_unique ON label_print_logs(printer_event_key) WHERE TRIM(printer_event_key) <> ''",
 
     """
     CREATE TABLE IF NOT EXISTS quote_items (

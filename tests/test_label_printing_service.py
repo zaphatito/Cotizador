@@ -49,3 +49,28 @@ def test_label_text_keeps_logo_fixed_and_right_aligns_grams():
     assert "^FO317,26" in zpl
     assert "^A0N,52,52" in zpl
     assert "^FB120,1,0,R,0" in zpl
+
+
+def test_label_counts_report_requested_and_physical_labels_for_two_columns():
+    labels = [ZplEtiqueta(nombre=f"ITEM {i}", codigo=f"DD{i:03d}", gramos="50g") for i in range(25)]
+
+    requested = lps.count_requested_labels(labels)
+    expected_physical = lps.expected_physical_labels_for_count(requested)
+    effective_requested = lps.effective_requested_labels_for_printed(
+        requested_labels=requested,
+        printed_labels=expected_physical,
+    )
+
+    assert requested == 25
+    assert expected_physical == 26
+    assert effective_requested == 25
+
+
+def test_label_counts_cap_requested_when_printer_reports_partial_print():
+    requested = 30
+    printed = 20
+
+    assert lps.effective_requested_labels_for_printed(
+        requested_labels=requested,
+        printed_labels=printed,
+    ) == 20

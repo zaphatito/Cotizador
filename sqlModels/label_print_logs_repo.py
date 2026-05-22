@@ -16,14 +16,56 @@ def _compact_error(value: Any, *, max_len: int = 1800) -> str:
     return msg[: max(64, max_len - 3)].rstrip() + "..."
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> int:
     event_id = str(payload.get("event_id") or "").strip()
     if not event_id:
         raise ValueError("event_id requerido para registrar impresion de etiquetas")
+    printer_event_key = str(payload.get("printer_event_key") or "").strip()
+    if printer_event_key:
+        existing = con.execute(
+            """
+            SELECT event_id
+            FROM label_print_logs
+            WHERE printer_event_key = ?
+            LIMIT 1
+            """,
+            (printer_event_key,),
+        ).fetchone()
+        if existing is not None:
+            event_id = str(existing["event_id"] or "").strip() or event_id
 
     items = payload.get("etiquetas")
     if not isinstance(items, list):
         items = []
+
+    requested_total = _safe_int(
+        payload.get("total_etiquetas_solicitadas")
+        or payload.get("total_etiquetas")
+        or payload.get("total_labels_requested")
+        or payload.get("total_labels")
+        or 0
+    )
+    printed_total = _safe_int(
+        payload.get("total_etiquetas_impresas")
+        or payload.get("total_labels_printed")
+        or requested_total
+    )
 
     cur = con.execute(
         """
@@ -39,15 +81,25 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             company,
             tienda,
             total_labels,
+            total_labels_requested,
+            total_labels_printed,
             items_json,
             hostname,
             ip_local,
             usuario_sistema,
             app_version,
+            printer_counter_before,
+            printer_counter_after,
+            printer_counter_delta,
+            printer_status,
+            printer_confirmed_at,
+            printer_ip,
+            printer_port,
+            printer_event_key,
             created_at,
             updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         ON CONFLICT(event_id) DO UPDATE SET
             quote_code=excluded.quote_code,
             printed_at=excluded.printed_at,
@@ -59,11 +111,21 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             company=excluded.company,
             tienda=excluded.tienda,
             total_labels=excluded.total_labels,
+            total_labels_requested=excluded.total_labels_requested,
+            total_labels_printed=excluded.total_labels_printed,
             items_json=excluded.items_json,
             hostname=excluded.hostname,
             ip_local=excluded.ip_local,
             usuario_sistema=excluded.usuario_sistema,
             app_version=excluded.app_version,
+            printer_counter_before=excluded.printer_counter_before,
+            printer_counter_after=excluded.printer_counter_after,
+            printer_counter_delta=excluded.printer_counter_delta,
+            printer_status=excluded.printer_status,
+            printer_confirmed_at=excluded.printer_confirmed_at,
+            printer_ip=excluded.printer_ip,
+            printer_port=excluded.printer_port,
+            printer_event_key=excluded.printer_event_key,
             updated_at=datetime('now')
         """,
         (
@@ -77,12 +139,22 @@ def insert_label_print_log(con: sqlite3.Connection, payload: dict[str, Any]) -> 
             str(payload.get("id_cotizador") or "").strip(),
             str(payload.get("empresa") or payload.get("company") or "").strip(),
             1 if bool(payload.get("tienda")) else 0,
-            int(payload.get("total_etiquetas") or payload.get("total_labels") or 0),
+            requested_total,
+            requested_total,
+            printed_total,
             _json_dumps(items),
             str(payload.get("hostname") or "").strip(),
             str(payload.get("ip_local") or "").strip(),
             str(payload.get("usuario_sistema") or "").strip(),
             str(payload.get("app_version") or "").strip(),
+            _safe_optional_int(payload.get("printer_counter_before")),
+            _safe_optional_int(payload.get("printer_counter_after")),
+            _safe_optional_int(payload.get("printer_counter_delta")),
+            str(payload.get("printer_status") or "").strip(),
+            str(payload.get("printer_confirmed_at") or "").strip(),
+            str(payload.get("printer_ip") or "").strip(),
+            _safe_optional_int(payload.get("printer_port")),
+            printer_event_key,
         ),
     )
     if cur.lastrowid:
@@ -117,11 +189,21 @@ def _row_to_payload(row: sqlite3.Row) -> dict[str, Any]:
         "empresa": str(row["company"] or "").strip(),
         "tienda": bool(row["tienda"]),
         "total_etiquetas": int(row["total_labels"] or 0),
+        "total_etiquetas_solicitadas": int(row["total_labels_requested"] or row["total_labels"] or 0),
+        "total_etiquetas_impresas": int(row["total_labels_printed"] or row["total_labels"] or 0),
         "etiquetas": items,
         "hostname": str(row["hostname"] or "").strip(),
         "ip_local": str(row["ip_local"] or "").strip(),
         "usuario_sistema": str(row["usuario_sistema"] or "").strip(),
         "app_version": str(row["app_version"] or "").strip(),
+        "printer_counter_before": _safe_optional_int(row["printer_counter_before"]),
+        "printer_counter_after": _safe_optional_int(row["printer_counter_after"]),
+        "printer_counter_delta": _safe_optional_int(row["printer_counter_delta"]),
+        "printer_status": str(row["printer_status"] or "").strip(),
+        "printer_confirmed_at": str(row["printer_confirmed_at"] or "").strip(),
+        "printer_ip": str(row["printer_ip"] or "").strip(),
+        "printer_port": _safe_optional_int(row["printer_port"]),
+        "printer_event_key": str(row["printer_event_key"] or "").strip(),
     }
 
 
@@ -146,11 +228,21 @@ def list_pending_label_print_logs(
             company,
             tienda,
             total_labels,
+            total_labels_requested,
+            total_labels_printed,
             items_json,
             hostname,
             ip_local,
             usuario_sistema,
-            app_version
+            app_version,
+            printer_counter_before,
+            printer_counter_after,
+            printer_counter_delta,
+            printer_status,
+            printer_confirmed_at,
+            printer_ip,
+            printer_port,
+            printer_event_key
         FROM label_print_logs
         WHERE COALESCE(TRIM(api_sent_at), '') = ''
           AND (

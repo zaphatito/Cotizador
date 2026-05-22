@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_COMPANY_TYPE, CATS
 from ..db_path import resolve_db_path
+from ..logging_setup import get_logger
 from ..product_rules import is_py_unit_product
 from ..utils import nz
 from sqlModels.db import connect
@@ -31,10 +33,16 @@ from ..label_printing_service import (
     ZEBRA_IP_DEFAULT,
     ZEBRA_PORT_DEFAULT,
     ZplEtiqueta,
+    count_requested_labels,
     generar_zpl_lote,
+    get_printer_label_counter,
     imprimir_zpl_red,
+    labels_prefix,
     resolve_logo_path_for_company,
+    wait_for_label_print_confirmation,
 )
+
+log = get_logger(__name__)
 
 
 def _fmt_num(x: float) -> str:
@@ -319,6 +327,53 @@ class LabelsDialog(QDialog):
         except Exception:
             pass
 
+    def _confirm_and_record_print(
+        self,
+        *,
+        labels: list[ZplEtiqueta],
+        ip: str,
+        port: int,
+        counter_before: int,
+        requested_labels: int,
+    ) -> None:
+        try:
+            confirmation = wait_for_label_print_confirmation(
+                ip=ip,
+                port=port,
+                counter_before=counter_before,
+                requested_labels=requested_labels,
+            )
+            if not confirmation.ok or confirmation.printed_labels <= 0:
+                log.warning(
+                    "No se confirmo impresion de etiquetas quote=%s status=%s error=%s",
+                    self._quote_code,
+                    confirmation.status,
+                    confirmation.error,
+                )
+                return
+
+            confirmed_labels = labels_prefix(labels, confirmation.requested_labels)
+            if not confirmed_labels:
+                log.warning("Contador confirmo impresion, pero no hay etiquetas confirmadas para registrar.")
+                return
+
+            sync_result = record_and_send_label_print_log(
+                quote_code=self._quote_code,
+                labels=confirmed_labels,
+                requested_labels=confirmation.requested_labels,
+                printed_labels=confirmation.printed_labels,
+                printer_counter_before=confirmation.counter_before,
+                printer_counter_after=confirmation.counter_after,
+                printer_counter_delta=confirmation.counter_delta_rows,
+                printer_status=confirmation.status,
+                printer_ip=ip,
+                printer_port=port,
+            )
+            if str(sync_result.get("status") or "").strip().upper() != "SENT":
+                self._wake_background_api_sync()
+        except Exception as exc:
+            log.warning("No se pudo confirmar/registrar impresion de etiquetas quote=%s: %s", self._quote_code, exc)
+
     def _on_print_clicked(self) -> None:
         try:
             labels: list[ZplEtiqueta] = []
@@ -352,30 +407,43 @@ class LabelsDialog(QDialog):
 
             logo_path = resolve_logo_path_for_company(APP_COMPANY_TYPE)
             zpl = generar_zpl_lote(labels, logo_path=logo_path)
-            imprimir_zpl_red(zpl, ip=ip, port=port)
+            requested_labels = count_requested_labels(labels)
+            counter_before = None
+            counter_error = ""
             try:
-                sync_result = record_and_send_label_print_log(quote_code=self._quote_code, labels=labels)
-            except Exception as sync_exc:
+                counter_before = get_printer_label_counter(ip, port, timeout=5.0)
+            except Exception as exc:
+                counter_error = str(exc)
+
+            imprimir_zpl_red(zpl, ip=ip, port=port)
+
+            if counter_before is None:
                 QMessageBox.warning(
                     self,
                     "Etiquetas",
-                    "Impresion enviada, pero no se pudo guardar o enviar el registro.\n"
-                    f"{sync_exc}",
+                    "Impresion enviada, pero la impresora no devolvio contador de etiquetas.\n"
+                    "No se enviara el registro para evitar falsos positivos.\n\n"
+                    f"Detalle: {counter_error}",
                 )
                 return
-            if str(sync_result.get("status") or "") == "SENT":
-                QMessageBox.information(
-                    self,
-                    "Etiquetas",
-                    f"Impresion enviada a {ip}:{port}.\nRegistro enviado al servidor.",
-                )
-            else:
-                self._wake_background_api_sync()
-                QMessageBox.warning(
-                    self,
-                    "Etiquetas",
-                    "Impresion enviada, pero no se pudo enviar el registro al servidor.\n"
-                    "El registro quedo guardado localmente y se reintentara en segundo plano.",
-                )
+
+            threading.Thread(
+                target=self._confirm_and_record_print,
+                kwargs={
+                    "labels": list(labels),
+                    "ip": ip,
+                    "port": port,
+                    "counter_before": int(counter_before),
+                    "requested_labels": int(requested_labels),
+                },
+                name="label-print-confirmation",
+                daemon=True,
+            ).start()
+            QMessageBox.information(
+                self,
+                "Etiquetas",
+                f"Impresion enviada a {ip}:{port}.\n"
+                "La impresora confirmara el contador en segundo plano antes de enviar el registro.",
+            )
         except Exception as e:
             QMessageBox.critical(self, "Etiquetas", f"No se pudo imprimir etiquetas:\n{e}")

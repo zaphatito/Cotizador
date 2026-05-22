@@ -615,6 +615,8 @@ def test_record_and_send_label_print_log_groups_items_and_marks_local_sent(monke
     assert payload["user"] == "samuel"
     assert payload["cod_pais"] == "PE"
     assert payload["total_etiquetas"] == 3
+    assert payload["total_etiquetas_solicitadas"] == 3
+    assert payload["total_etiquetas_impresas"] == 3
     assert payload["etiquetas"] == [
         {
             "codigo": "DD001",
@@ -629,7 +631,16 @@ def test_record_and_send_label_print_log_groups_items_and_marks_local_sent(monke
     try:
         row = con.execute(
             """
-            SELECT quote_code, user, api_username, cod_pais, total_labels, api_sent_at, api_error_at
+            SELECT
+                quote_code,
+                user,
+                api_username,
+                cod_pais,
+                total_labels,
+                total_labels_requested,
+                total_labels_printed,
+                api_sent_at,
+                api_error_at
             FROM label_print_logs
             WHERE event_id = ?
             """,
@@ -644,8 +655,177 @@ def test_record_and_send_label_print_log_groups_items_and_marks_local_sent(monke
     assert row["api_username"] == "cotizador_pe"
     assert row["cod_pais"] == "PE"
     assert row["total_labels"] == 3
+    assert row["total_labels_requested"] == 3
+    assert row["total_labels_printed"] == 3
     assert row["api_sent_at"]
     assert not row["api_error_at"]
+
+
+def test_build_label_print_log_payload_can_report_requested_and_printed_totals(monkeypatch):
+    labels = [{"codigo": "DD001", "nombre": "LCDP DD212MUJER", "gramos": "50g", "copias": 25}]
+
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1003, "cotizador_pe", "samuel", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+
+    payload = pc.build_label_print_log_payload(
+        quote_code="PE-001-0000001",
+        labels=labels,
+        requested_labels=25,
+        printed_labels=26,
+        printer_counter_before=100,
+        printer_counter_after=113,
+        printer_counter_delta=13,
+        printer_status="ready",
+        printer_ip="192.168.1.50",
+        printer_port=9100,
+    )
+
+    assert payload["total_etiquetas"] == 25
+    assert payload["total_etiquetas_solicitadas"] == 25
+    assert payload["total_etiquetas_impresas"] == 26
+    assert payload["printer_counter_before"] == 100
+    assert payload["printer_counter_after"] == 113
+    assert payload["printer_counter_delta"] == 13
+    assert payload["printer_status"] == "ready"
+    assert payload["printer_ip"] == "192.168.1.50"
+    assert payload["printer_port"] == 9100
+    assert payload["printer_event_key"]
+
+    same_physical_print = pc.build_label_print_log_payload(
+        quote_code="PE-001-0000001",
+        labels=labels,
+        event_id="otro-event-id",
+        requested_labels=25,
+        printed_labels=26,
+        printer_counter_before=100,
+        printer_counter_after=113,
+        printer_counter_delta=13,
+        printer_ip="192.168.1.50",
+        printer_port=9100,
+    )
+    assert same_physical_print["printer_event_key"] == payload["printer_event_key"]
+
+
+def test_record_and_send_label_print_log_sends_confirmed_printer_payload(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from sqlModels.db import connect, ensure_schema
+
+    db_path = str(tmp_path / "label_confirmed_send.sqlite3")
+    sent_payloads: list[dict] = []
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_POST_LABEL_PRINT_LOG):
+            sent_payloads.append(kwargs["json_data"]["registro_etiquetas"])
+            return SimpleNamespace(
+                status_code=201,
+                data={"data": {"id": 22}, "message": "ok"},
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    labels = [{"codigo": "DD001", "nombre": "LCDP DD212MUJER", "gramos": "50g", "copias": 25}]
+
+    monkeypatch.setattr(pc, "resolve_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1003, "cotizador_pe", "samuel", "PERU", "LA CASA DEL PERFUME", "001", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    res = pc.record_and_send_label_print_log(
+        quote_code="PE-001-0000001",
+        labels=labels,
+        requested_labels=25,
+        printed_labels=26,
+        printer_counter_before=100,
+        printer_counter_after=113,
+        printer_counter_delta=13,
+        printer_status="ready",
+        printer_ip="192.168.1.50",
+        printer_port=9100,
+    )
+
+    assert res["status"] == "SENT"
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["total_etiquetas_solicitadas"] == 25
+    assert payload["total_etiquetas_impresas"] == 26
+    assert payload["printer_counter_before"] == 100
+    assert payload["printer_counter_after"] == 113
+    assert payload["printer_counter_delta"] == 13
+    assert payload["printer_ip"] == "192.168.1.50"
+    assert payload["printer_port"] == 9100
+    assert payload["printer_event_key"]
+
+    con = connect(db_path)
+    ensure_schema(con)
+    try:
+        row = con.execute(
+            """
+            SELECT
+                total_labels_requested,
+                total_labels_printed,
+                printer_counter_before,
+                printer_counter_after,
+                printer_event_key,
+                api_sent_at
+            FROM label_print_logs
+            WHERE event_id = ?
+            """,
+            (res["event_id"],),
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row is not None
+    assert row["total_labels_requested"] == 25
+    assert row["total_labels_printed"] == 26
+    assert row["printer_counter_before"] == 100
+    assert row["printer_counter_after"] == 113
+    assert row["printer_event_key"] == payload["printer_event_key"]
+    assert row["api_sent_at"]
+
+
+def test_insert_label_print_log_dedupes_same_printer_event_key(tmp_path):
+    from sqlModels.db import connect, ensure_schema, tx
+    from sqlModels.label_print_logs_repo import insert_label_print_log
+
+    db_path = str(tmp_path / "label_event_key.sqlite3")
+    payload = {
+        "event_id": "event-1",
+        "quote_code": "PE-001-0000001",
+        "printed_at": "2026-05-21T10:00:00",
+        "user": "samuel",
+        "api_username": "cotizador_pe",
+        "id_user_api": 1003,
+        "cod_pais": "PE",
+        "id_cotizador": "001",
+        "empresa": "LA CASA DEL PERFUME",
+        "total_etiquetas_solicitadas": 25,
+        "total_etiquetas_impresas": 26,
+        "etiquetas": [{"codigo": "DD001", "nombre": "Demo", "gramos": "50g", "cantidad": 25}],
+        "printer_event_key": "same-printer-event",
+    }
+
+    con = connect(db_path)
+    ensure_schema(con)
+    try:
+        with tx(con):
+            first_id = insert_label_print_log(con, payload)
+            second_id = insert_label_print_log(con, {**payload, "event_id": "event-2"})
+        count = con.execute("SELECT COUNT(*) AS n FROM label_print_logs").fetchone()["n"]
+    finally:
+        con.close()
+
+    assert first_id == second_id
+    assert count == 1
 
 
 def test_sync_pending_label_print_logs_once_retries_failed_record(monkeypatch, tmp_path):
