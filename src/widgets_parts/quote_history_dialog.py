@@ -62,7 +62,9 @@ from ..ui_theme import (
     set_theme_mode,
 )
 from ..label_printing_service import (
+    ZEBRA_PORT_DEFAULT,
     ZplEtiqueta,
+    discover_zebra_printers,
     generar_zpl_lote,
     imprimir_zpl_red,
     resolve_logo_path_for_company,
@@ -324,11 +326,14 @@ class HistoryConfigDialog(QDialog):
         form.addRow("Puerto impresora etiquetas:", self.ed_label_printer_port)
 
         row_actions = QHBoxLayout()
+        self.btn_detect_label_printer = QPushButton("Detectar impresora")
+        self.btn_detect_label_printer.clicked.connect(self._detect_label_printer)
         self.btn_test_label_printer = QPushButton("Probar impresora")
         self.btn_test_label_printer.clicked.connect(self._test_label_printer)
         self.btn_save_app_values = QPushButton("Guardar valores del sistema")
         self.btn_save_app_values.setProperty("variant", "primary")
         self.btn_save_app_values.clicked.connect(self._save_app_values)
+        row_actions.addWidget(self.btn_detect_label_printer)
         row_actions.addWidget(self.btn_test_label_printer)
         row_actions.addStretch(1)
         row_actions.addWidget(self.btn_save_app_values)
@@ -672,6 +677,49 @@ class HistoryConfigDialog(QDialog):
             self,
             "Configuración guardada",
             "Los cambios fueron guardados.\nReinicie la aplicación para aplicar todos los cambios globales.",
+        )
+
+    def _detect_label_printer(self) -> None:
+        port_txt = str(self.ed_label_printer_port.text() or "").strip() or str(ZEBRA_PORT_DEFAULT)
+        if not re.fullmatch(r"\d{1,5}", port_txt):
+            QMessageBox.warning(self, "Validación", "Puerto de impresora inválido.")
+            return
+        port = int(port_txt)
+        if port <= 0 or port > 65535:
+            QMessageBox.warning(self, "Validación", "Puerto de impresora fuera de rango.")
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            printers = discover_zebra_printers(port=port, timeout=0.45, max_workers=96, stop_after_first=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo detectar la impresora:\n{e}")
+            return
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
+        if not printers:
+            QMessageBox.warning(
+                self,
+                "Impresora no encontrada",
+                "No se detecto una Zebra respondiendo en la red local.\n"
+                "Verifica que este conectada a la misma red y que el puerto sea 9100.",
+            )
+            return
+
+        printer = printers[0]
+        self.ed_label_printer_ip.setText(printer.ip)
+        self.ed_label_printer_port.setText(str(printer.port))
+        detail = f"IP: {printer.ip}:{printer.port}\nContador: {printer.counter}"
+        if printer.product_name:
+            detail += f"\nModelo: {printer.product_name}"
+        QMessageBox.information(
+            self,
+            "Impresora detectada",
+            f"Se detecto la impresora de etiquetas.\n\n{detail}\n\nGuarda los valores para dejarla fija.",
         )
 
     def _test_label_printer(self) -> None:

@@ -74,3 +74,41 @@ def test_label_counts_cap_requested_when_printer_reports_partial_print():
         requested_labels=requested,
         printed_labels=printed,
     ) == 20
+
+
+def test_discover_zebra_printers_returns_probe_match(monkeypatch):
+    def fake_probe(ip, port=9100, *, timeout=0.8):
+        if ip == "192.168.1.77":
+            return lps.ZebraPrinterDiscovery(ip=ip, port=port, counter=123, product_name="ZD230")
+        raise RuntimeError("closed")
+
+    monkeypatch.setattr(lps, "probe_zebra_printer", fake_probe)
+
+    found = lps.discover_zebra_printers(
+        port=9100,
+        candidate_ips=["192.168.1.10", "192.168.1.77"],
+        stop_after_first=True,
+    )
+
+    assert len(found) == 1
+    assert found[0].ip == "192.168.1.77"
+    assert found[0].counter == 123
+
+
+def test_resolve_zebra_printer_scans_when_saved_ip_is_stale(monkeypatch):
+    def fake_probe(ip, port=9100, *, timeout=0.8):
+        if ip == "192.168.1.50":
+            raise RuntimeError("stale")
+        return lps.ZebraPrinterDiscovery(ip=ip, port=port, counter=456)
+
+    monkeypatch.setattr(lps, "probe_zebra_printer", fake_probe)
+    monkeypatch.setattr(
+        lps,
+        "discover_zebra_printers",
+        lambda **kwargs: [lps.ZebraPrinterDiscovery(ip="192.168.1.88", port=9100, counter=456)],
+    )
+
+    resolved = lps.resolve_zebra_printer("192.168.1.50", 9100)
+
+    assert resolved.ip == "192.168.1.88"
+    assert resolved.counter == 456

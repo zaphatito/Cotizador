@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from ipaddress import ip_address, ip_network
 from pathlib import Path
+from typing import Iterable
 
 from .paths import TEMPLATES_DIR
 
@@ -58,6 +61,15 @@ class LabelPrintConfirmation:
     counter_delta_rows: int | None = None
     status: str = ""
     error: str = ""
+
+
+@dataclass(frozen=True)
+class ZebraPrinterDiscovery:
+    ip: str
+    port: int
+    counter: int
+    product_name: str = ""
+    status: str = ""
 
 
 def _clean_zpl_text(texto: str) -> str:
@@ -274,6 +286,145 @@ def get_printer_status(ip: str, port: int, *, timeout: float = 5.0) -> str:
         return get_printer_sgd_value(ip, port, "device.status", timeout=timeout)
     except Exception:
         return ""
+
+
+def _is_usable_ipv4(value: str) -> bool:
+    try:
+        parsed = ip_address(str(value or "").strip())
+    except Exception:
+        return False
+    return bool(
+        parsed.version == 4
+        and not parsed.is_loopback
+        and not parsed.is_link_local
+        and not parsed.is_multicast
+        and not parsed.is_unspecified
+    )
+
+
+def _local_ipv4_addresses() -> list[str]:
+    found: set[str] = set()
+    try:
+        for value in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if _is_usable_ipv4(value):
+                found.add(str(value))
+    except Exception:
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            value = sock.getsockname()[0]
+            if _is_usable_ipv4(value):
+                found.add(str(value))
+    except Exception:
+        pass
+
+    return sorted(found)
+
+
+def _candidate_scan_ips(local_ips: Iterable[str] | None = None) -> list[str]:
+    ips = list(local_ips if local_ips is not None else _local_ipv4_addresses())
+    out: list[str] = []
+    seen: set[str] = set()
+    for local_ip in ips:
+        if not _is_usable_ipv4(local_ip):
+            continue
+        try:
+            net = ip_network(f"{local_ip}/24", strict=False)
+        except Exception:
+            continue
+        for host in net.hosts():
+            candidate = str(host)
+            if candidate not in seen:
+                seen.add(candidate)
+                out.append(candidate)
+    return out
+
+
+def probe_zebra_printer(ip: str, port: int = ZEBRA_PORT_DEFAULT, *, timeout: float = 0.8) -> ZebraPrinterDiscovery:
+    ip_txt = str(ip or "").strip()
+    if not _is_usable_ipv4(ip_txt):
+        raise ValueError("IP de impresora invalida")
+    counter = get_printer_label_counter(ip_txt, int(port), timeout=float(timeout))
+    product = ""
+    try:
+        product = get_printer_sgd_value(ip_txt, int(port), "device.product_name", timeout=float(timeout))
+    except Exception:
+        product = ""
+    status = get_printer_status(ip_txt, int(port), timeout=float(timeout))
+    return ZebraPrinterDiscovery(
+        ip=ip_txt,
+        port=int(port),
+        counter=int(counter),
+        product_name=str(product or "").strip(),
+        status=str(status or "").strip(),
+    )
+
+
+def discover_zebra_printers(
+    *,
+    port: int = ZEBRA_PORT_DEFAULT,
+    candidate_ips: Iterable[str] | None = None,
+    timeout: float = 0.45,
+    max_workers: int = 64,
+    stop_after_first: bool = True,
+) -> list[ZebraPrinterDiscovery]:
+    candidates = list(candidate_ips) if candidate_ips is not None else _candidate_scan_ips()
+    clean_candidates: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        ip_txt = str(value or "").strip()
+        if _is_usable_ipv4(ip_txt) and ip_txt not in seen:
+            seen.add(ip_txt)
+            clean_candidates.append(ip_txt)
+    if not clean_candidates:
+        return []
+
+    found: list[ZebraPrinterDiscovery] = []
+    workers = max(1, min(int(max_workers), len(clean_candidates)))
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="zebra-scan")
+    futures = {
+        executor.submit(probe_zebra_printer, ip_txt, int(port), timeout=float(timeout)): ip_txt
+        for ip_txt in clean_candidates
+    }
+    try:
+        for future in as_completed(futures):
+            try:
+                discovery = future.result()
+            except Exception:
+                continue
+            found.append(discovery)
+            if stop_after_first:
+                break
+    finally:
+        for future in futures:
+            future.cancel()
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+    return found
+
+
+def resolve_zebra_printer(
+    current_ip: str,
+    port: int = ZEBRA_PORT_DEFAULT,
+    *,
+    current_timeout: float = 1.5,
+    scan_timeout: float = 0.45,
+) -> ZebraPrinterDiscovery:
+    current = str(current_ip or "").strip()
+    if _is_usable_ipv4(current):
+        try:
+            return probe_zebra_printer(current, int(port), timeout=float(current_timeout))
+        except Exception:
+            pass
+
+    found = discover_zebra_printers(port=int(port), timeout=float(scan_timeout), stop_after_first=True)
+    if found:
+        return found[0]
+    raise RuntimeError("No se detecto una impresora Zebra en la red local.")
 
 
 def wait_for_label_print_confirmation(

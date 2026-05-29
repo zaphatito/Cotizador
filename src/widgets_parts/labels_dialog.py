@@ -26,8 +26,8 @@ from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
 from ..product_rules import is_py_unit_product
 from ..utils import nz
-from sqlModels.db import connect
-from sqlModels.settings_repo import get_setting
+from sqlModels.db import connect, tx
+from sqlModels.settings_repo import get_setting, set_setting
 from ..api.presupuesto_client import record_and_send_label_print_log
 from ..label_printing_service import (
     ZEBRA_IP_DEFAULT,
@@ -35,9 +35,9 @@ from ..label_printing_service import (
     ZplEtiqueta,
     count_requested_labels,
     generar_zpl_lote,
-    get_printer_label_counter,
     imprimir_zpl_red,
     labels_prefix,
+    resolve_zebra_printer,
     resolve_logo_path_for_company,
     wait_for_label_print_confirmation,
 )
@@ -408,24 +408,34 @@ class LabelsDialog(QDialog):
             logo_path = resolve_logo_path_for_company(APP_COMPANY_TYPE)
             zpl = generar_zpl_lote(labels, logo_path=logo_path)
             requested_labels = count_requested_labels(labels)
-            counter_before = None
-            counter_error = ""
             try:
-                counter_before = get_printer_label_counter(ip, port, timeout=5.0)
+                discovery = resolve_zebra_printer(ip, port)
             except Exception as exc:
-                counter_error = str(exc)
-
-            imprimir_zpl_red(zpl, ip=ip, port=port)
-
-            if counter_before is None:
                 QMessageBox.warning(
                     self,
                     "Etiquetas",
-                    "Impresion enviada, pero la impresora no devolvio contador de etiquetas.\n"
-                    "No se enviara el registro para evitar falsos positivos.\n\n"
-                    f"Detalle: {counter_error}",
+                    "No se pudo detectar una impresora Zebra en la red local.\n"
+                    "No se enviara la impresion para evitar registros incorrectos.\n\n"
+                    f"Detalle: {exc}",
                 )
                 return
+
+            if discovery.ip != ip:
+                ip = discovery.ip
+                con_update = None
+                try:
+                    con_update = connect(resolve_db_path())
+                    with tx(con_update):
+                        set_setting(con_update, "label_printer_ip", ip)
+                finally:
+                    try:
+                        if con_update is not None:
+                            con_update.close()
+                    except Exception:
+                        pass
+
+            counter_before = int(discovery.counter)
+            imprimir_zpl_red(zpl, ip=ip, port=port)
 
             threading.Thread(
                 target=self._confirm_and_record_print,

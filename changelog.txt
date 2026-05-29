@@ -1,17 +1,28 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
 Versión: 2.0.16
-Fecha: 2026-05-22
+Fecha: 2026-05-29
 
 Resumen
-- Se aplicaron mejoras generales de estabilidad, rendimiento y usabilidad.
+- Se mejoró la impresión de etiquetas Zebra para que sea más confiable cuando la impresora cambia de IP y para registrar mejor las impresiones realizadas.
 
 Cambios y mejoras
 - [Mejora] Corrección al completar clientes
+- [Mejora] La impresora de etiquetas se puede detectar automáticamente si cambia de IP.
+- [Mejora] Se agregó la opción "Detectar impresora" en la configuración.
+- [Mejora] Al imprimir etiquetas, el sistema busca la impresora en la red si la IP guardada ya no responde.
+- [Mejora] El sistema confirma la impresión antes de registrar las etiquetas como impresas.
+- [Mejora] El registro de etiquetas ahora diferencia entre la cantidad solicitada y la cantidad realmente usada.
+- [Mejora] Si una impresión queda pendiente de reportar por problemas de conexión, el sistema la reintenta automáticamente en segundo plano.
+- [Mejora] Se evita registrar dos veces la misma impresión.
+
+Notas importantes
+- La detección automática funciona cuando la impresora Zebra está conectada a la misma red que el equipo.
+- Si la impresora está apagada, desconectada o en otra red, deberá revisarse la conexión antes de imprimir.
 
 
 
 Compatibilidad
-- No se requieren acciones adicionales para continuar usando el sistema.
+- La base de datos local se migra automáticamente al abrir el sistema.
 - La base de datos local y la configuración del usuario se conservan.
 
 Soporte
