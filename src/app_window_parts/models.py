@@ -4,7 +4,8 @@ import re
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush, QFont
 
-from ..config import APP_COUNTRY, CATS, convert_from_base
+from ..config import APP_COUNTRY, convert_from_base
+from ..product_rules import uses_gram_quantity
 from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
 from ..utils import fmt_money_ui, nz
 from ..logging_setup import get_logger
@@ -268,10 +269,9 @@ class ItemsModel(QAbstractTableModel):
                     continue
 
                 cat = str(r.get("categoria") or "").strip()
-                cat_u = cat.upper()
 
                 qty_in = float(nz(r.get("qty"), 0.0))
-                if APP_COUNTRY == "PERU" and cat_u in CATS:
+                if APP_COUNTRY == "PERU" and uses_gram_quantity(r, country=APP_COUNTRY):
                     qty = round(qty_in, 3)
                     if qty < 0.001:
                         qty = 0.001
@@ -727,8 +727,7 @@ class ItemsModel(QAbstractTableModel):
                     return f"-{fmt_money_ui(convert_from_base(d_monto))}"
                 return "—"
             elif col == 3:
-                cat = (it.get("categoria") or "").upper()
-                if APP_COUNTRY == "PERU" and cat in CATS:
+                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -767,8 +766,7 @@ class ItemsModel(QAbstractTableModel):
                 return ""
 
             if col == 3:
-                cat = (it.get("categoria") or "").upper()
-                if APP_COUNTRY == "PERU" and (cat in CATS):
+                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -952,7 +950,7 @@ class ItemsModel(QAbstractTableModel):
             txt_raw = str(value).strip()
 
             try:
-                if APP_COUNTRY == "PERU" and (cat in CATS):
+                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
                     new_qty = _parse_qty_peru_cats(txt_raw)
                 else:
                     txt = txt_raw.lower().replace(",", ".")

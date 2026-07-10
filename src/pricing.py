@@ -1,7 +1,33 @@
 # src/pricing.py
-from .config import APP_COUNTRY, CATS
-from .product_rules import is_py_unit_product
+from .config import APP_COUNTRY
+from .product_rules import (
+    normalize_country,
+    uses_gram_quantity,
+)
 from .utils import nz, format_grams
+
+
+def quantity_in_grams(
+    item: dict | str,
+    qty: float | None = None,
+    *,
+    country: str | None = None,
+) -> float:
+    """Convert an item's internal quantity to grams when it is weight-based."""
+    current_country = normalize_country(APP_COUNTRY if country is None else country)
+    if not uses_gram_quantity(item, country=current_country):
+        return 0.0
+    if qty is None:
+        if isinstance(item, dict):
+            qty = item.get("cantidad", item.get("CANTIDAD", 0))
+        else:
+            qty = 0
+    quantity = nz(qty, 0.0)
+    if current_country == "PERU":
+        return quantity * 1000.0
+    if current_country in {"PARAGUAY", "VENEZUELA"}:
+        return quantity * 50.0
+    return 0.0
 
 
 # =====================================================
@@ -11,24 +37,8 @@ def cantidad_para_mostrar(it: dict) -> str:
     cat = (it.get("categoria") or "").upper()
     qty = it.get("cantidad", 0)
 
-    if cat in CATS:
-        if APP_COUNTRY == "PERU":
-            try:
-                gramos = float(qty) * 1000.0
-            except Exception:
-                gramos = 0.0
-            return format_grams(gramos)
-        if is_py_unit_product(it, country=APP_COUNTRY):
-            try:
-                return str(int(round(float(qty))))
-            except Exception:
-                return "0"
-        else:
-            try:
-                q_int = int(round(float(qty)))
-            except Exception:
-                q_int = int(qty) if isinstance(qty, int) else 0
-            return f"{q_int * 50} g"
+    if uses_gram_quantity(it, country=APP_COUNTRY):
+        return format_grams(quantity_in_grams(it, country=APP_COUNTRY))
 
     if cat == "BOTELLAS":
         try:
@@ -54,8 +64,10 @@ def factor_total_por_categoria(cat: str, prod_or_item: dict | None = None) -> fl
         * NO-PERU: qty representa unidades de 50g => total = unit * qty * 50
         * Excepcion PY: FERO001/FIJ002 se comportan como unidades => NO aplica x50
     """
-    cat_u = (cat or "").upper()
-    if cat_u in CATS and APP_COUNTRY != "PERU" and not is_py_unit_product(prod_or_item, country=APP_COUNTRY):
+    rule_item = dict(prod_or_item or {})
+    rule_item["categoria"] = cat
+    current_country = normalize_country(APP_COUNTRY)
+    if uses_gram_quantity(rule_item, country=current_country) and current_country != "PERU":
         return 50.0
     return 1.0
 

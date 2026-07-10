@@ -17,6 +17,7 @@ from ..pricing import (
     factor_total_por_categoria,
     default_price_id_for_product,
 )
+from ..product_rules import uses_gram_quantity
 from ..presentations import map_pc_to_bottle_code
 from ..logging_setup import get_logger
 from ..widgets import CustomProductDialog
@@ -356,7 +357,11 @@ class AddItemsMixin:
 
             cat = (prod.get("categoria") or "").upper()
 
-            qty_default = 0.001 if (APP_COUNTRY == "PERU" and cat in CATS) else 1.0
+            qty_default = (
+                0.001
+                if APP_COUNTRY == "PERU" and uses_gram_quantity(prod, country=APP_COUNTRY)
+                else 1.0
+            )
             unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
             default_pid = int(default_price_id_for_product(prod))
             default_tier = "unitario"
@@ -484,8 +489,7 @@ class AddItemsMixin:
             except Exception:
                 q = 1.0
 
-            cat_u = str(target.get("categoria") or "").upper()
-            if APP_COUNTRY == "PERU" and cat_u in CATS:
+            if APP_COUNTRY == "PERU" and uses_gram_quantity(target, country=APP_COUNTRY):
                 q = round(max(0.001, q), 3)
             else:
                 q = int(round(q))

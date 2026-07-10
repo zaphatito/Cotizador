@@ -1,3 +1,5 @@
+import pytest
+
 import src.api.presupuesto_client as pc
 
 
@@ -34,6 +36,13 @@ def test_quantity_for_api_keeps_py_cats_positive_values_above_zero():
 def test_quantity_for_api_keeps_py_unit_exception_codes_as_units():
     assert pc._quantity_for_api({"codigo": "FERO001", "categoria": "ESENCIAS", "cantidad": 3}, cod_pais="PY") == 3
     assert pc._quantity_for_api({"codigo": "FIJ002", "categoria": "ESENCIAS", "cantidad": 0.4}, cod_pais="PY") == 1
+
+
+@pytest.mark.parametrize("categoria", ["ESENCIAS", "FEROMONAS", "FIJADOR"])
+def test_quantity_for_api_keeps_peru_weight_quantity_in_kilos(categoria):
+    item = {"codigo": "PE001", "categoria": categoria, "cantidad": 0.050}
+
+    assert pc._quantity_for_api(item, cod_pais="PE") == pytest.approx(0.050)
 
 
 def test_build_presupuesto_payload_includes_adjuntos():

@@ -12,8 +12,8 @@ from sqlModels.db import connect, ensure_schema
 from sqlModels.quotes_repo import STATUS_PENDIENTE
 
 from ...paths import DATA_DIR
-from ...config import APP_COUNTRY, CATS
-from ...product_rules import is_py_unit_product
+from ...config import APP_COUNTRY
+from ...product_rules import uses_gram_quantity
 from .resolvers import resolve_client_from_history, resolve_product_candidates, month_range_from_today
 from .reports import report_text_from_db
 
@@ -372,17 +372,21 @@ def _find_row_any(window, code: str) -> tuple[Optional[dict], Optional[dict]]:
 
 
 def is_cats_code(window, code: str) -> bool:
-    if is_py_unit_product(code, country=APP_COUNTRY):
-        return False
-
-    cats = {str(x or "").strip().upper() for x in (CATS or [])}
     r_pr, r_p = _find_row_any(window, code)
 
     for r in (r_pr, r_p):
         if not r:
             continue
-        cat = str(r.get("categoria") or r.get("CATEGORIA") or "").strip().upper()
-        if cat and cat in cats and not is_py_unit_product(r, country=APP_COUNTRY):
+        # No usar DEPARTAMENTO como fallback aquí: una presentación puede
+        # pertenecer a ESENCIAS, pero su cantidad sigue siendo por unidad.
+        category = _get_ci(r, "categoria")
+        if not str(category or "").strip():
+            continue
+        item_for_rules = {
+            "codigo": _get_ci(r, "codigo") or code,
+            "categoria": category,
+        }
+        if uses_gram_quantity(item_for_rules, country=APP_COUNTRY):
             return True
 
     return False

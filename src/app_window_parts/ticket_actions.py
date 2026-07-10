@@ -4,9 +4,10 @@ from __future__ import annotations
 import os
 import math
 
-from ..config import APP_COUNTRY, CATS, STORE_ID
+from ..config import APP_COUNTRY, STORE_ID
 from ..logging_setup import get_logger
-from ..pricing import cantidad_para_mostrar
+from ..pricing import cantidad_para_mostrar, quantity_in_grams
+from ..product_rules import uses_gram_quantity
 from ..quote_code import extract_quote_code_from_pdf_path, format_quote_display_no
 from ..ticketgen import (
     DEFAULT_PRINTER_NAME,
@@ -72,10 +73,8 @@ def _peru_header_extra_lines(items_pdf: list[dict]) -> list[str]:
             qty = float(nz(it.get("cantidad"), 0.0))
             if cat == "BOTELLAS":
                 total_botellas += qty
-            if cat in CATS:
-                # En Peru la cantidad de esencias se maneja en KG para preview;
-                # en ticket la mostramos en gramos igual que la previsualizacion.
-                total_esencias_g += (qty * 1000.0)
+            if uses_gram_quantity(it, country="PERU"):
+                total_esencias_g += quantity_in_grams(it, qty, country="PERU")
         except Exception:
             continue
 

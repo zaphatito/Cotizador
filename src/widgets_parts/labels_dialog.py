@@ -21,10 +21,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import APP_COMPANY_TYPE, CATS
+from ..config import APP_COMPANY_TYPE
 from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
-from ..product_rules import is_py_unit_product
+from ..pricing import quantity_in_grams
+from ..product_rules import uses_gram_quantity
 from ..utils import nz
 from sqlModels.db import connect, tx
 from sqlModels.settings_repo import get_setting, set_setting
@@ -55,12 +56,7 @@ def _fmt_num(x: float) -> str:
 
 
 def _esencia_a_gramos(item: dict, qty: float, country: str) -> float:
-    country_u = _normalize_country(country)
-    if is_py_unit_product(item, country=country_u):
-        return 0.0
-    if country_u in ("VENEZUELA", "PARAGUAY"):
-        return float(qty) * 50.0
-    return float(qty) * 1000.0
+    return quantity_in_grams(item, qty, country=_normalize_country(country))
 
 
 def _normalize_country(country: str) -> str:
@@ -103,6 +99,28 @@ def _split_grams(total_g: float, count: int) -> list[float]:
     base = total_mg // count
     remainder = total_mg % count
     return [(base + (1 if i < remainder else 0)) / 1000.0 for i in range(count)]
+
+
+def _validate_label_entries(count_raw: str, labels_raw: str) -> tuple[bool, bool, int]:
+    count_ok = True
+    labels_ok = True
+    expected_count = 0
+    labels_count = 0
+
+    try:
+        expected_count = _parse_label_count(count_raw)
+    except Exception:
+        count_ok = False
+
+    try:
+        labels_count = len(_parse_labels_grams(labels_raw))
+    except Exception:
+        labels_ok = False
+
+    if count_ok and labels_ok and expected_count != labels_count:
+        count_ok = False
+
+    return count_ok, labels_ok, labels_count
 
 
 def _is_dark_widget(widget) -> bool:
@@ -178,11 +196,9 @@ class LabelsDialog(QDialog):
         self._revalidate_all()
 
     def _load_rows(self, items: list[dict]) -> None:
-        cats = {str(c or "").strip().upper() for c in (CATS or []) if str(c or "").strip()}
         esencia_items: list[dict] = []
         for it in items:
-            cat_u = str((it or {}).get("categoria") or "").strip().upper()
-            if cat_u in cats:
+            if uses_gram_quantity(it, country=self._country):
                 esencia_items.append(it)
 
         for it in esencia_items:
@@ -260,32 +276,17 @@ class LabelsDialog(QDialog):
 
     def _revalidate_row(self, row: int) -> bool:
         raw = str(self.table.item(row, 3).text() if self.table.item(row, 3) else "")
-        total_g = self._total_grams_for_row(row)
-
-        ok = True
         clear_bg = QBrush()
         count_bg = clear_bg
         labels_bg = clear_bg
         invalid_bg = QBrush(_invalid_cell_color(self.table))
 
-        try:
-            expected_count = _parse_label_count(self.table.item(row, 2).text() if self.table.item(row, 2) else "")
-            grams = _parse_labels_grams(raw)
-            n_labels = len(grams)
-            s = float(sum(grams))
-            if expected_count != n_labels:
-                ok = False
-                count_bg = invalid_bg
-            if expected_count == 0 and n_labels == 0:
-                pass
-            else:
-                sum_ok = math.isclose(s, total_g, abs_tol=1e-6)
-                ok = ok and sum_ok
-                if not sum_ok:
-                    labels_bg = invalid_bg
-        except Exception:
-            ok = False
+        count_raw = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
+        count_ok, labels_ok, _labels_count = _validate_label_entries(count_raw, raw)
+        ok = count_ok and labels_ok
+        if not count_ok:
             count_bg = invalid_bg
+        if not labels_ok:
             labels_bg = invalid_bg
 
         lbl_n = self.table.item(row, 2)
@@ -310,7 +311,7 @@ class LabelsDialog(QDialog):
 
         self.btn_print.setEnabled(all_ok)
         if not all_ok:
-            self.lbl_status.setText("Hay filas con suma de gramos invalida.")
+            self.lbl_status.setText("Hay filas con numero o formato de etiquetas invalido.")
             self.lbl_status.setStyleSheet("color: #b42318;")
         elif with_labels == 0:
             self.lbl_status.setText("No se imprimira ninguna etiqueta (todas en 0).")
