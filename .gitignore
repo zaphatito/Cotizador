@@ -29,3 +29,7 @@ vendor/ollama/
 /Output/SistemaCotizaciones_Update_*.zip
 /Output/cotizador.json
 /Output/updates/
+
+AGENTS.md
+.agents/*
+skills-lock.json
