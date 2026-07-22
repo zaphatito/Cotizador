@@ -4,11 +4,11 @@ param(
   [string]$RepoUser = "zaphatito",
   [string]$RepoName = "CotizadorReleases",
   [string]$ReleaseTagPrefix = "v",
-  [string]$ProjectRoot = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador",
+  [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
   [string]$ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
   [string]$SpecPath = "Utilidades\sistema_cotizaciones.spec",
   [string]$IssPath  = "Output\script inno.iss",
-  [string]$VenvPath = "C:\Users\Samuel\OneDrive\Escritorio\Cotizador\.venv",
+  [string]$VenvPath = "",
   [string]$ReleaseManifestPath = "Output\cotizador.json",
   [switch]$Publish,
   [switch]$NoDraft,
@@ -460,6 +460,10 @@ Write-Host "OK: changelog actualizado (Versión/Fecha) -> $changelogPath"
 $issFull = Join-Path $ProjectRoot $IssPath
 $issTxt  = Get-Content -Raw $issFull
 $issTxt  = $issTxt -replace '#define\s+MyAppVersion\s+"[^"]+"', "#define MyAppVersion `"$next`""
+$projectRootIss = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd("\")
+$buildDirIss = Join-Path $projectRootIss "dist\SistemaCotizaciones"
+$issTxt = $issTxt -replace '#define\s+ProjectRoot\s+"[^"]+"', ("#define ProjectRoot  `"{0}`"" -f $projectRootIss)
+$issTxt = $issTxt -replace '#define\s+BuildDir\s+"[^"]+"', ("#define BuildDir     `"{0}`"" -f $buildDirIss)
 $manifestUrl = "https://github.com/$RepoUser/$RepoName/releases/latest/download/cotizador.json"
 if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
   $issTxt = $issTxt -replace '#define\s+UpdateManifestUrl\s+"[^"]+"', "#define UpdateManifestUrl `"$manifestUrl`""
