@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.18
-Fecha: 2026-07-10
+Versión: 2.0.19
+Fecha: 2026-07-22
 
 Resumen
 - Se corrigió el inicio ocasional sin código de tienda ni usuario, que podía producir códigos de cotización con el identificador 00.
