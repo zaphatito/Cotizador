@@ -37,7 +37,7 @@ from ..config import APP_CONFIG, CATS
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import is_py_unit_product
-from ..quote_code import format_quote_code
+from ..quote_code import extract_quote_digits, format_quote_code
 from ..utils import nz
 from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
@@ -428,7 +428,7 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
     except Exception:
         user_id = int(default_id)
     api_username = user_raw or default_user
-    app_username = app_user_raw or api_username
+    app_username = app_user_raw
     tienda_cfg = _parse_optional_bool(tienda_raw)
     if tienda_cfg is None:
         tienda_cfg = _parse_optional_bool(APP_CONFIG.get("tienda"))
@@ -1318,7 +1318,14 @@ def reserve_next_quote_code(
         _load_api_identity()
     )
     cod_pais = _country_code_from_country(country)
-    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
+    user_for_payload = str(app_username or "").strip()
+    store_id = str(store_id or "").strip().upper()
+    if not store_id or not user_for_payload:
+        raise PresupuestoApiError(
+            "Falta configurar el código de tienda y el nombre de usuario antes de generar cotizaciones."
+        )
+    if not re.fullmatch(r"[A-Z0-9]+", store_id):
+        raise PresupuestoApiError("El código de tienda configurado no es válido.")
     id_cotizador = _extract_id_cotizador("", store_id)
 
     token, login_resp = _login_api(
@@ -1354,22 +1361,28 @@ def reserve_next_quote_code(
         raise PresupuestoApiError(f"No se pudo reservar el numero de cotizacion. {detail}".strip()) from e
 
     response_payload = reserve_resp.data if reserve_resp.data is not None else {}
-    quote_code = _extract_text_flag(response_payload, key="quote_code")
-    quote_no = _extract_text_flag(response_payload, key="quote_no")
+    quote_code_raw = _extract_text_flag(response_payload, key="quote_code")
+    quote_no_raw = _extract_text_flag(response_payload, key="quote_no")
     last_value = _extract_int_flag(response_payload, key="last_value")
 
-    if not quote_no and last_value is not None and last_value > 0:
-        quote_no = str(last_value).zfill(7)
-    if not quote_code and quote_no:
-        quote_code = format_quote_code(
-            country_code=cod_pais,
-            store_id=id_cotizador,
-            quote_no=quote_no,
-            width=7,
-        )
+    quote_digits = extract_quote_digits(quote_no_raw) or extract_quote_digits(quote_code_raw)
+    if not quote_digits and last_value is not None and last_value > 0:
+        quote_digits = str(last_value)
+    if not quote_digits or int(quote_digits) <= 0:
+        raise PresupuestoApiError("El API no devolvio un correlativo de cotizacion valido.")
 
-    if not quote_code:
-        raise PresupuestoApiError("El API no devolvio un codigo de cotizacion valido.")
+    quote_no = str(int(quote_digits)).zfill(7)
+    quote_code = format_quote_code(
+        country_code=cod_pais,
+        store_id=id_cotizador,
+        quote_no=quote_code_raw or quote_no,
+        width=7,
+    )
+    expected_prefix = f"{cod_pais}-{id_cotizador}-"
+    if not quote_code.upper().startswith(expected_prefix):
+        raise PresupuestoApiError("El código devuelto por el API no corresponde a la tienda configurada.")
+    if int(extract_quote_digits(quote_code) or 0) != int(quote_no):
+        raise PresupuestoApiError("El código y el correlativo devueltos por el API no coinciden.")
 
     return {
         "login_status": int(login_resp.status_code),

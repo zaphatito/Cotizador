@@ -3,26 +3,25 @@ Versión: 2.0.18
 Fecha: 2026-07-10
 
 Resumen
-- Se mejoró la impresión de etiquetas Zebra para que sea más confiable cuando la impresora cambia de IP y para registrar mejor las impresiones realizadas.
+- Se corrigió el inicio ocasional sin código de tienda ni usuario, que podía producir códigos de cotización con el identificador 00.
 
 Cambios y mejoras
-- [Mejora] Corrección al completar clientes
-- [Mejora] La impresora de etiquetas se puede detectar automáticamente si cambia de IP.
-- [Mejora] Se agregó la opción "Detectar impresora" en la configuración.
-- [Mejora] Al imprimir etiquetas, el sistema busca la impresora en la red si la IP guardada ya no responde.
-- [Mejora] El sistema confirma la impresión antes de registrar las etiquetas como impresas.
-- [Mejora] El registro de etiquetas ahora diferencia entre la cantidad solicitada y la cantidad realmente usada.
-- [Mejora] Si una impresión queda pendiente de reportar por problemas de conexión, el sistema la reintenta automáticamente en segundo plano.
-- [Mejora] Se evita registrar dos veces la misma impresión.
+- [Mejora] Un bloqueo temporal de SQLite ya no hace que la aplicación cambie silenciosamente a otra base de datos.
+- [Mejora] Si debe usarse la base de respaldo, la identidad del cotizador se recupera desde la base principal en modo de solo lectura.
+- [Mejora] El código completo reservado por el servidor se conserva al guardar, reimprimir o regenerar una cotización.
+
+Correcciones
+- [Fix] Se impide generar una cotización cuando falta el código de tienda o el nombre de usuario.
+- [Fix] Se rechazan códigos reservados para una tienda diferente, incluido el identificador 00 incorrecto.
 
 Notas importantes
-- La detección automática funciona cuando la impresora Zebra está conectada a la misma red que el equipo.
-- Si la impresora está apagada, desconectada o en otra red, deberá revisarse la conexión antes de imprimir.
+- La actualización no reemplaza ni elimina la base de datos local existente.
+- Las cotizaciones antiguas ya guardadas con un código incorrecto no se modifican automáticamente.
 
 
 
 Compatibilidad
-- La base de datos local se migra automáticamente al abrir el sistema.
+- No se requieren cambios de esquema para esta versión.
 - La base de datos local y la configuración del usuario se conservan.
 
 Soporte

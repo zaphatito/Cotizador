@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 
 def get_setting(con: sqlite3.Connection, key: str, default: str | None = "") -> str | None:
@@ -61,4 +62,57 @@ def seed_settings_if_empty(
     for k, v in (overrides or {}).items():
         set_setting(con, k, v)
 
+    return True
+
+
+def recover_settings_from_readonly_db(
+    con: sqlite3.Connection,
+    *,
+    source_db_path: str,
+    keys: tuple[str, ...],
+    required_keys: tuple[str, ...],
+) -> bool:
+    """
+    Recupera un grupo atomico de settings desde otra DB.
+
+    Solo copia cuando al destino le falta al menos una llave requerida y la
+    fuente contiene todas las requeridas con valor. La fuente se abre en modo
+    solo lectura para que una DB primaria degradada no reciba mas escrituras.
+    El caller controla la transaccion del destino.
+    """
+    normalized_keys = tuple(dict.fromkeys(str(key or "").strip() for key in keys))
+    normalized_keys = tuple(key for key in normalized_keys if key)
+    required = tuple(dict.fromkeys(str(key or "").strip() for key in required_keys))
+    required = tuple(key for key in required if key)
+    if not normalized_keys or not required:
+        return False
+
+    target_values = {key: get_setting(con, key, None) for key in required}
+    if all(str(target_values.get(key) or "").strip() for key in required):
+        return False
+
+    source_path = Path(str(source_db_path or "")).resolve()
+    if not source_path.is_file():
+        return False
+
+    source = None
+    try:
+        source = sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        source.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in normalized_keys)
+        rows = source.execute(
+            f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+            normalized_keys,
+        ).fetchall()
+        source_values = {str(row["key"]): row["value"] for row in rows}
+    finally:
+        if source is not None:
+            source.close()
+
+    if not all(str(source_values.get(key) or "").strip() for key in required):
+        return False
+
+    for key in normalized_keys:
+        if key in source_values:
+            set_setting(con, key, source_values[key])
     return True

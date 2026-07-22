@@ -29,7 +29,12 @@ def _load_build_completer_strings():
 build_completer_strings = _load_build_completer_strings()
 
 
-def test_build_completer_strings_uses_category_marker_as_wildcard():
+def test_build_completer_strings_uses_category_marker_as_wildcard(monkeypatch):
+    module_globals = build_completer_strings.__globals__
+    monkeypatch.setitem(module_globals, "listing_allows_products", lambda: True)
+    monkeypatch.setitem(module_globals, "listing_allows_presentations", lambda: True)
+    monkeypatch.setitem(module_globals, "ALLOW_NO_STOCK", False)
+
     productos = [
         {
             "id": "ESENCIAS",

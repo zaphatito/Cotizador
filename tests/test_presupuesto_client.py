@@ -122,6 +122,71 @@ def test_reserve_next_quote_code_uses_api_sequence(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    "app_username,store_id",
+    [
+        ("", "001"),
+        ("user_demo", ""),
+    ],
+)
+def test_reserve_next_quote_code_rejects_incomplete_local_identity(
+    monkeypatch,
+    app_username,
+    store_id,
+):
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (
+            1003,
+            "cotizador-PE-2",
+            app_username,
+            "PERU",
+            "LA CASA DEL PERFUME",
+            store_id,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        pc,
+        "post",
+        lambda *args, **kwargs: pytest.fail("No debe contactar el API sin identidad local."),
+    )
+
+    with pytest.raises(pc.PresupuestoApiError, match="configurar"):
+        pc.reserve_next_quote_code(local_last_value=122)
+
+
+def test_reserve_next_quote_code_rejects_code_from_other_store(monkeypatch):
+    from types import SimpleNamespace
+
+    def fake_post(case, **kwargs):
+        if int(case) == int(pc.API_CASE_LOGIN):
+            return SimpleNamespace(status_code=201, data={"access_token": "tok_123"}, text="")
+        if int(case) == int(pc.API_CASE_GET_NEXT_QUOTE_CODE):
+            return SimpleNamespace(
+                status_code=200,
+                data={
+                    "data": {
+                        "quote_code": "PE-00-0000123",
+                        "quote_no": "0000123",
+                    }
+                },
+                text='{"ok":true}',
+            )
+        raise AssertionError(f"case inesperado: {case}")
+
+    monkeypatch.setattr(
+        pc,
+        "_load_api_identity",
+        lambda: (1003, "cotizador-PE-2", "user_demo", "PERU", "LA CASA DEL PERFUME", "123", False),
+    )
+    monkeypatch.setattr(pc, "post", fake_post)
+
+    with pytest.raises(pc.PresupuestoApiError, match="tienda configurada"):
+        pc.reserve_next_quote_code(local_last_value=122)
+
+
 def test_fetch_country_clients_returns_rows_normalized_for_ui(monkeypatch):
     from types import SimpleNamespace
 

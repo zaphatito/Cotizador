@@ -13,7 +13,6 @@ from ..paths import COTIZACIONES_DIR, resolve_country_asset
 from ..config import APP_COUNTRY, COUNTRY_CODE, convert_from_base, get_currency_context
 from ..utils import nz
 from ..pdfgen import generar_pdf
-from ..quote_code import format_quote_code
 from ..logging_setup import get_logger
 from ..api.presupuesto_client import reserve_next_quote_code
 from ..widgets import show_preview_dialog, ListadoProductosDialog
@@ -215,19 +214,17 @@ class PdfActionsMixin:
             local_last_value = get_quote_no_value(con, COUNTRY_CODE)
             reserved_quote = reserve_next_quote_code(local_last_value=local_last_value)
             reserved_quote_no = str(reserved_quote.get("quote_no") or "").strip()
-            if not reserved_quote_no:
+            reserved_quote_code = str(reserved_quote.get("quote_code") or "").strip().upper()
+            if not reserved_quote_no or not reserved_quote_code:
                 raise RuntimeError("El API no devolvio un correlativo valido.")
 
             with tx(con):
                 ensure_quote_no_at_least(con, COUNTRY_CODE, max(0, int(reserved_quote_no) - 1))
                 quote_no = next_quote_no(con, COUNTRY_CODE, width=7)
 
-            quote_code = format_quote_code(
-                country_code=COUNTRY_CODE,
-                store_id=str(reserved_quote.get("id_cotizador") or ""),
-                quote_no=quote_no,
-                width=7,
-            )
+            if int(quote_no) != int(reserved_quote_no):
+                raise RuntimeError("El correlativo local no coincide con la reserva del servidor.")
+            quote_code = reserved_quote_code
 
             ruta = generar_pdf(datos, fixed_quote_no=quote_code)
             log.info("PDF generado en %s", ruta)

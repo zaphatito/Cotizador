@@ -69,9 +69,17 @@ def format_quote_code(
     quote_no: object,
     width: int = 7,
 ) -> str:
+    raw_quote_no = str(quote_no or "").strip()
+    complete_code = _NEW_CODE_RE.match(raw_quote_no)
+    if complete_code:
+        cc = normalize_country_code(complete_code.group(1))
+        st = normalize_store_id(complete_code.group(2))
+        qn = normalize_quote_digits(complete_code.group(3), width=width)
+        return f"{cc}-{st}-{qn}"
+
     cc = normalize_country_code(country_code)
     st = normalize_store_id(store_id)
-    qn = normalize_quote_digits(quote_no, width=width)
+    qn = normalize_quote_digits(raw_quote_no, width=width)
     return f"{cc}-{st}-{qn}"
 
 

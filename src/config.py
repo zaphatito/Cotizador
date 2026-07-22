@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import logging
 from typing import Dict, Any, Tuple, List
 
 from .currency import normalize_currency_code
@@ -15,7 +16,10 @@ from sqlModels.settings_repo import (
     ensure_defaults,
     settings_is_empty,
     set_setting,
+    recover_settings_from_readonly_db,
 )
+
+log = logging.getLogger(__name__)
 
 # Defaults (DB) como strings/None (solo se usan si NO hay config.json o para completar keys faltantes)
 DEFAULT_CONFIG_STR: dict[str, str | None] = {
@@ -73,24 +77,41 @@ def _base_dir_for_app() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _can_write_sqlite(db_path: str) -> bool:
+def _probe_sqlite_write_no_log(db_path: str) -> tuple[bool, bool]:
+    con = None
     try:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         import sqlite3
-        con = sqlite3.connect(db_path)
+
+        con = sqlite3.connect(db_path, timeout=5.0)
+        con.execute("PRAGMA busy_timeout = 5000")
         con.execute("CREATE TABLE IF NOT EXISTS __write_test(x INTEGER)")
         con.execute("DROP TABLE __write_test")
         con.commit()
-        con.close()
-        return True
-    except Exception:
-        return False
+        return True, False
+    except Exception as exc:
+        code = getattr(exc, "sqlite_errorcode", None)
+        try:
+            base_code = int(code) & 0xFF
+        except Exception:
+            base_code = None
+        message = str(exc or "").strip().lower()
+        transient = (
+            base_code in (5, 6)
+            or "database is locked" in message
+            or "database table is locked" in message
+        )
+        return False, transient
+    finally:
+        if con is not None:
+            con.close()
 
 
 def _resolve_db_path_no_log() -> str:
     primary = os.path.join(_base_dir_for_app(), "sqlModels", "app.sqlite3")
     fallback = os.path.join(DATA_DIR, "app.sqlite3")
-    if _can_write_sqlite(primary):
+    primary_writable, primary_transient = _probe_sqlite_write_no_log(primary)
+    if primary_writable or (primary_transient and os.path.isfile(primary)):
         return primary
     return fallback
 
@@ -315,6 +336,43 @@ def _seed_settings_once(con) -> None:
     _migrate_update_manifest_url(con)
 
 
+def _recover_identity_settings_if_using_fallback(con, active_db_path: str) -> bool:
+    try:
+        primary = os.path.join(_base_dir_for_app(), "sqlModels", "app.sqlite3")
+        fallback = os.path.join(DATA_DIR, "app.sqlite3")
+        active_norm = os.path.normcase(os.path.abspath(str(active_db_path or "")))
+        fallback_norm = os.path.normcase(os.path.abspath(fallback))
+        primary_norm = os.path.normcase(os.path.abspath(primary))
+        if active_norm != fallback_norm or active_norm == primary_norm:
+            return False
+
+        recovered = recover_settings_from_readonly_db(
+            con,
+            source_db_path=primary,
+            keys=("country", "company_type", "store_id", "username", "tienda"),
+            required_keys=("store_id", "username"),
+        )
+        if not recovered:
+            return False
+
+        country = str(get_setting(con, "country", DEFAULT_CONFIG_STR["country"]) or "").strip().upper()
+        company = str(
+            get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]) or ""
+        ).strip().upper()
+        api_values = build_api_settings(
+            country=country,
+            company_type=company,
+            password_plain=API_LOGIN_PASSWORD,
+        )
+        for key, value in api_values.items():
+            set_setting(con, key, value)
+        log.warning("Se recuperó la identidad del cotizador desde la DB primaria en modo solo lectura.")
+        return True
+    except Exception as exc:
+        log.warning("No se pudo recuperar la identidad del cotizador desde la DB primaria: %s", exc)
+        return False
+
+
 def _parse_optional_bool_setting(value: str | None) -> bool | None:
     if value is None:
         return None
@@ -337,6 +395,7 @@ def _load_db_config() -> Dict[str, Any]:
     # ✅ transacción para que SE GUARDE (commit)
     with tx(con):
         _seed_settings_once(con)
+        _recover_identity_settings_if_using_fallback(con, db_path)
 
     # leer settings
     country = get_setting(con, "country", DEFAULT_CONFIG_STR["country"]).strip().upper()
