@@ -1203,6 +1203,10 @@ def list_quotes(
 
     offset: int = 0,
 
+    sort_by: str = "created_at",
+
+    sort_desc: bool = True,
+
 ) -> tuple[list[dict], int]:
     st = (search_text or "").strip()
 
@@ -1226,6 +1230,7 @@ def list_quotes(
     has_base_currency = _has_column(con, "quotes", "base_currency")
     has_cotizador_username = _has_column(con, "quotes", "cotizador_username")
     has_id_cotizador = _has_column(con, "quotes", "id_cotizador")
+    has_chatbot = _has_column(con, "quotes", "chatbot")
     has_client_ref = _has_column(con, "quotes", "id_cliente") and _table_exists(con, "clients")
     has_status_catalog = _table_exists(con, "quote_statuses")
 
@@ -1241,6 +1246,39 @@ def list_quotes(
         telefono_expr = "COALESCE(q.telefono, '')" if _has_column(con, "quotes", "telefono") else "''"
 
     status_join = "LEFT JOIN quote_statuses qs ON qs.code = q.estado" if (has_estado and has_status_catalog) else ""
+
+    quote_tail = (
+        "CASE "
+        "WHEN instr(q.quote_no,'-') = 0 THEN q.quote_no "
+        "WHEN instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') = 0 "
+        "THEN substr(q.quote_no, instr(q.quote_no,'-') + 1) "
+        "ELSE substr("
+        "substr(q.quote_no, instr(q.quote_no,'-') + 1), "
+        "instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') + 1"
+        ") END"
+    )
+    items_count_sql = "(SELECT COUNT(*) FROM quote_items qi2 WHERE qi2.quote_id = q.id)"
+    chatbot_value_sql = "COALESCE(q.chatbot, 0)" if has_chatbot else "0"
+    quote_type_sql = (
+        f"(CASE WHEN {chatbot_value_sql} <> 0 THEN 'Web' ELSE 'Orgánico' END)"
+    )
+    quote_type_ascii_sql = (
+        f"(CASE WHEN {chatbot_value_sql} <> 0 THEN 'Web' ELSE 'Organico' END)"
+    )
+    if not has_estado:
+        estado_label_sql = "''"
+    elif status_join:
+        estado_label_sql = "COALESCE(NULLIF(TRIM(COALESCE(qs.label, '')), ''), q.estado)"
+    else:
+        estado_label_sql = (
+            "CASE q.estado "
+            "WHEN 'PAGADO' THEN 'Pagado' "
+            "WHEN 'POR_PAGAR' THEN 'Por pagar' "
+            "WHEN 'PENDIENTE' THEN 'Pendiente' "
+            "WHEN 'NO_APLICA' THEN 'No aplica' "
+            "WHEN 'REENVIADO' THEN 'Reenviado' "
+            "ELSE q.estado END"
+        )
 
 
     # âœ… Buscar por cualquier columna, pero usando valores FORMATEADOS como se ven en el histÃ³rico
@@ -1299,26 +1337,11 @@ def list_quotes(
 
         # Items como se ve: "9"
 
-        items_txt = "CAST((SELECT COUNT(*) FROM quote_items qi2 WHERE qi2.quote_id = q.id) AS TEXT)"
+        items_txt = f"CAST({items_count_sql} AS TEXT)"
 
 
 
         # Estado como se ve: "Pagado", "Por pagar", etc.
-
-        estado_label_sql = (
-            "COALESCE(NULLIF(TRIM(COALESCE(qs.label, '')), ''), q.estado)"
-            if status_join
-            else (
-                "CASE q.estado "
-                "WHEN 'PAGADO' THEN 'Pagado' "
-                "WHEN 'POR_PAGAR' THEN 'Por pagar' "
-                "WHEN 'PENDIENTE' THEN 'Pendiente' "
-                "WHEN 'NO_APLICA' THEN 'No aplica' "
-                "WHEN 'REENVIADO' THEN 'Reenviado' "
-                "ELSE q.estado END"
-            )
-        )
-
 
         or_terms: list[str] = []
 
@@ -1349,26 +1372,6 @@ def list_quotes(
 
 
         # NÂ° (soporta legacy "0000001"/"PY-0000001" y nuevo "PY-STORE-0000001")
-
-        quote_tail = (
-
-            "CASE "
-
-            "WHEN instr(q.quote_no,'-') = 0 THEN q.quote_no "
-
-            "WHEN instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') = 0 "
-
-            "THEN substr(q.quote_no, instr(q.quote_no,'-') + 1) "
-
-            "ELSE substr("
-
-            "substr(q.quote_no, instr(q.quote_no,'-') + 1), "
-
-            "instr(substr(q.quote_no, instr(q.quote_no,'-') + 1), '-') + 1"
-
-            ") END"
-
-        )
 
         or_terms.extend([
 
@@ -1427,11 +1430,11 @@ def list_quotes(
 
 
 
-        # Moneda
+        # Tipo de cotización visible (Web / Orgánico)
 
-        or_terms.append("q.currency_shown LIKE ?")
+        or_terms.append(f"({quote_type_sql} LIKE ? OR {quote_type_ascii_sql} LIKE ?)")
 
-        params.append(like)
+        params.extend([like, like])
 
 
 
@@ -1508,6 +1511,23 @@ def list_quotes(
     cotizador_username_expr = "q.cotizador_username" if has_cotizador_username else "''"
     id_cotizador_expr = "q.id_cotizador" if has_id_cotizador else "''"
 
+    sort_expressions = {
+        "created_at": "q.created_at",
+        "quote_no": f"CAST({quote_tail} AS INTEGER)",
+        "cliente": f"{cliente_expr} COLLATE NOCASE",
+        "cedula": f"{cedula_expr} COLLATE NOCASE",
+        "telefono": f"{telefono_expr} COLLATE NOCASE",
+        "estado": f"{estado_label_sql} COLLATE NOCASE",
+        "metodo_pago": "q.metodo_pago COLLATE NOCASE" if has_mp else "''",
+        "total": "q.total_neto_shown",
+        "quote_type": f"{quote_type_sql} COLLATE NOCASE",
+        "items": items_count_sql,
+        "pdf": "q.pdf_path COLLATE NOCASE",
+    }
+    order_expr = sort_expressions.get(str(sort_by or "").strip().lower(), "q.created_at")
+    order_direction = "DESC" if bool(sort_desc) else "ASC"
+    order_sql = f"{order_expr} {order_direction}, q.id {order_direction}"
+
 
 
     rows = con.execute(
@@ -1532,14 +1552,15 @@ def list_quotes(
             {pago_expr},
             q.total_neto_shown AS total_shown,
             q.currency_shown,
+            {chatbot_value_sql} AS chatbot,
             q.pdf_path,
             q.deleted_at,
-            (SELECT COUNT(*) FROM quote_items qi WHERE qi.quote_id = q.id) AS items_count
+            {items_count_sql} AS items_count
         FROM quotes q
         {client_join}
         {status_join}
         {where_sql}
-        ORDER BY q.created_at DESC
+        ORDER BY {order_sql}
         LIMIT ? OFFSET ?
         """,
         tuple(params + [int(limit), int(offset)]),

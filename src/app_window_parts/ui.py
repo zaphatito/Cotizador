@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QButtonGroup,
     QComboBox,
-    QCheckBox,
 )
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QRegularExpressionValidator
 from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer, QEvent, QRegularExpression
@@ -660,6 +659,19 @@ class UiMixin:
 
     def _is_py_cash_mode(self) -> bool:
         return bool(getattr(self, "_py_cash_mode", False))
+
+    def _is_chatbot_quote(self) -> bool:
+        button = getattr(self, "btn_origin_web", None)
+        return bool(button is not None and button.isChecked())
+
+    def _set_chatbot_quote(self, chatbot: bool):
+        is_web = bool(chatbot)
+        web_button = getattr(self, "btn_origin_web", None)
+        organic_button = getattr(self, "btn_origin_organic", None)
+        if web_button is not None:
+            web_button.setChecked(is_web)
+        if organic_button is not None:
+            organic_button.setChecked(not is_web)
 
     def _set_py_cash_mode(self, enabled: bool, *, assume_items_already: bool = False):
         self._py_cash_mode = bool(enabled)
@@ -1648,7 +1660,9 @@ class UiMixin:
         actions_row.setContentsMargins(0, 0, 0, 0)
         actions_row.setSpacing(6)
 
-        self._py_cash_mode = False
+        self._py_cash_mode = (
+            getattr(self, "country_name", APP_COUNTRY) == "PARAGUAY"
+        )
         if getattr(self, "country_name", APP_COUNTRY) == "PARAGUAY":
             self.btn_pay_card = QPushButton("Tarjeta")
             self.btn_pay_cash = QPushButton("Efectivo")
@@ -1657,7 +1671,7 @@ class UiMixin:
                 b.setCheckable(True)
                 b.setProperty("role", "payment_toggle")
 
-            self.btn_pay_card.setChecked(True)
+            self.btn_pay_cash.setChecked(True)
 
             self.pay_group = QButtonGroup(self)
             self.pay_group.setExclusive(True)
@@ -1666,8 +1680,8 @@ class UiMixin:
             self.pay_group.buttonClicked.connect(self._on_py_payment_clicked)
 
             rate_row.addStretch(1)
-            rate_row.addWidget(self.btn_pay_card)
             rate_row.addWidget(self.btn_pay_cash)
+            rate_row.addWidget(self.btn_pay_card)
             rate_row.addStretch(1)
 
             actions_row.addWidget(self.btn_moneda, 0)
@@ -1705,12 +1719,31 @@ class UiMixin:
         quick.setSpacing(4)
         quick.addLayout(rate_row)
         quick.addLayout(actions_row)
-        self.chk_chatbot = QCheckBox("Cliente captado por chatbot")
-        self.chk_chatbot.setChecked(False)
-        self.chk_chatbot.setToolTip(
-            "Marcado: cliente captado por chatbot. Desmarcado: cliente orgánico."
-        )
-        quick.addWidget(self.chk_chatbot)
+
+        origin_row = QHBoxLayout()
+        origin_row.setContentsMargins(0, 0, 0, 0)
+        origin_row.setSpacing(5)
+        origin_row.addWidget(QLabel("Origen:"), 0)
+
+        self.btn_origin_web = QPushButton("Web")
+        self.btn_origin_organic = QPushButton("Orgánico")
+        for button in (self.btn_origin_web, self.btn_origin_organic):
+            self._apply_btn_responsive(button, 86, 28)
+            button.setCheckable(True)
+            button.setProperty("role", "payment_toggle")
+
+        self.btn_origin_web.setToolTip("Cliente captado desde la web o chatbot.")
+        self.btn_origin_organic.setToolTip("Cliente captado de forma orgánica.")
+        self.btn_origin_organic.setChecked(True)
+
+        self.origin_group = QButtonGroup(self)
+        self.origin_group.setExclusive(True)
+        self.origin_group.addButton(self.btn_origin_web, 1)
+        self.origin_group.addButton(self.btn_origin_organic, 0)
+
+        origin_row.addWidget(self.btn_origin_web, 1)
+        origin_row.addWidget(self.btn_origin_organic, 1)
+        quick.addLayout(origin_row)
         grp_quick.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         top_panel = QHBoxLayout()

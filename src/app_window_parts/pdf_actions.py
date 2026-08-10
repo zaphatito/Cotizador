@@ -435,9 +435,10 @@ class PdfActionsMixin:
                         email=e,
                         tipo_documento=tipo_doc,
                         metodo_pago=metodo_pago_db,
-                        chatbot=bool(
-                            getattr(self, "chk_chatbot", None)
-                            and self.chk_chatbot.isChecked()
+                        chatbot=(
+                            self._is_chatbot_quote()
+                            if hasattr(self, "_is_chatbot_quote")
+                            else False
                         ),
                         currency_shown=str(curr or ""),
                         tasa_shown=float(rate) if rate is not None else None,
@@ -521,8 +522,8 @@ class PdfActionsMixin:
             self.entry_direccion.clear()
         if getattr(self, "entry_email", None) is not None:
             self.entry_email.clear()
-        if getattr(self, "chk_chatbot", None) is not None:
-            self.chk_chatbot.setChecked(False)
+        if hasattr(self, "_set_chatbot_quote"):
+            self._set_chatbot_quote(False)
         try:
             if getattr(self, "combo_tipo_documento", None) is not None:
                 self.combo_tipo_documento.setCurrentIndex(0)

@@ -889,12 +889,12 @@ class QuotesTableModel(QAbstractTableModel):
         if self.show_payment:
             self.HEADERS = [
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
-                "Estado", "Pago", "Total", "Moneda", "Items", "PDF"
+                "Estado", "Pago", "Total", "Tipo de cotización", "Items", "PDF"
             ]
         else:
             self.HEADERS = [
                 "Fecha/Hora", "N°", "Cliente", doc_hdr, "Teléfono",
-                "Estado", "Total", "Moneda", "Items", "PDF"
+                "Estado", "Total", "Tipo de cotización", "Items", "PDF"
             ]
 
         self._today_font = QFont()
@@ -903,7 +903,7 @@ class QuotesTableModel(QAbstractTableModel):
             self._idx_no(),
             self._idx_estado(),
             self._idx_total(),
-            self._idx_currency(),
+            self._idx_quote_type(),
             self._idx_items(),
         }
         idx_pago = self._idx_pago()
@@ -935,7 +935,7 @@ class QuotesTableModel(QAbstractTableModel):
     def _idx_total(self) -> int:
         return 7 if self.show_payment else 6
 
-    def _idx_currency(self) -> int:
+    def _idx_quote_type(self) -> int:
         return 8 if self.show_payment else 7
 
     def _idx_items(self) -> int:
@@ -977,9 +977,15 @@ class QuotesTableModel(QAbstractTableModel):
             row["_cache_total_num"] = 0.0
             row["_cache_total_txt"] = str(row.get("total_shown", "0.00"))
 
-        currency_txt = str(row.get("currency_shown") or "")
-        row["_cache_currency_txt"] = currency_txt
-        row["_cache_currency_key"] = self._text_key(currency_txt)
+        try:
+            is_web = bool(int(row.get("chatbot") or 0))
+        except (TypeError, ValueError):
+            is_web = str(row.get("chatbot") or "").strip().casefold() in {
+                "true", "web", "sí", "si"
+            }
+        quote_type_txt = "Web" if is_web else "Orgánico"
+        row["_cache_quote_type_txt"] = quote_type_txt
+        row["_cache_quote_type_key"] = self._text_key(quote_type_txt)
 
         items_raw = row.get("items_count", 0)
         try:
@@ -1063,8 +1069,8 @@ class QuotesTableModel(QAbstractTableModel):
             if c == self._idx_total():
                 return r.get("_cache_total_txt", "0.00")
 
-            if c == self._idx_currency():
-                return r.get("_cache_currency_txt", "")
+            if c == self._idx_quote_type():
+                return r.get("_cache_quote_type_txt", "")
 
             if c == self._idx_items():
                 return r.get("_cache_items_txt", "0")
@@ -1142,9 +1148,9 @@ class QuotesTableModel(QAbstractTableModel):
             v = r.get("total_shown")
             return (v is None, float(r.get("_cache_total_num", 0.0)))
 
-        if c == self._idx_currency():
-            v = r.get("currency_shown")
-            return (v is None, r.get("_cache_currency_key", ""))
+        if c == self._idx_quote_type():
+            v = r.get("chatbot")
+            return (v is None, r.get("_cache_quote_type_key", ""))
 
         if c == self._idx_items():
             v = r.get("items_count")
@@ -1157,14 +1163,34 @@ class QuotesTableModel(QAbstractTableModel):
         return (False, "")
 
     def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder):
-        if not self.rows:
-            return
-        self.layoutAboutToBeChanged.emit()
-        try:
-            reverse = (order == Qt.DescendingOrder)
-            self.rows.sort(key=lambda r: self._sort_key(r, column), reverse=reverse)
-        finally:
-            self.layoutChanged.emit()
+        # La ventana aplica el orden en SQLite antes del LIMIT/OFFSET para que
+        # el encabezado organice todos los registros y no solo la página actual.
+        return
+
+    def sort_field_for_column(self, column: int) -> str:
+        if column == 0:
+            return "created_at"
+        if column == self._idx_no():
+            return "quote_no"
+        if column == 2:
+            return "cliente"
+        if column == 3:
+            return "cedula"
+        if column == 4:
+            return "telefono"
+        if column == self._idx_estado():
+            return "estado"
+        if self.show_payment and column == self._idx_pago():
+            return "metodo_pago"
+        if column == self._idx_total():
+            return "total"
+        if column == self._idx_quote_type():
+            return "quote_type"
+        if column == self._idx_items():
+            return "items"
+        if column == self._idx_pdf():
+            return "pdf"
+        return "created_at"
 
 
 class QuoteHistoryWindow(QMainWindow):
@@ -1262,7 +1288,7 @@ class QuoteHistoryWindow(QMainWindow):
 
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText(
-            "Filtrar (cualquier columna): cliente / doc / teléfono / N° / estado / pago / total / moneda / items / PDF…"
+            "Filtrar (cualquier columna): cliente / doc / teléfono / N° / estado / pago / total / tipo / items / PDF…"
         )
         self.txt_search.setClearButtonEnabled(True)
         self.txt_search.textChanged.connect(self._on_filters_changed)
@@ -1319,6 +1345,7 @@ class QuoteHistoryWindow(QMainWindow):
         self.table.horizontalHeader().setSortIndicatorShown(True)
 
         hh = self.table.horizontalHeader()
+        hh.setSortIndicator(0, Qt.DescendingOrder)
         hh.setSectionResizeMode(QHeaderView.Stretch)
         try:
             hh.setResizeContentsPrecision(8)
@@ -1332,14 +1359,14 @@ class QuoteHistoryWindow(QMainWindow):
             idx_total = self.model._idx_total()
             idx_items = self.model._idx_items()
             idx_pdf = self.model._idx_pdf()
-            idx_curr = self.model._idx_currency()
+            idx_quote_type = self.model._idx_quote_type()
 
             hh.setSectionResizeMode(idx_no, QHeaderView.ResizeToContents)
             hh.setSectionResizeMode(idx_estado, QHeaderView.ResizeToContents)
             if idx_pago is not None:
                 hh.setSectionResizeMode(idx_pago, QHeaderView.ResizeToContents)
             hh.setSectionResizeMode(idx_total, QHeaderView.ResizeToContents)
-            hh.setSectionResizeMode(idx_curr, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(idx_quote_type, QHeaderView.ResizeToContents)
             hh.setSectionResizeMode(idx_items, QHeaderView.ResizeToContents)
             hh.setSectionResizeMode(idx_pdf, QHeaderView.ResizeToContents)
         except Exception:
@@ -1384,6 +1411,8 @@ class QuoteHistoryWindow(QMainWindow):
         nav.addWidget(self.btn_dup)
         nav.addWidget(self.btn_hide)
         main.addLayout(nav)
+
+        hh.sortIndicatorChanged.connect(self._on_sort_changed)
 
         self._apply_catalog_gate()
         self.refresh_recommendations_controls()
@@ -1984,6 +2013,9 @@ class QuoteHistoryWindow(QMainWindow):
     def _on_filters_changed(self, *_):
         self._filter_timer.start()
 
+    def _on_sort_changed(self, *_):
+        self._reload_first_page()
+
     def _selected_quote_id(self) -> int | None:
         idx = self.table.selectionModel().currentIndex()
         if not idx.isValid():
@@ -2014,17 +2046,6 @@ class QuoteHistoryWindow(QMainWindow):
         self.offset = 0
         self._reload_current_page()
 
-    def _apply_current_sort(self):
-        try:
-            if not self.table.isSortingEnabled():
-                return
-            hh = self.table.horizontalHeader()
-            col = hh.sortIndicatorSection()
-            order = hh.sortIndicatorOrder()
-            self.model.sort(col, order)
-        except Exception:
-            pass
-
     def _reload_current_page(self):
         con = None
         try:
@@ -2036,6 +2057,13 @@ class QuoteHistoryWindow(QMainWindow):
                 include_deleted=False,
                 limit=self.page_size,
                 offset=self.offset,
+                sort_by=self.model.sort_field_for_column(
+                    self.table.horizontalHeader().sortIndicatorSection()
+                ),
+                sort_desc=(
+                    self.table.horizontalHeader().sortIndicatorOrder()
+                    == Qt.DescendingOrder
+                ),
             )
         except Exception as e:
             log.exception("Error listando cotizaciones")
@@ -2050,7 +2078,6 @@ class QuoteHistoryWindow(QMainWindow):
 
         self.total = total
         self.model.set_rows(rows)
-        self._apply_current_sort()
 
         a = self.offset + 1 if total > 0 else 0
         b = min(self.offset + self.page_size, total)
@@ -2098,7 +2125,7 @@ class QuoteHistoryWindow(QMainWindow):
         act_dup = QAction("🧾 Abrir Cotización", self)
         act_pdf = QAction("📄 Abrir PDF", self)
         act_state = QAction("🔄 Cambiar estado…", self)
-        act_edit_quote_type = QAction("🤖 Editar tipo de cotización…", self)
+        act_edit_quote_type = QAction("🌐 Editar tipo de cotización…", self)
         act_labels = QAction("🏷️ Etiquetas", self)
         act_ticket = QAction("🖨️ Reimprimir ticket", self)
         act_regen = QAction("♻️ Regenerar PDF", self)
@@ -2304,11 +2331,11 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-        options = ["Cliente orgánico", "Cliente captado por chatbot"]
+        options = ["Orgánico", "Web"]
         selected, ok = QInputDialog.getItem(
             self,
             "Editar tipo de cotización",
-            "Tipo de cotización:",
+            "Origen:",
             options,
             1 if current_chatbot else 0,
             False,
@@ -2600,7 +2627,7 @@ class QuoteHistoryWindow(QMainWindow):
             free_payment = None
             if win.country_name == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
-                is_cash = (mp == "efectivo")
+                is_cash = (mp == "" or mp == "efectivo")
 
                 try:
                     if getattr(win, "btn_pay_cash", None) is not None:
@@ -2645,7 +2672,7 @@ class QuoteHistoryWindow(QMainWindow):
 
             if win.country_name == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
-                is_cash = (mp == "efectivo")
+                is_cash = (mp == "" or mp == "efectivo")
                 try:
                     if hasattr(win, "_set_py_cash_mode"):
                         win._set_py_cash_mode(is_cash, assume_items_already=True)
@@ -2838,7 +2865,7 @@ class QuoteHistoryWindow(QMainWindow):
                 pass
             elif historical_country == "PARAGUAY":
                 if not metodo_pago:
-                    metodo_pago = "Tarjeta"
+                    metodo_pago = "Efectivo"
             else:
                 if not metodo_pago:
                     metodo_pago = "Transferencia"
@@ -2944,7 +2971,7 @@ class QuoteHistoryWindow(QMainWindow):
             pass
         elif historical_country == "PARAGUAY":
             if not metodo_pago:
-                metodo_pago = "Tarjeta"
+                metodo_pago = "Efectivo"
         else:
             if not metodo_pago:
                 metodo_pago = "Transferencia"

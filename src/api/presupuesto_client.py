@@ -2050,7 +2050,7 @@ def _regenerate_quote_artifacts(
     metodo_pago = str(header.get("metodo_pago") or "").strip()
     country_code = _country_code_from_country(str(header.get("country_code") or ""))
     if not metodo_pago and country_code == "PY":
-        metodo_pago = "Tarjeta"
+        metodo_pago = "Efectivo"
     elif not metodo_pago and country_code == "VE":
         metodo_pago = "Transferencia"
 

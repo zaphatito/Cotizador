@@ -2351,7 +2351,7 @@ def mig_42(con: sqlite3.Connection) -> None:
 
 
 def mig_43(con: sqlite3.Connection) -> None:
-    """v43: clasifica cada cotizacion como chatbot u organica."""
+    """v43: clasifica cada cotizacion como web/chatbot u organica."""
     if not _table_exists(con, "quotes"):
         return
 

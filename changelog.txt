@@ -3,17 +3,19 @@ Versión: 2.0.20
 Fecha: 2026-08-10
 
 Resumen
-- Se incorporó la clasificación de clientes captados por chatbot frente a clientes orgánicos, guardada por cotización y sincronizada con EFAPI.
+- Se incorporó la clasificación de origen Web frente a Orgánico, guardada por cotización y sincronizada con EFAPI.
 - Se rediseñó el manejo de catálogos e inventario para trabajar con varios países, empresas y tiendas, con actualización periódica del stock desde el servidor.
 - Se agregó un modo completamente offline, catálogos locales independientes y correlativos provisionales que se regularizan cuando vuelve la conexión.
 - Se añadió soporte funcional para Bolivia, junto con sus reglas de documentos, moneda, precios, plantillas, PDF y ticket.
 
-Clasificación chatbot
-- [Nuevo] La pantalla de creación incluye el check «Cliente captado por chatbot» en el área de formas de pago; desmarcado identifica un cliente orgánico.
+Origen Web / Orgánico
+- [Nuevo] La pantalla de creación incluye un selector exclusivo «Web / Orgánico» con el mismo estilo visual del selector de pago de Paraguay.
+- [Mejora] El origen predeterminado de una cotización nueva es «Orgánico».
+- [Fix] En Paraguay, el selector de pago inicia en «Efectivo» y las cotizaciones históricas sin pago registrado usan ese mismo valor predeterminado.
 - [Nuevo] Cada cotización conserva el valor true/false en el histórico local y lo envía en todos los intentos y reintentos hacia EFAPI.
-- [Nuevo] El menú contextual del histórico permite editar el «Tipo de cotización» entre cliente orgánico y cliente captado por chatbot.
+- [Nuevo] El menú contextual del histórico permite editar el «Tipo de cotización» entre «Web» y «Orgánico».
 - [Mejora] Al cambiar el tipo desde el histórico se limpia la marca de envío anterior y se solicita una nueva sincronización con la API.
-- [Mejora] Abrir o duplicar una cotización histórica conserva su clasificación chatbot.
+- [Mejora] Abrir o duplicar una cotización histórica conserva su origen Web/Orgánico.
 - [Compatibilidad] Las cotizaciones anteriores se migran como clientes orgánicos y no requieren edición manual.
 
 Configuración inicial y modos de trabajo
@@ -77,13 +79,13 @@ API, sincronización y asistente
 - [Fix] Las acciones automáticas ya no cruzan catálogos, monedas ni identidades al cambiar de ámbito.
 
 Base de datos local
-- El esquema SQLite se actualiza automáticamente de la versión 42 a la 43 para agregar el indicador chatbot.
+- El esquema SQLite se actualiza automáticamente de la versión 42 a la 43 para agregar el origen Web/Orgánico mediante el indicador chatbot.
 - Esta versión también incluye las migraciones 37 a 42 del cambio anterior: caché remoto, correlativos provisionales, contexto histórico, factor por renglón, renombre de telemarketing y catálogos offline.
 - Las migraciones son incrementales y conservan la base, la configuración, los clientes, el histórico y los catálogos existentes.
 
 Compatibilidad y despliegue
 - EFAPI debe actualizarse junto con esta versión y aplicar `database/1.5.11.sql` antes de recibir cotizaciones con el campo chatbot.
-- El campo chatbot es independiente de telemarketing: telemarketing identifica el tipo de instalación; chatbot identifica el origen de cada cliente/cotización.
+- El campo chatbot es independiente de telemarketing: telemarketing identifica el tipo de instalación; chatbot usa `true` para Web y `false` para Orgánico en cada cotización.
 - Las versiones actuales de LCDP en las ramas prod, kardex y caja pueden continuar enviando ventas sin el campo nuevo; EFAPI acepta ese contrato anterior.
 - Cuando una venta antigua de LCDP está enlazada a una cotización, EFAPI hereda la clasificación chatbot del presupuesto central.
 - La interfaz de LCDP queda preparada en la rama kardex y pendiente de activación/despliegue; no forma parte de la actualización del Cotizador de esta entrega.
