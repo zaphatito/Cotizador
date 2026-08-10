@@ -25,6 +25,7 @@ from sqlModels.quote_statuses_repo import replace_quote_statuses, list_quote_sta
 
 from ..db_path import resolve_db_path
 from ..app_window_parts.delegates import InlineTextDelegate
+from .bounded_table_columns import install_bounded_columns
 from .status_colors import (
     best_text_color_for_bg,
     get_default_status_color_hex_map,
@@ -73,6 +74,7 @@ class StatusColorsDialog(QDialog):
         self.tbl.horizontalHeader().setStretchLastSection(True)
         self.tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        install_bounded_columns(self.tbl, fill_column=0)
         self._inline_text_delegate = InlineTextDelegate(self.tbl)
         self.tbl.setItemDelegateForColumn(0, self._inline_text_delegate)
         layout.addWidget(self.tbl, 1)

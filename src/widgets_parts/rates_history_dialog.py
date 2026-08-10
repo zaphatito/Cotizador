@@ -21,6 +21,7 @@ from ..config import APP_CURRENCY, get_secondary_currencies
 from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
 from .excel_table_behavior import ExcelTableController
+from .bounded_table_columns import install_bounded_columns
 
 from sqlModels.db import connect, ensure_schema
 
@@ -222,6 +223,7 @@ class RatesHistoryDialog(QDialog):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        install_bounded_columns(self.table, fill_column=0)
 
         lay.addWidget(self.table, 1)
 

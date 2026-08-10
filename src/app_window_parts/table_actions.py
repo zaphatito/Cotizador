@@ -11,7 +11,6 @@ from ..widgets import (
     show_discount_dialog_for_item,
     show_observation_dialog,
 )
-from .models import CAN_EDIT_UNIT_PRICE
 
 
 class TableActionsMixin:
@@ -98,7 +97,7 @@ class TableActionsMixin:
 
         menu.addAction(self.act_edit_discount)
 
-        can_edit_price = (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE
+        can_edit_price = (cat == "SERVICIO") or self.model._can_edit_unit_price()
         if can_edit_price:
             menu.addAction(self.act_edit_price)
 
@@ -129,7 +128,7 @@ class TableActionsMixin:
             return
 
         if col == 4:  # Precio
-            if (cat == "SERVICIO") or CAN_EDIT_UNIT_PRICE or (cat == "BOTELLAS"):
+            if (cat == "SERVICIO") or self.model._can_edit_unit_price() or (cat == "BOTELLAS"):
                 self._abrir_selector_precio(row)
             return
 
@@ -140,8 +139,14 @@ class TableActionsMixin:
         if row < 0 or row >= len(self.items):
             return
         it = self.items[row]
+        current_currency, _secondary, _rate = self._currency_context()
         payload = show_discount_dialog_for_item(
-            self, self._app_icon, it, self.base_currency
+            self,
+            self._app_icon,
+            it,
+            self.base_currency,
+            converter=self._convert_from_base,
+            current_currency=current_currency,
         )
         if not payload:
             return
@@ -158,8 +163,15 @@ class TableActionsMixin:
         if row < 0 or row >= len(self.items):
             return
         item = self.items[row]
+        current_currency, _secondary, _rate = self._currency_context()
 
-        payload = show_price_picker(self, self._app_icon, item)
+        payload = show_price_picker(
+            self,
+            self._app_icon,
+            item,
+            converter=self._convert_from_base,
+            current_currency=current_currency,
+        )
         if not payload:
             return
         idx = self.model.index(row, 4)
@@ -240,7 +252,13 @@ class TableActionsMixin:
 
         item["precio"] = unit_price
 
-        factor = float(factor_total_por_categoria(cat, item if item else base_prod))
+        factor = float(
+            factor_total_por_categoria(
+                cat,
+                item if item else base_prod,
+                country=getattr(self, "country_name", None),
+            )
+        )
         item["factor_total"] = factor
         subtotal = round(unit_price * qty * factor, 2)
         item["subtotal_base"] = subtotal

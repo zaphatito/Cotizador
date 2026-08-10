@@ -5,6 +5,7 @@ import os
 import math
 
 from ..config import APP_COUNTRY, STORE_ID
+from ..country_rules import normalize_country_name, uses_peru_business_rules
 from ..logging_setup import get_logger
 from ..pricing import cantidad_para_mostrar, quantity_in_grams
 from ..product_rules import uses_gram_quantity
@@ -36,14 +37,7 @@ def _quote_code_from_pdf_path(pdf_path: str) -> str:
 
 
 def _normalize_country(country: str) -> str:
-    c = str(country or "").strip().upper()
-    if c in ("PE", "PERU"):
-        return "PERU"
-    if c in ("PY", "PARAGUAY"):
-        return "PARAGUAY"
-    if c in ("VE", "VENEZUELA"):
-        return "VENEZUELA"
-    return c
+    return normalize_country_name(country)
 
 
 def _country_from_quote_code(code: str) -> str:
@@ -63,7 +57,7 @@ def _fmt_qty(x: float) -> str:
     return f"{float(nz(x, 0.0)):.3f}".rstrip("0").rstrip(".")
 
 
-def _peru_header_extra_lines(items_pdf: list[dict]) -> list[str]:
+def _peru_header_extra_lines(items_pdf: list[dict], *, country: str = "PERU") -> list[str]:
     total_botellas = 0.0
     total_esencias_g = 0.0
 
@@ -73,8 +67,8 @@ def _peru_header_extra_lines(items_pdf: list[dict]) -> list[str]:
             qty = float(nz(it.get("cantidad"), 0.0))
             if cat == "BOTELLAS":
                 total_botellas += qty
-            if uses_gram_quantity(it, country="PERU"):
-                total_esencias_g += quantity_in_grams(it, qty, country="PERU")
+            if uses_gram_quantity(it, country=country):
+                total_esencias_g += quantity_in_grams(it, qty, country=country)
         except Exception:
             continue
 
@@ -102,6 +96,9 @@ def generar_ticket_para_cotizacion(
     *,
     quote_code: str = "",
     country: str = "",
+    store_id: str = "",
+    company_type: str = "",
+    context=None,
     cliente_nombre: str = "",
     printer_name: str = DEFAULT_PRINTER_NAME,
     width: int = DEFAULT_TICKET_WIDTH,
@@ -113,17 +110,24 @@ def generar_ticket_para_cotizacion(
     Genera el .cmd en <cotizaciones>/tickets/<base>.IMPRIMIR_TICKET.cmd
     """
     try:
+        scope = getattr(context, "scope", None)
+        context_country = str(getattr(scope, "country_code", "") or "").strip()
+        context_store = str(getattr(context, "id_cotizador", "") or "").strip()
+        context_company = str(getattr(scope, "company_type", "") or "").strip()
+        country = str(country or context_country).strip()
+        store_id = str(store_id or context_store).strip()
+        company_type = str(company_type or context_company).strip()
         code = (quote_code or "").strip() or _quote_code_from_pdf_path(pdf_path)
         ticket_quote_no = format_quote_display_no(
             quote_code=code,
-            store_id=STORE_ID,
+            store_id=str(store_id or STORE_ID),
             width=7,
         )
         country_norm = _normalize_country(country) or _country_from_quote_code(code) or _normalize_country(APP_COUNTRY)
 
         header_extra_lines: list[str] = []
-        if country_norm == "PERU":
-            header_extra_lines = _peru_header_extra_lines(items_pdf)
+        if uses_peru_business_rules(country_norm):
+            header_extra_lines = _peru_header_extra_lines(items_pdf, country=country_norm)
 
         total_general = _ticket_total_amount(items_pdf)
         total_general_text = f"{float(total_general):.2f}"
@@ -133,7 +137,7 @@ def generar_ticket_para_cotizacion(
             quote_number=ticket_quote_no,
             cliente_nombre=cliente_nombre,
             width=width,
-            qty_text_fn=cantidad_para_mostrar,
+            qty_text_fn=lambda item: cantidad_para_mostrar(item, country=country_norm),
             obs_max_len=OBS_MAX_LEN,
             header_extra_lines=header_extra_lines,
             total_general_text=total_general_text,
@@ -150,7 +154,13 @@ def generar_ticket_para_cotizacion(
             bottom_mm=bottom_mm,
             cut_mode=cut_mode,
         )
-        log.info("Ticket listo: %s", out.get("ticket_cmd"))
+        log.info(
+            "Ticket listo: %s (pais=%s empresa=%s cotizador=%s)",
+            out.get("ticket_cmd"),
+            country_norm,
+            company_type,
+            str(store_id or STORE_ID),
+        )
         return out
 
     except Exception:

@@ -2125,6 +2125,231 @@ def mig_36(con: sqlite3.Connection) -> None:
     )
 
 
+def mig_37(con: sqlite3.Connection) -> None:
+    """
+    v37: incorpora Bolivia a la identidad local de clientes y repara tasas fresh.
+    - Sustituye la unicidad global de documento por pais+tipo+documento.
+    - Garantiza los clientes genericos, incluido BO/CI/00000000.
+    - Crea/backfillea exchange_rates_history de forma idempotente.
+    """
+    mig_3(con)
+
+    if _table_exists(con, "clients"):
+        con.execute("DROP INDEX IF EXISTS idx_clients_tipo_doc_norm")
+        con.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_country_tipo_doc_norm
+            ON clients(country_code, tipo_documento, documento_norm)
+            """
+        )
+
+    from .clients_repo import ensure_generic_clients
+
+    ensure_generic_clients(con)
+    _refresh_api_settings_from_store_config(con)
+
+
+def mig_38(con: sqlite3.Connection) -> None:
+    """
+    v38: estado persistente del correlativo para cotizaciones creadas offline.
+    - confirmed: correlativo reservado y artefactos actualizados.
+    - provisional: correlativo local pendiente de reservar en el servidor.
+    - reserved: correlativo reservado; falta regenerar PDF/ticket.
+    """
+    if not _table_exists(con, "quotes"):
+        return
+
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "quote_no_status",
+        "TEXT NOT NULL DEFAULT 'confirmed'",
+    )
+    con.execute(
+        """
+        UPDATE quotes
+        SET quote_no_status = 'confirmed'
+        WHERE LOWER(TRIM(COALESCE(quote_no_status, ''))) NOT IN (
+            'confirmed', 'provisional', 'reserved'
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_quotes_quote_no_status
+        ON quotes(quote_no_status)
+        """
+    )
+
+
+def mig_39(con: sqlite3.Connection) -> None:
+    """
+    v39: caché de catálogo/stock multidenda y contexto inmutable de cotización.
+    """
+    from .catalog_cache_repo import ensure_catalog_cache_schema
+
+    ensure_catalog_cache_schema(con)
+
+    if not _table_exists(con, "quotes"):
+        return
+
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "company_type",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "base_currency",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "cotizador_username",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "id_cotizador",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+
+    company_type = _get_setting_value(con, "company_type", "").strip()
+    if not company_type:
+        company_type = _get_setting_value(con, "company", "").strip()
+    username = _get_setting_value(con, "username", "").strip()
+    configured_cotizador = _get_setting_value(con, "store_id", "").strip()
+
+    con.execute(
+        """
+        UPDATE quotes
+        SET company_type = ?
+        WHERE TRIM(COALESCE(company_type, '')) = ''
+        """,
+        (company_type,),
+    )
+    con.execute(
+        """
+        UPDATE quotes
+        SET cotizador_username = ?
+        WHERE TRIM(COALESCE(cotizador_username, '')) = ''
+        """,
+        (username,),
+    )
+    con.execute(
+        """
+        UPDATE quotes
+        SET base_currency = CASE UPPER(TRIM(COALESCE(country_code, '')))
+            WHEN 'BO' THEN 'BOB'
+            WHEN 'BOLIVIA' THEN 'BOB'
+            WHEN 'PE' THEN 'PEN'
+            WHEN 'PERU' THEN 'PEN'
+            WHEN 'PY' THEN 'PYG'
+            WHEN 'PARAGUAY' THEN 'PYG'
+            WHEN 'VE' THEN 'USD'
+            WHEN 'VENEZUELA' THEN 'USD'
+            ELSE COALESCE(NULLIF(TRIM(currency_shown), ''), '')
+        END
+        WHERE TRIM(COALESCE(base_currency, '')) = ''
+        """
+    )
+
+    rows = con.execute(
+        """
+        SELECT id, quote_no
+        FROM quotes
+        WHERE TRIM(COALESCE(id_cotizador, '')) = ''
+        """
+    ).fetchall()
+    for row in rows:
+        quote_no = str(row["quote_no"] or "").strip()
+        match = re.match(r"^[^-]+-([^-]+)-[0-9]{7}$", quote_no)
+        inferred = str(match.group(1) if match else configured_cotizador).strip()
+        con.execute(
+            "UPDATE quotes SET id_cotizador = ? WHERE id = ?",
+            (inferred, int(row["id"])),
+        )
+
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_quotes_scope
+        ON quotes(country_code, company_type)
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_quotes_cotizador_identity
+        ON quotes(cotizador_username, id_cotizador)
+        """
+    )
+
+
+def mig_40(con: sqlite3.Connection) -> None:
+    """v40: conserva el factor de cantidad usado por cada renglon historico."""
+    if not _table_exists(con, "quote_items"):
+        return
+
+    _add_column_if_missing(
+        con,
+        "quote_items",
+        "factor_total",
+        "REAL NOT NULL DEFAULT 1",
+    )
+    con.execute(
+        """
+        UPDATE quote_items
+        SET factor_total = CASE
+            WHEN ABS(COALESCE(precio_base, 0) * COALESCE(cantidad, 0)) > 0.000000001
+             AND COALESCE(subtotal_base, 0) > 0
+                THEN subtotal_base / (precio_base * cantidad)
+            ELSE 1
+        END
+        """
+    )
+
+
+def mig_41(con: sqlite3.Connection) -> None:
+    """v41: renombra el indicador local tienda a telemarketing."""
+    if not _table_exists(con, "settings"):
+        return
+
+    legacy = con.execute(
+        "SELECT value FROM settings WHERE key = 'tienda'"
+    ).fetchone()
+    current = con.execute(
+        "SELECT value FROM settings WHERE key = 'telemarketing'"
+    ).fetchone()
+    legacy_value = legacy["value"] if legacy is not None else None
+
+    if current is None:
+        con.execute(
+            "INSERT INTO settings(key, value) VALUES('telemarketing', ?)",
+            (legacy_value,),
+        )
+    elif current["value"] is None and legacy_value is not None:
+        con.execute(
+            "UPDATE settings SET value = ? WHERE key = 'telemarketing'",
+            (legacy_value,),
+        )
+
+    con.execute("DELETE FROM settings WHERE key = 'tienda'")
+
+
+def mig_42(con: sqlite3.Connection) -> None:
+    """v42: registra el catálogo Excel legacy como primer catálogo offline."""
+    from .offline_catalogs_repo import (
+        bootstrap_current_catalog,
+        ensure_offline_catalog_schema,
+    )
+
+    ensure_offline_catalog_schema(con)
+    bootstrap_current_catalog(con)
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2162,4 +2387,10 @@ MIGRATIONS: dict[int, callable] = {
     34: mig_34,
     35: mig_35,
     36: mig_36,
+    37: mig_37,
+    38: mig_38,
+    39: mig_39,
+    40: mig_40,
+    41: mig_41,
+    42: mig_42,
 }

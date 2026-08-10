@@ -1,6 +1,9 @@
 # src/widgets_parts/listado_productos_dialog.py
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QDialog,
@@ -9,7 +12,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QLineEdit,
     QTableWidget,
-    QHeaderView,
     QAbstractItemView,
     QTableWidgetItem,
 )
@@ -18,12 +20,14 @@ from ..config import (
     listing_allows_products,
     listing_allows_presentations,
     convert_from_base,
-    ALLOW_NO_STOCK,  # ✅
 )
 from ..pricing import precio_base_para_listado
+from ..stock_policy import stock_enforcement_enabled
+from ..stock_matrix import store_label
 from ..utils import fmt_money_ui, nz
 from .helpers import _fmt_trim_decimal
 from .excel_table_behavior import ExcelTableController
+from .bounded_table_columns import install_bounded_columns
 
 
 class ListadoProductosDialog(QDialog):
@@ -35,7 +39,7 @@ class ListadoProductosDialog(QDialog):
     IMPORTANTE:
       - Los productos cuyo id empieza con "PC" y categoría "OTROS"
         no se muestran en la pestaña de Presentaciones.
-      - Si NOT ALLOW_NO_STOCK: no se listan items con stock <= 0
+      - En modo Excel respeta la política local de stock; en modo servidor es informativo.
     """
 
     def __init__(
@@ -45,6 +49,11 @@ class ListadoProductosDialog(QDialog):
         presentaciones,
         on_select,
         app_icon: QIcon = QIcon(),
+        *,
+        converter=None,
+        current_currency: str | None = None,
+        quote_context=None,
+        stock_matrix=None,
     ):
         super().__init__(self_parent)
         self.setWindowTitle("Listado de Productos")
@@ -52,6 +61,26 @@ class ListadoProductosDialog(QDialog):
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
         self._on_select = on_select
+        self._convert_from_base = converter if callable(converter) else convert_from_base
+        self._current_currency = str(current_currency or "").strip().upper() or None
+        self._quote_context = quote_context
+        self._stock_matrix = dict(stock_matrix) if isinstance(stock_matrix, Mapping) else {}
+        self._stock_stores: list[tuple[str, str]] = []
+        for store in self._stock_matrix.get("stores") or []:
+            if not isinstance(store, Mapping):
+                continue
+            store_id = str(store.get("id_tienda") or "").strip()
+            if store_id:
+                self._stock_stores.append((store_id, store_label(store)))
+        self._stock_rows: dict[str, dict] = {}
+        for row in self._stock_matrix.get("rows") or []:
+            if not isinstance(row, Mapping):
+                continue
+            code = str(row.get("codigo_norm") or row.get("codigo") or "").strip().upper()
+            if code:
+                self._stock_rows[code] = dict(row)
+        if self._stock_stores:
+            self.resize(1120, 560)
 
         self._rows_prod: list[dict] = []
         self._rows_pres: list[dict] = []
@@ -78,11 +107,11 @@ class ListadoProductosDialog(QDialog):
             )
             layout_prod.addWidget(self.entry_buscar_prod)
 
-            self.tabla_prod = QTableWidget(0, 6)
+            self.tabla_prod = QTableWidget(0, 6 + len(self._stock_stores))
             self.tabla_prod.setHorizontalHeaderLabels(
-                ["Código", "Nombre", "Categoría", "Precio", "Stock", "Tipo"]
+                self._table_headers()
             )
-            self.tabla_prod.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self._configure_table_header(self.tabla_prod)
             self.tabla_prod.setEditTriggers(QAbstractItemView.NoEditTriggers)
             self.tabla_prod.setSelectionBehavior(QAbstractItemView.SelectItems)
             self.tabla_prod.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -109,10 +138,15 @@ class ListadoProductosDialog(QDialog):
                 stock = float(nz(p.get("cantidad_disponible"), 0.0))
 
                 # ✅ NO mostrar sin stock si está deshabilitado
-                if (not ALLOW_NO_STOCK) and stock <= 0.0:
+                if stock_enforcement_enabled(self._quote_context) and stock <= 0.0:
                     continue
 
                 precio = precio_base_para_listado(p)
+                stock_row = self._find_stock_row(
+                    p.get("id"), p.get("codigo"), p.get("CODIGO")
+                )
+                if stock_row is not None:
+                    stock = float(nz(stock_row.get("total_stock"), stock))
                 self._rows_prod.append(
                     {
                         "codigo": p.get("id", ""),
@@ -121,6 +155,7 @@ class ListadoProductosDialog(QDialog):
                         "genero": p.get("genero", ""),
                         "precio": precio,
                         "stock": stock,
+                        "stocks": dict(stock_row.get("stocks") or {}) if stock_row else {},
                         "tipo": "Catálogo",
                     }
                 )
@@ -146,11 +181,11 @@ class ListadoProductosDialog(QDialog):
             )
             layout_pres.addWidget(self.entry_buscar_pres)
 
-            self.tabla_pres = QTableWidget(0, 6)
+            self.tabla_pres = QTableWidget(0, 6 + len(self._stock_stores))
             self.tabla_pres.setHorizontalHeaderLabels(
-                ["Código", "Nombre", "Categoría", "Precio", "Stock", "Tipo"]
+                self._table_headers()
             )
-            self.tabla_pres.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self._configure_table_header(self.tabla_pres)
             self.tabla_pres.setEditTriggers(QAbstractItemView.NoEditTriggers)
             self.tabla_pres.setSelectionBehavior(QAbstractItemView.SelectItems)
             self.tabla_pres.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -197,9 +232,17 @@ class ListadoProductosDialog(QDialog):
                         0.0,
                     )
                 )
+                stock_row = self._find_stock_row(
+                    pr.get("presentation_key"),
+                    pr.get("codigo_norm"),
+                    pr.get("CODIGO_NORM"),
+                    codigo,
+                )
+                if stock_row is not None:
+                    stock = float(nz(stock_row.get("total_stock"), stock))
 
                 # ✅ NO mostrar sin stock si está deshabilitado
-                if (not ALLOW_NO_STOCK) and stock <= 0.0:
+                if stock_enforcement_enabled(self._quote_context) and stock <= 0.0:
                     continue
 
                 precio = precio_base_para_listado(pr)
@@ -217,6 +260,7 @@ class ListadoProductosDialog(QDialog):
                         "genero": genero,
                         "precio": float(precio),
                         "stock": stock,
+                        "stocks": dict(stock_row.get("stocks") or {}) if stock_row else {},
                         "tipo": "Presentación",
                     }
                 )
@@ -226,6 +270,41 @@ class ListadoProductosDialog(QDialog):
             self.tabla_pres.cellDoubleClicked.connect(
                 lambda row, _col: self._doble_click("pres", row)
             )
+
+    def _table_headers(self) -> list[str]:
+        return [
+            "Código",
+            "Nombre",
+            "Categoría",
+            "Precio",
+            "Stock total",
+            *[label for _store_id, label in self._stock_stores],
+            "Tipo",
+        ]
+
+    def _find_stock_row(self, *codes) -> dict | None:
+        for value in codes:
+            code = str(value or "").strip().upper()
+            if code and code in self._stock_rows:
+                return self._stock_rows[code]
+        return None
+
+    def _configure_table_header(self, table: QTableWidget) -> None:
+        install_bounded_columns(table, minimum_section_size=40, fill_column=1)
+
+    def _paint_stock_cells(self, table: QTableWidget, row_index: int, row: dict) -> None:
+        stocks = row.get("stocks") if isinstance(row.get("stocks"), Mapping) else {}
+        for offset, (store_id, _label) in enumerate(self._stock_stores, start=5):
+            value = stocks.get(store_id)
+            text = "—" if value is None else _fmt_trim_decimal(value)
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row_index, offset, item)
+        table.setItem(
+            row_index,
+            5 + len(self._stock_stores),
+            QTableWidgetItem(str(row["tipo"])),
+        )
 
     def _pintar_tabla_prod(self, rows):
         if not self.tabla_prod:
@@ -239,12 +318,18 @@ class ListadoProductosDialog(QDialog):
             self.tabla_prod.setItem(i, 2, QTableWidgetItem(str(r["categoria"])))
 
             precio_base = float(nz(r["precio"], 0.0))
-            precio_mostrado = convert_from_base(precio_base)
-            self.tabla_prod.setItem(i, 3, QTableWidgetItem(fmt_money_ui(precio_mostrado)))
+            precio_mostrado = self._convert_from_base(precio_base)
+            self.tabla_prod.setItem(
+                i,
+                3,
+                QTableWidgetItem(
+                    fmt_money_ui(precio_mostrado, currency=self._current_currency)
+                ),
+            )
 
             stock_txt = _fmt_trim_decimal(r.get("stock", 0.0))
             self.tabla_prod.setItem(i, 4, QTableWidgetItem(stock_txt))
-            self.tabla_prod.setItem(i, 5, QTableWidgetItem(str(r["tipo"])))
+            self._paint_stock_cells(self.tabla_prod, i, r)
         self.tabla_prod.setUpdatesEnabled(True)
 
     def _pintar_tabla_pres(self, rows):
@@ -259,12 +344,18 @@ class ListadoProductosDialog(QDialog):
             self.tabla_pres.setItem(i, 2, QTableWidgetItem(str(r["categoria"])))
 
             precio_base = float(nz(r["precio"], 0.0))
-            precio_mostrado = convert_from_base(precio_base)
-            self.tabla_pres.setItem(i, 3, QTableWidgetItem(fmt_money_ui(precio_mostrado)))
+            precio_mostrado = self._convert_from_base(precio_base)
+            self.tabla_pres.setItem(
+                i,
+                3,
+                QTableWidgetItem(
+                    fmt_money_ui(precio_mostrado, currency=self._current_currency)
+                ),
+            )
 
             stock_txt = _fmt_trim_decimal(r.get("stock", 0.0))
             self.tabla_pres.setItem(i, 4, QTableWidgetItem(stock_txt))
-            self.tabla_pres.setItem(i, 5, QTableWidgetItem(str(r["tipo"])))
+            self._paint_stock_cells(self.tabla_pres, i, r)
         self.tabla_pres.setUpdatesEnabled(True)
 
     def _filtrar_prod(self, txt):

@@ -6,13 +6,14 @@ from PySide6.QtGui import QBrush, QFont
 
 from ..config import APP_COUNTRY, convert_from_base
 from ..product_rules import uses_gram_quantity
+from ..country_rules import normalize_country_name, uses_peru_business_rules
 from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
+from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
 from ..logging_setup import get_logger
+from .history_snapshot import matching_history_shown_snapshot
 
 log = get_logger(__name__)
-
-CAN_EDIT_UNIT_PRICE = (APP_COUNTRY in ("PARAGUAY", "PERU"))
 
 PY_CASH_BASE_PCT = 4.7619
 _PCT_EPS = 1e-6
@@ -206,12 +207,60 @@ class ItemsModel(QAbstractTableModel):
     item_added = Signal(int)
     toast_requested = Signal(str)
 
-    def __init__(self, items: list[dict]):
+    def __init__(
+        self,
+        items: list[dict],
+        *,
+        country: str | None = None,
+        converter=None,
+        currency_code: str | None = None,
+        currency_provider=None,
+    ):
         super().__init__()
         self._items = items
+        # Compatibilidad para consumidores legacy: las ventanas nuevas pasan el
+        # pais de su QuoteContext de forma explicita, pero un ItemsModel aislado
+        # conserva el pais configurado localmente.
+        self.country = normalize_country_name(
+            APP_COUNTRY if country is None else country,
+            default="PARAGUAY",
+        )
+        self._currency_converter = converter if callable(converter) else convert_from_base
+        self._currency_code = str(currency_code or "").strip().upper()
+        self._currency_provider = currency_provider if callable(currency_provider) else None
         self._py_cash_mode = False
         self._recs_preview: list[dict] = []
         self._code_edit_handler = None
+
+    def _convert_from_base(self, amount: float) -> float:
+        return float(self._currency_converter(float(amount)))
+
+    def _display_currency_code(self) -> str | None:
+        if self._currency_provider is not None:
+            try:
+                provided = str(self._currency_provider() or "").strip().upper()
+            except Exception:
+                provided = ""
+            if provided:
+                return provided
+        return self._currency_code or None
+
+    def _format_money(self, amount: float) -> str:
+        return fmt_money_ui(amount, currency=self._display_currency_code())
+
+    def _matching_history_shown_snapshot(self, item: dict) -> dict | None:
+        try:
+            rate = self._convert_from_base(1.0)
+        except Exception:
+            return None
+        return matching_history_shown_snapshot(
+            item,
+            currency=self._display_currency_code(),
+            rate=rate,
+        )
+
+    def _can_edit_unit_price(self) -> bool:
+        return self.country == "PARAGUAY" or uses_peru_business_rules(self.country)
 
     def set_code_edit_handler(self, handler) -> None:
         self._code_edit_handler = handler if callable(handler) else None
@@ -271,7 +320,7 @@ class ItemsModel(QAbstractTableModel):
                 cat = str(r.get("categoria") or "").strip()
 
                 qty_in = float(nz(r.get("qty"), 0.0))
-                if APP_COUNTRY == "PERU" and uses_gram_quantity(r, country=APP_COUNTRY):
+                if uses_peru_business_rules(self.country) and uses_gram_quantity(r, country=self.country):
                     qty = round(qty_in, 3)
                     if qty < 0.001:
                         qty = 0.001
@@ -355,7 +404,7 @@ class ItemsModel(QAbstractTableModel):
         }
 
     def is_py_cash_mode(self) -> bool:
-        return bool(self._py_cash_mode) if APP_COUNTRY == "PARAGUAY" else False
+        return bool(self._py_cash_mode) if self.country == "PARAGUAY" else False
 
     def _sync_py_cash_user_pct_from_loaded_items(self) -> bool:
         changed = False
@@ -389,7 +438,7 @@ class ItemsModel(QAbstractTableModel):
         return changed
 
     def set_py_cash_mode(self, enabled: bool, *, assume_items_already: bool = False):
-        if APP_COUNTRY != "PARAGUAY":
+        if self.country != "PARAGUAY":
             return
         enabled = bool(enabled)
 
@@ -429,7 +478,7 @@ class ItemsModel(QAbstractTableModel):
         if f > 0:
             return f
         cat = (it.get("categoria") or "").upper()
-        return float(factor_total_por_categoria(cat, it))
+        return float(factor_total_por_categoria(cat, it, country=self.country))
 
     def _compute_subtotal_base(self, it: dict, unit_price: float | None = None) -> float:
         if unit_price is None:
@@ -668,7 +717,7 @@ class ItemsModel(QAbstractTableModel):
         can_edit_price = (
             col == 4
             and (
-                CAN_EDIT_UNIT_PRICE
+                self._can_edit_unit_price()
                 or (self._items[row].get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")
             )
         )
@@ -704,7 +753,18 @@ class ItemsModel(QAbstractTableModel):
                     return f"Doble clic / Enter para agregar.\nRecomendación ({sc:.0%}): {rsn}"
                 return f"Doble clic / Enter para agregar.\nRecomendación ({sc:.0%})."
 
+        if role == Qt.ForegroundRole and col == 3:
+            if has_insufficient_stock(
+                quantity=it.get("cantidad", 0.0),
+                available=it.get("stock_disponible", -1.0),
+                factor=self._get_factor_total(it),
+            ):
+                return QBrush(Qt.red)
+
         if role == Qt.DisplayRole:
+            shown_snapshot = (
+                None if is_preview else self._matching_history_shown_snapshot(it)
+            )
             if col == 0:
                 return it["codigo"]
             elif col == 1:
@@ -724,10 +784,15 @@ class ItemsModel(QAbstractTableModel):
                 if d_pct > 0:
                     return f"-{d_pct:.2f}%"
                 if d_monto > 0:
-                    return f"-{fmt_money_ui(convert_from_base(d_monto))}"
+                    shown_discount = (
+                        shown_snapshot["descuento"]
+                        if shown_snapshot is not None and "descuento" in shown_snapshot
+                        else self._convert_from_base(d_monto)
+                    )
+                    return f"-{self._format_money(float(nz(shown_discount, 0.0)))}"
                 return "—"
             elif col == 3:
-                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
+                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -739,12 +804,21 @@ class ItemsModel(QAbstractTableModel):
                         return "1"
             elif col == 4:
                 base_price = float(nz(it.get("precio"), 0.0))
-                shown_price = convert_from_base(base_price)
-                base_text = fmt_money_ui(shown_price)
+                shown_price = (
+                    shown_snapshot["precio"]
+                    if shown_snapshot is not None and "precio" in shown_snapshot
+                    else self._convert_from_base(base_price)
+                )
+                base_text = self._format_money(shown_price)
                 return f"{base_text} ✏️" if it.get("precio_override") is not None else base_text
             elif col == 5:
                 total_base = float(nz(it.get("total"), 0.0))
-                return fmt_money_ui(convert_from_base(total_base))
+                shown_total = (
+                    shown_snapshot["total"]
+                    if shown_snapshot is not None and "total" in shown_snapshot
+                    else self._convert_from_base(total_base)
+                )
+                return self._format_money(float(nz(shown_total, 0.0)))
 
         if role == Qt.EditRole:
             if is_preview:
@@ -766,7 +840,7 @@ class ItemsModel(QAbstractTableModel):
                 return ""
 
             if col == 3:
-                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
+                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -776,7 +850,7 @@ class ItemsModel(QAbstractTableModel):
                 except Exception:
                     return "1"
 
-            if col == 4 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
+            if col == 4 and (self._can_edit_unit_price() or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
                 return self._price_tier_token_for_edit(it)
 
         return None
@@ -950,7 +1024,7 @@ class ItemsModel(QAbstractTableModel):
             txt_raw = str(value).strip()
 
             try:
-                if APP_COUNTRY == "PERU" and uses_gram_quantity(it, country=APP_COUNTRY):
+                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
                     new_qty = _parse_qty_peru_cats(txt_raw)
                 else:
                     txt = txt_raw.lower().replace(",", ".")
@@ -974,7 +1048,7 @@ class ItemsModel(QAbstractTableModel):
             self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
             return True
 
-        if col == 4 and (CAN_EDIT_UNIT_PRICE or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
+        if col == 4 and (self._can_edit_unit_price() or (it.get("categoria") or "").upper() in ("SERVICIO", "BOTELLAS")):
             cat = (it.get("categoria") or "").upper()
             prod = it.get("_prod", {}) or {}
             qty = float(nz(it.get("cantidad"), 0.0))
@@ -1036,7 +1110,7 @@ class ItemsModel(QAbstractTableModel):
 
         return False
 
-    def add_item(self, item: dict):
+    def add_item(self, item: dict, *, preserve_snapshot: bool = False):
         if "precio_override" not in item:
             item["precio_override"] = None
         if "precio_tier" not in item:
@@ -1071,7 +1145,11 @@ class ItemsModel(QAbstractTableModel):
         if "factor_total" not in item:
             try:
                 item["factor_total"] = float(
-                    factor_total_por_categoria((item.get("categoria") or "").upper(), item)
+                    factor_total_por_categoria(
+                        (item.get("categoria") or "").upper(),
+                        item,
+                        country=self.country,
+                    )
                 )
             except Exception:
                 item["factor_total"] = 1.0
@@ -1081,7 +1159,8 @@ class ItemsModel(QAbstractTableModel):
         except Exception:
             unit_price = 0.0
 
-        self._normalize_discount_and_totals(item, unit_price)
+        if not preserve_snapshot:
+            self._normalize_discount_and_totals(item, unit_price)
 
         self.beginInsertRows(QModelIndex(), len(self._items), len(self._items))
         self._items.append(item)

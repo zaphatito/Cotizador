@@ -32,10 +32,12 @@ from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer, QEvent, QRegularExpres
 
 from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR
 from ..config import APP_COUNTRY, COUNTRY_CODE, listing_allows_products, listing_allows_presentations
+from ..country_rules import uses_peru_business_rules
 from .models import ItemsModel
 from .delegates import QuantityDelegate, InlineTextDelegate
 from ..widgets import Toast
 from ..widgets_parts.excel_table_behavior import ExcelTableController
+from ..widgets_parts.bounded_table_columns import install_bounded_columns
 from sqlModels.quotes_repo import (
     doc_regex_for_country,
     document_type_rule,
@@ -65,24 +67,29 @@ _DOC_REGEX_BY_COUNTRY: dict[str, str] = {
     "PERU": doc_regex_for_country("PE"),
     # PY: CI/RUC/P
     "PARAGUAY": doc_regex_for_country("PY"),
+    # BO: CI/CIE/PAS/OD/NIT (tipos de documento SIAT)
+    "BOLIVIA": doc_regex_for_country("BO"),
 }
 
 _PHONE_REGEX_BY_COUNTRY: dict[str, str] = {
     "VENEZUELA": r"^(?:0[24]\d{9}|(?:\+58|58)[24]\d{9})$",
     "PERU": r"^(?:(?:\+51|51)?9\d{8})$",
     "PARAGUAY": r"^(?:(?:\+595|595)?9\d{8}|0?9\d{8})$",
+    "BOLIVIA": r"^(?:(?:\+591|591)?[67]\d{7})$",
 }
 
 _DOC_HINT_BY_COUNTRY: dict[str, str] = {
     "VENEZUELA": "V/E/J/P/G",
     "PERU": "DNI/CE/RUC/P",
     "PARAGUAY": "CI/RUC/P",
+    "BOLIVIA": "CI/CIE/PAS/OD/NIT",
 }
 
 _PHONE_HINT_BY_COUNTRY: dict[str, str] = {
     "VENEZUELA": "04121234567 o +584121234567",
     "PERU": "912345678 o +51912345678",
     "PARAGUAY": "0981123456 o +595981123456",
+    "BOLIVIA": "71234567 o +59171234567",
 }
 
 class UiMixin:
@@ -90,7 +97,7 @@ class UiMixin:
     REC_P_THRESHOLD = 0.20
 
     def _doc_type_rules(self) -> list[dict]:
-        return document_type_rules_for_country(COUNTRY_CODE)
+        return document_type_rules_for_country(getattr(self, "country_code", COUNTRY_CODE))
 
     def _selected_doc_type(self) -> str:
         cb = getattr(self, "combo_tipo_documento", None)
@@ -108,7 +115,7 @@ class UiMixin:
         cb = getattr(self, "combo_tipo_documento", None)
         if cb is None:
             return False
-        t = resolve_doc_type_for_form(COUNTRY_CODE, "", doc_type)
+        t = resolve_doc_type_for_form(getattr(self, "country_code", COUNTRY_CODE), "", doc_type)
         if not t:
             return False
         i = cb.findData(t)
@@ -120,17 +127,24 @@ class UiMixin:
         return False
 
     def _resolve_doc_type_for_form(self, doc: str, doc_type: str = "") -> str:
-        return resolve_doc_type_for_form(COUNTRY_CODE, str(doc or ""), str(doc_type or ""))
+        return resolve_doc_type_for_form(
+            getattr(self, "country_code", COUNTRY_CODE),
+            str(doc or ""),
+            str(doc_type or ""),
+        )
 
     def _doc_regex_pattern(self, *, doc_type: str | None = None) -> str:
         dt = str(doc_type or self._selected_doc_type() or "").strip().upper()
         if dt:
-            rule = document_type_rule(COUNTRY_CODE, dt)
+            rule = document_type_rule(getattr(self, "country_code", COUNTRY_CODE), dt)
             if rule:
                 pat = str(rule.get("regex_validation") or "").strip()
                 if pat:
                     return pat
-        return _DOC_REGEX_BY_COUNTRY.get(APP_COUNTRY, r"^[A-Za-z0-9\-]{4,20}$")
+        return _DOC_REGEX_BY_COUNTRY.get(
+            getattr(self, "country_name", APP_COUNTRY),
+            r"^[A-Za-z0-9\-]{4,20}$",
+        )
 
     def _phone_regex_pattern(self) -> str:
         # Telefono sin formato obligatorio.
@@ -139,14 +153,14 @@ class UiMixin:
     def _doc_regex_hint(self, *, doc_type: str | None = None) -> str:
         dt = str(doc_type or self._selected_doc_type() or "").strip().upper()
         if dt:
-            rule = document_type_rule(COUNTRY_CODE, dt)
+            rule = document_type_rule(getattr(self, "country_code", COUNTRY_CODE), dt)
             if rule:
                 desc = str(rule.get("descripcion") or "").strip().upper()
                 pad = int(rule.get("validation_pad") or 0)
                 if pad > 0:
                     return f"{dt} ({desc}) - {pad} caracteres"
                 return f"{dt} ({desc}) - longitud variable"
-        return _DOC_HINT_BY_COUNTRY.get(APP_COUNTRY, "DOC-123456")
+        return _DOC_HINT_BY_COUNTRY.get(getattr(self, "country_name", APP_COUNTRY), "DOC-123456")
 
     def _phone_regex_hint(self) -> str:
         return "Sin formato obligatorio"
@@ -169,7 +183,10 @@ class UiMixin:
             pass
 
     def _infer_tipo_documento(self, doc: str) -> str:
-        return infer_tipo_documento_from_doc(COUNTRY_CODE, str(doc or ""))
+        return infer_tipo_documento_from_doc(
+            getattr(self, "country_code", COUNTRY_CODE),
+            str(doc or ""),
+        )
 
     def _validate_doc_phone_values(
         self,
@@ -190,12 +207,16 @@ class UiMixin:
                 "Selecciona un tipo de documento.",
                 "",
             )
-        ok_doc, doc_err = validate_document_for_type(COUNTRY_CODE, doc_type, d)
+        ok_doc, doc_err = validate_document_for_type(
+            getattr(self, "country_code", COUNTRY_CODE),
+            doc_type,
+            d,
+        )
         if not ok_doc:
             return (
                 False,
                 (
-                    f"Documento invalido para {APP_COUNTRY}.\n"
+                    f"Documento invalido para {getattr(self, 'country_name', APP_COUNTRY)}.\n"
                     f"{doc_err}\n"
                     f"Formato permitido: {self._doc_regex_hint(doc_type=doc_type)}"
                 ),
@@ -229,7 +250,13 @@ class UiMixin:
 
     def _update_title_with_client(self, text: str):
         name = (text or "").strip()
-        self.setWindowTitle(f"{name} - {BASE_APP_TITLE}" if name else BASE_APP_TITLE)
+        catalog_name = str(getattr(self, "_local_catalog_name", "") or "").strip()
+        base_title = (
+            f"{BASE_APP_TITLE} — {catalog_name}"
+            if catalog_name
+            else BASE_APP_TITLE
+        )
+        self.setWindowTitle(f"{name} - {base_title}" if name else base_title)
 
     def _on_ai_client_picked(self, payload: dict):
         cli = str(payload.get("cliente") or "").strip()
@@ -238,6 +265,8 @@ class UiMixin:
         addr = str(payload.get("direccion") or "-").strip() or "-"
         mail = str(payload.get("email") or "-").strip() or "-"
         doc_type = str(payload.get("tipo_documento") or "").strip().upper()
+        if not doc_type and getattr(self, "country_code", COUNTRY_CODE) == "BO":
+            doc_type = self._resolve_doc_type_for_form(doc, "")
         if not doc_type and "-" in doc:
             pref, body = doc.split("-", 1)
             pref = str(pref or "").strip().upper()
@@ -253,7 +282,7 @@ class UiMixin:
             if current_doc_type:
                 try:
                     ok_current, _msg_current = validate_document_for_type(
-                        COUNTRY_CODE,
+                        getattr(self, "country_code", COUNTRY_CODE),
                         current_doc_type,
                         doc,
                     )
@@ -348,7 +377,9 @@ class UiMixin:
         self._schedule_refresh_recs_preview()
 
     def _handle_product_return_pressed(self):
-        if bool(getattr(self, "_use_ai_completer", False)):
+        if bool(getattr(self, "_use_ai_completer", False)) and not bool(
+            getattr(self, "_server_catalog_mode", False)
+        ):
             self._on_ai_enter_pressed()
             return
         self._on_return_pressed()
@@ -360,7 +391,14 @@ class UiMixin:
             from ..db_path import resolve_db_path
             from ..ai.recommender import QuoteRecommender
 
-            self._rec_engine = QuoteRecommender(resolve_db_path())
+            self._rec_engine = QuoteRecommender(
+                resolve_db_path(),
+                country=getattr(self, "country_code", COUNTRY_CODE),
+                company_type=getattr(self, "company_type", ""),
+                products=getattr(self, "productos", []),
+                presentations=getattr(self, "presentaciones", []),
+                quote_context=getattr(self, "quote_context", None),
+            )
         except Exception:
             self._rec_engine = None
 
@@ -388,7 +426,11 @@ class UiMixin:
         from ..db_path import resolve_db_path
         from ..ai.search_index import LocalSearchIndex
 
-        idx = LocalSearchIndex(resolve_db_path(), auto_create_fts=False)
+        idx = LocalSearchIndex(
+            resolve_db_path(),
+            auto_create_fts=False,
+            country_code=getattr(self, "country_code", COUNTRY_CODE),
+        )
         self._client_index = idx
         return idx
 
@@ -1606,7 +1648,7 @@ class UiMixin:
         actions_row.setSpacing(6)
 
         self._py_cash_mode = False
-        if APP_COUNTRY == "PARAGUAY":
+        if getattr(self, "country_name", APP_COUNTRY) == "PARAGUAY":
             self.btn_pay_card = QPushButton("Tarjeta")
             self.btn_pay_cash = QPushButton("Efectivo")
             for b in (self.btn_pay_card, self.btn_pay_cash):
@@ -1631,7 +1673,7 @@ class UiMixin:
             actions_row.addWidget(self.lbl_moneda, 1)
             actions_row.addWidget(btn_listado, 0)
 
-        elif APP_COUNTRY == "PERU":
+        elif uses_peru_business_rules(getattr(self, "country_name", APP_COUNTRY)):
             rate_row.addWidget(self.btn_moneda, 0)
             rate_row.addWidget(self.lbl_moneda, 1)
 
@@ -1721,7 +1763,13 @@ class UiMixin:
         grp_tab = QGroupBox("Productos Seleccionados")
         vtab = QVBoxLayout()
         self.table = QTableView()
-        self.model = ItemsModel(self.items)
+        self.model = ItemsModel(
+            self.items,
+            country=getattr(self, "country_name", APP_COUNTRY),
+            converter=getattr(self, "_convert_from_base", None),
+            currency_code=getattr(self, "current_currency", None),
+            currency_provider=lambda: self._currency_context()[0],
+        )
         self.model.set_code_edit_handler(self._replace_row_item_by_code)
         self.table.setModel(self.model)
 
@@ -1739,7 +1787,7 @@ class UiMixin:
         except Exception:
             pass
 
-        if APP_COUNTRY == "PARAGUAY":
+        if getattr(self, "country_name", APP_COUNTRY) == "PARAGUAY":
             self.model.set_py_cash_mode(self._is_py_cash_mode())
 
         self.qty_delegate = QuantityDelegate(self.table)
@@ -1772,6 +1820,7 @@ class UiMixin:
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.table.setColumnWidth(3, 96)
+        install_bounded_columns(self.table, fill_column=1)
 
         self.act_edit = QAction("Editar observación…", self)
         self.act_edit.triggered.connect(self.editar_observacion)

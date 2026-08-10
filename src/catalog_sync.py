@@ -9,8 +9,10 @@ from .dataio import _leer_inventario_xlsx
 from .presentations import cargar_presentaciones, cargar_presentaciones_prod
 
 import sqlModels.imports_repo as imports_repo
+import sqlModels.offline_catalogs_repo as offline_catalogs_repo
 import sqlModels.products_repo as products_repo
 import sqlModels.presentations_repo as presentations_repo
+from sqlModels.utils import sha256_file, stat_file
 
 log = get_logger(__name__)
 
@@ -204,7 +206,12 @@ def _normalize_presentations_df_for_app(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def sync_catalog_from_excel_path(con, excel_path: str) -> None:
+def sync_catalog_from_excel_path(
+    con,
+    excel_path: str,
+    *,
+    force: bool = False,
+) -> dict[str, object]:
     """
     Actualiza catalogo en DB usando UN solo archivo excel seleccionado.
     - Hoja 1: Inventario
@@ -215,9 +222,23 @@ def sync_catalog_from_excel_path(con, excel_path: str) -> None:
         raise FileNotFoundError(f"No existe el Excel: {excel_path}")
 
     changed_for_rollup = False
+    source_hash = ""
+    import_ids: dict[str, int] = {}
+    forced_meta: dict[str, object] | None = None
+    if force:
+        source_mtime, source_size = stat_file(excel_path)
+        forced_meta = {
+            "mtime": source_mtime,
+            "size": source_size,
+            "hash": sha256_file(excel_path),
+        }
 
     # Productos
     need, meta = imports_repo.needs_import(con, "products", excel_path)
+    if forced_meta is not None:
+        meta = dict(forced_meta)
+    need = bool(need or forced_meta is not None)
+    source_hash = str(meta.get("hash") or "")
     if need:
         df_prod = _leer_inventario_xlsx(excel_path, os.path.basename(excel_path))
         import_id = imports_repo.create_import(con, "products", excel_path, meta["mtime"], meta["size"], meta["hash"])
@@ -229,30 +250,83 @@ def sync_catalog_from_excel_path(con, excel_path: str) -> None:
             df_prod,
             replace_current=True,
         )
+        import_ids["products"] = import_id
         changed_for_rollup = True
 
     # Presentaciones
     need2, meta2 = imports_repo.needs_import(con, "presentations", excel_path)
+    if forced_meta is not None:
+        meta2 = dict(forced_meta)
+    need2 = bool(need2 or forced_meta is not None)
     if need2:
         df_pres = cargar_presentaciones(excel_path)
         import_id2 = imports_repo.create_import(con, "presentations", excel_path, meta2["mtime"], meta2["size"], meta2["hash"])
         log.info("Import presentaciones (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id2)
 
         presentations_repo.upsert_presentations_snapshot(con, import_id2, df_pres, replace_current=True)
+        import_ids["presentations"] = import_id2
         changed_for_rollup = True
 
     # PresentacionesProd (relacion)
     need3, meta3 = imports_repo.needs_import(con, "presentacion_prod", excel_path)
+    if forced_meta is not None:
+        meta3 = dict(forced_meta)
+    need3 = bool(need3 or forced_meta is not None)
     if need3:
         df_pres_prod = cargar_presentaciones_prod(excel_path)
         import_id3 = imports_repo.create_import(con, "presentacion_prod", excel_path, meta3["mtime"], meta3["size"], meta3["hash"])
         log.info("Import presentacion_prod (seleccionado): %s (import_id=%s)", os.path.basename(excel_path), import_id3)
 
         presentations_repo.upsert_presentacion_prod_snapshot(con, import_id3, df_pres_prod, replace_current=True)
+        import_ids["presentacion_prod"] = import_id3
         changed_for_rollup = True
 
     if changed_for_rollup:
         presentations_repo.rebuild_presentations_rollup(con)
+
+    return {
+        "changed": changed_for_rollup,
+        "source_hash": source_hash,
+        "import_ids": import_ids,
+    }
+
+
+def import_offline_catalog_from_excel(
+    con,
+    excel_path: str,
+    *,
+    name: str | None = None,
+    catalog_id: int | None = None,
+) -> dict:
+    """
+    Crea o reemplaza por completo un catálogo offline y lo deja activo.
+
+    El caller debe envolver esta operación en una transacción: tanto las tablas
+    ``*_current`` como el snapshot nombrado se restauran si la lectura o la
+    validación del Excel falla.
+    """
+    if catalog_id is None:
+        catalog_id = offline_catalogs_repo.create_catalog(con, name)
+    else:
+        catalog_id = int(catalog_id)
+        if offline_catalogs_repo.get_catalog(con, catalog_id) is None:
+            raise KeyError(f"No existe el catálogo offline {catalog_id}.")
+
+    import_result = sync_catalog_from_excel_path(con, excel_path, force=True)
+    df_productos, _df_presentaciones = load_catalog_from_db(con)
+    ok, reason = validate_products_catalog_df(df_productos)
+    if not ok:
+        raise ValueError(
+            "El catálogo entrante no es válido: "
+            f"{reason}. No se reemplazó el catálogo anterior."
+        )
+
+    return offline_catalogs_repo.replace_catalog_from_current(
+        con,
+        catalog_id,
+        source_file=excel_path,
+        source_hash=str(import_result.get("source_hash") or ""),
+    )
 
 
 def sync_catalog_from_excel_to_db(con, data_dir: str) -> None:
@@ -314,3 +388,11 @@ def load_catalog_from_db(con) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_pres = presentations_repo.load_presentations_current(con)
     df_pres = _normalize_presentations_df_for_app(df_pres)
     return df_prod, df_pres
+
+
+def load_offline_catalog_from_db(
+    con,
+    catalog_id: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df_prod, df_pres = offline_catalogs_repo.load_catalog_frames(con, catalog_id)
+    return df_prod, _normalize_presentations_df_for_app(df_pres)

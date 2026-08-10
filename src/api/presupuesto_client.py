@@ -30,14 +30,21 @@ from sqlModels.quotes_repo import (
     get_quote_items,
     infer_tipo_documento_from_doc,
 )
+from sqlModels.sequences_repo import (
+    ensure_quote_no_at_least,
+    get_quote_no_value,
+    next_quote_no,
+)
 from sqlModels.settings_repo import get_setting, set_setting
 
 from ..db_path import resolve_db_path
-from ..config import APP_CONFIG, CATS
+from ..config import APP_CONFIG, CATS, currency_for_country
+from ..country_rules import country_code_for
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import is_py_unit_product
 from ..quote_code import extract_quote_digits, format_quote_code
+from ..server_identity import has_complete_server_identity
 from ..utils import nz
 from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
@@ -63,6 +70,9 @@ _VERIFICATION_STATUS_KEY = "cotizador_last_verification_status"
 _VERIFICATION_MESSAGE_KEY = "cotizador_last_verification_message"
 _VERIFICATION_GRACE_STARTED_KEY = "cotizador_verification_grace_started_at"
 _VERIFICATION_STALE_AFTER = datetime.timedelta(days=3)
+_QUOTE_NO_CONFIRMED = "confirmed"
+_QUOTE_NO_PROVISIONAL = "provisional"
+_QUOTE_NO_RESERVED = "reserved"
 
 
 class PresupuestoApiError(RuntimeError):
@@ -405,7 +415,7 @@ def _api_rejects_wrapped_presupuesto_payload(err: ApiRequestError) -> bool:
     )
 
 
-def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
+def _load_api_identity(context: Any = None) -> tuple[int, str, str, str, str, str, bool]:
     db_path = resolve_db_path()
     con = connect(db_path)
     _ensure_schema_once(con)
@@ -413,12 +423,27 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
         country = get_setting(con, "country", "PARAGUAY")
         company = get_setting(con, "company_type", "LA CASA DEL PERFUME")
         store_id = get_setting(con, "store_id", "").strip().upper()
-        tienda_raw = get_setting(con, "tienda", None)
+        telemarketing_raw = get_setting(con, "telemarketing", None)
+        scope = getattr(context, "scope", None)
+        context_country = str(getattr(scope, "country_code", "") or "").strip()
+        context_company = str(getattr(scope, "company_type", "") or "").strip()
+        context_store = str(getattr(context, "id_cotizador", "") or "").strip().upper()
+        context_username = str(getattr(context, "username", "") or "").strip()
+        if context_country:
+            country = context_country
+        if context_company:
+            company = context_company
+        if context_store:
+            store_id = context_store
         default_id, default_user = resolve_api_identity(country, company)
 
-        id_raw = get_setting(con, "id_user_api", str(default_id)).strip()
-        user_raw = get_setting(con, "user_api", default_user).strip()
-        app_user_raw = get_setting(con, "username", "").strip()
+        if context is None:
+            id_raw = get_setting(con, "id_user_api", str(default_id)).strip()
+            user_raw = get_setting(con, "user_api", default_user).strip()
+        else:
+            id_raw = str(default_id)
+            user_raw = str(default_user)
+        app_user_raw = context_username or get_setting(con, "username", "").strip()
         pass_hash = get_setting(con, "password_api_hash", "").strip()
     finally:
         con.close()
@@ -429,9 +454,9 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
         user_id = int(default_id)
     api_username = user_raw or default_user
     app_username = app_user_raw
-    tienda_cfg = _parse_optional_bool(tienda_raw)
-    if tienda_cfg is None:
-        tienda_cfg = _parse_optional_bool(APP_CONFIG.get("tienda"))
+    telemarketing_cfg = _parse_optional_bool(telemarketing_raw)
+    if telemarketing_cfg is None:
+        telemarketing_cfg = _parse_optional_bool(APP_CONFIG.get("telemarketing"))
 
     if pass_hash:
         expected_secret = str(API_LOGIN_PASSWORD or "").strip()
@@ -450,20 +475,20 @@ def _load_api_identity() -> tuple[int, str, str, str, str, str, bool]:
         str(country or ""),
         str(company or ""),
         str(store_id or ""),
-        bool(tienda_cfg),
+        bool(telemarketing_cfg),
     )
 
 
 def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str, str, str, bool]:
     if len(identity) >= 7:
-        user_id, api_username, app_username, country, company_type, store_id, tienda = identity[:7]
+        user_id, api_username, app_username, country, company_type, store_id, telemarketing = identity[:7]
     elif len(identity) >= 6:
         user_id, api_username, app_username, country, company_type, store_id = identity[:6]
-        tienda = False
+        telemarketing = False
     else:
         user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
         app_username = str(api_username or "")
-        tienda = False
+        telemarketing = False
 
     return (
         int(user_id),
@@ -472,17 +497,46 @@ def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str,
         str(country or ""),
         str(company_type or ""),
         str(store_id or ""),
-        bool(tienda),
+        bool(telemarketing),
     )
 
 
 def _country_code_from_country(country: str) -> str:
-    c = str(country or "").strip().upper()
-    if c in ("PERU", "PE"):
-        return "PE"
-    if c in ("VENEZUELA", "VE"):
-        return "VE"
-    return "PY"
+    return country_code_for(country, default="PY")
+
+
+def _quote_context_from_header(header: dict[str, Any]):
+    from ..catalog_context import QuoteContext
+
+    country_code = _country_code_from_country(str(header.get("country_code") or ""))
+    company_type = str(
+        header.get("company_type")
+        or APP_CONFIG.get("company_type")
+        or "LA CASA DEL PERFUME"
+    ).strip()
+    username = str(
+        header.get("cotizador_username")
+        or APP_CONFIG.get("username")
+        or ""
+    ).strip()
+    id_cotizador = str(
+        header.get("id_cotizador")
+        or _extract_id_cotizador(
+            str(header.get("quote_no") or ""),
+            str(APP_CONFIG.get("store_id") or ""),
+        )
+    ).strip()
+    base_currency = str(
+        header.get("base_currency")
+        or currency_for_country(country_code)
+    ).strip()
+    return QuoteContext.from_values(
+        country_code=country_code,
+        company_type=company_type,
+        username=username,
+        id_cotizador=id_cotizador,
+        base_currency=base_currency,
+    )
 
 
 def _infer_tipo_documento_for_api(doc_cliente: str, cod_pais: str) -> str:
@@ -663,7 +717,7 @@ def _build_cotizador_verification_payload(
     country: str,
     company_type: str,
     store_id: str,
-    tienda: bool,
+    telemarketing: bool,
 ) -> dict[str, Any]:
     pid = _load_or_create_cotizador_pid()
     cod_pais = _country_code_from_country(country)
@@ -687,7 +741,7 @@ def _build_cotizador_verification_payload(
         "app_version": app_version,
         "cod_pais": cod_pais,
         "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
-        "tienda": bool(tienda),
+        "telemarketing": bool(telemarketing),
     }
     firma_hash = hashlib.sha256(
         json.dumps(datos_firma, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -704,7 +758,7 @@ def _build_cotizador_verification_payload(
         "app_version": app_version,
         "cod_pais": cod_pais,
         "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
-        "tienda": bool(tienda),
+        "telemarketing": bool(telemarketing),
         "firma_hash": firma_hash,
         "datos_firma": {
             **datos_firma,
@@ -860,7 +914,7 @@ def build_presupuesto_payload(
     items_base: list[dict],
     app_username: str = "",
     user_api: str = "",
-    tienda: bool = False,
+    telemarketing: bool = False,
     adjuntos: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     presupuesto_items = _build_presupuesto_items(items_base, cod_pais=cod_pais)
@@ -882,7 +936,7 @@ def build_presupuesto_payload(
             "estado": (str(estado or "").strip() or None),
             "cod_pais": str(cod_pais or ""),
             "empresa": str(empresa or ""),
-            "tienda": bool(tienda),
+            "telemarketing": bool(telemarketing),
             "cantidad_items": int(len(presupuesto_items)),
             "presupuesto_prod": presupuesto_items,
         },
@@ -971,9 +1025,10 @@ def build_label_print_log_payload(
     printer_status: str = "",
     printer_ip: str = "",
     printer_port: int | None = None,
+    context: Any = None,
 ) -> dict[str, Any]:
-    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
-        _load_api_identity()
+    user_id, api_username, app_username, country, company_type, store_id, telemarketing = _unpack_api_identity(
+        _load_api_identity() if context is None else _load_api_identity(context)
     )
     cod_pais = _country_code_from_country(country)
     user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
@@ -1007,7 +1062,7 @@ def build_label_print_log_payload(
         "id_user_api": int(user_id),
         "cod_pais": str(cod_pais or "").strip().upper(),
         "empresa": str(company_type or "").strip() or "LA CASA DEL PERFUME",
-        "tienda": bool(tienda),
+        "telemarketing": bool(telemarketing),
         "total_etiquetas": int(requested_total),
         "total_etiquetas_solicitadas": int(requested_total),
         "total_etiquetas_impresas": int(printed_total),
@@ -1061,7 +1116,13 @@ def record_and_send_label_print_log(
     printer_status: str = "",
     printer_ip: str = "",
     printer_port: int | None = None,
+    context: Any = None,
 ) -> dict[str, Any]:
+    identity = _unpack_api_identity(
+        _load_api_identity() if context is None else _load_api_identity(context)
+    )
+    _user_id, _api_username, app_username, _country, _company, store_id, _telemarketing = identity
+    server_enabled = has_complete_server_identity(app_username, store_id)
     payload = build_label_print_log_payload(
         quote_code=quote_code,
         labels=labels,
@@ -1073,6 +1134,7 @@ def record_and_send_label_print_log(
         printer_status=printer_status,
         printer_ip=printer_ip,
         printer_port=printer_port,
+        context=context,
     )
     event_id = str(payload.get("event_id") or "").strip()
 
@@ -1084,6 +1146,16 @@ def record_and_send_label_print_log(
             local_id = insert_label_print_log(con, payload)
     finally:
         con.close()
+
+    if not server_enabled:
+        return {
+            "status": "LOCAL_ONLY",
+            "event_id": event_id,
+            "local_id": local_id,
+            "disabled": True,
+            "reason": "missing_username_or_store_id",
+            "payload": payload,
+        }
 
     try:
         login_resp, post_resp = _post_label_print_log_payload(payload, login_password=login_password)
@@ -1221,9 +1293,18 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 
 def verify_cotizador_signature_once(*, login_password: str | None = None) -> dict[str, Any]:
-    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
+    user_id, api_username, app_username, country, company_type, store_id, telemarketing = _unpack_api_identity(
         _load_api_identity()
     )
+
+    if not has_complete_server_identity(app_username, store_id):
+        return {
+            "status": "OFFLINE",
+            "allowed": True,
+            "blocked": False,
+            "offline": True,
+            "message": "Verificación remota deshabilitada: modo offline.",
+        }
 
     payload = _build_cotizador_verification_payload(
         api_username=str(api_username or ""),
@@ -1231,7 +1312,7 @@ def verify_cotizador_signature_once(*, login_password: str | None = None) -> dic
         country=str(country or ""),
         company_type=str(company_type or ""),
         store_id=str(store_id or ""),
-        tienda=bool(tienda),
+        telemarketing=bool(telemarketing),
     )
     reference_iso = _load_verification_reference_at()
 
@@ -1313,9 +1394,10 @@ def reserve_next_quote_code(
     *,
     local_last_value: int | None = None,
     login_password: str | None = None,
+    context: Any = None,
 ) -> dict[str, Any]:
     user_id, api_username, app_username, country, _company_type, store_id, _tienda = _unpack_api_identity(
-        _load_api_identity()
+        _load_api_identity() if context is None else _load_api_identity(context)
     )
     cod_pais = _country_code_from_country(country)
     user_for_payload = str(app_username or "").strip()
@@ -1396,10 +1478,90 @@ def reserve_next_quote_code(
     }
 
 
+def allocate_quote_code_for_new_quote(
+    con,
+    *,
+    country_code: str,
+    store_id: str,
+    login_password: str | None = None,
+    context: Any = None,
+) -> dict[str, Any]:
+    """
+    Reserva el correlativo remoto cuando el API esta disponible. Si la reserva
+    no puede realizarse, consume la secuencia SQLite y devuelve un correlativo
+    provisional que debe renumerarse antes de sincronizar.
+    """
+    country = str(country_code or "").strip().upper()
+    store = str(store_id or "").strip().upper()
+    local_last_value = get_quote_no_value(con, country)
+
+    try:
+        reserve_kwargs: dict[str, Any] = {
+            "local_last_value": local_last_value,
+            "login_password": login_password,
+        }
+        if context is not None:
+            reserve_kwargs["context"] = context
+        reserved = reserve_next_quote_code(**reserve_kwargs)
+    except PresupuestoApiError as exc:
+        with tx(con):
+            quote_no = next_quote_no(con, country, width=7)
+        return {
+            "quote_no": quote_no,
+            "quote_code": format_quote_code(
+                country_code=country,
+                store_id=store,
+                quote_no=quote_no,
+                width=7,
+            ),
+            "quote_no_status": _QUOTE_NO_PROVISIONAL,
+            "offline": True,
+            "reserve_error": _normalize_error_message(exc),
+        }
+
+    reserved_quote_no = str(reserved.get("quote_no") or "").strip()
+    reserved_quote_code = str(reserved.get("quote_code") or "").strip().upper()
+    if not reserved_quote_no or not reserved_quote_code:
+        raise PresupuestoApiError("El API no devolvio un correlativo valido.")
+
+    try:
+        reserved_value = int(reserved_quote_no)
+    except (TypeError, ValueError) as exc:
+        raise PresupuestoApiError("El API devolvio un correlativo no numerico.") from exc
+
+    with tx(con):
+        ensure_quote_no_at_least(con, country, max(0, reserved_value - 1))
+        quote_no = next_quote_no(con, country, width=7)
+        if int(quote_no) != reserved_value:
+            raise PresupuestoApiError(
+                "El correlativo local no coincide con la reserva del servidor."
+            )
+
+    return {
+        **reserved,
+        "quote_no": quote_no,
+        "quote_code": reserved_quote_code,
+        "quote_no_status": _QUOTE_NO_CONFIRMED,
+        "offline": False,
+        "reserve_error": "",
+    }
+
+
 def _normalize_country_client_row(row: dict[str, Any], *, cod_pais: str) -> dict[str, Any]:
+    expected_country = str(cod_pais or "").strip().upper()
+    raw_country = str(row.get("country_code") or "").strip()
+    row_country = (
+        _country_code_from_country(raw_country)
+        if raw_country
+        else expected_country
+    )
+    if expected_country and row_country != expected_country:
+        raise PresupuestoApiError(
+            "El API devolvio un cliente de un pais distinto al solicitado."
+        )
     return {
         "id": int(row.get("id") or row.get("id_cliente") or 0),
-        "country_code": str(row.get("country_code") or cod_pais or "").strip().upper(),
+        "country_code": row_country,
         "tipo_documento": str(row.get("tipo_documento") or "").strip().upper(),
         "documento": str(row.get("documento") or "").strip().upper(),
         "documento_norm": str(row.get("documento_norm") or row.get("documento") or "").strip().upper(),
@@ -1421,11 +1583,41 @@ def fetch_country_clients_page(
     limit: int = 200,
     offset: int = 0,
     login_password: str | None = None,
+    country_code: str = "",
+    context: Any = None,
 ) -> dict[str, Any]:
-    user_id, api_username, _app_username, country, _company_type, _store_id, _tienda = _unpack_api_identity(
-        _load_api_identity()
+    identity = _load_api_identity(context) if context is not None else _load_api_identity()
+    user_id, api_username, app_username, country, _company_type, store_id, _tienda = _unpack_api_identity(
+        identity
     )
-    cod_pais = _country_code_from_country(country)
+    if not has_complete_server_identity(app_username, store_id):
+        raise PresupuestoApiError(
+            "La consulta de clientes del servidor está deshabilitada en modo offline."
+        )
+    requested_country = _country_code_from_country(str(country_code or country))
+    scope = getattr(context, "scope", None)
+    raw_context_country = str(getattr(scope, "country_code", "") or "").strip()
+    context_country = (
+        _country_code_from_country(raw_context_country)
+        if raw_context_country
+        else ""
+    )
+    if context is not None:
+        if not context_country:
+            raise PresupuestoApiError("El QuoteContext no contiene un pais valido.")
+        raw_explicit_country = str(country_code or "").strip()
+        explicit_country = (
+            _country_code_from_country(raw_explicit_country)
+            if raw_explicit_country
+            else ""
+        )
+        if explicit_country and explicit_country != context_country:
+            raise PresupuestoApiError(
+                "El pais solicitado no coincide con el QuoteContext de la cotizacion."
+            )
+        cod_pais = context_country
+    else:
+        cod_pais = requested_country
 
     token, _login_resp = _login_api(
         user_id=int(user_id),
@@ -1438,6 +1630,8 @@ def fetch_country_clients_page(
             API_CASE_GET_COUNTRY_CLIENTS,
             json_data={
                 "cod_pais": str(cod_pais or ""),
+                "user": str(app_username or "").strip(),
+                "id_cotizador": str(store_id or "").strip(),
                 "search_text": str(search_text or "").strip(),
                 "limit": max(1, min(500, int(limit))),
                 "offset": max(0, int(offset)),
@@ -1478,12 +1672,16 @@ def fetch_country_clients(
     limit: int = 200,
     offset: int = 0,
     login_password: str | None = None,
+    country_code: str = "",
+    context: Any = None,
 ) -> list[dict[str, Any]]:
     page = fetch_country_clients_page(
         search_text=search_text,
         limit=limit,
         offset=offset,
         login_password=login_password,
+        country_code=country_code,
+        context=context,
     )
     return list(page.get("rows") or [])
 
@@ -1504,9 +1702,10 @@ def login_and_send_presupuesto(
     adjuntos: list[dict[str, str]] | None = None,
     adjunto_files: list[dict[str, str]] | None = None,
     login_password: str | None = None,
+    context: Any = None,
 ) -> dict[str, Any]:
-    user_id, api_username, app_username, country, company_type, store_id, tienda = _unpack_api_identity(
-        _load_api_identity()
+    user_id, api_username, app_username, country, company_type, store_id, telemarketing = _unpack_api_identity(
+        _load_api_identity() if context is None else _load_api_identity(context)
     )
 
     cod_pais = _country_code_from_country(country)
@@ -1529,7 +1728,7 @@ def login_and_send_presupuesto(
         empresa=(str(company_type or "").strip() or "LA CASA DEL PERFUME"),
         app_username=app_username,
         user_api=api_username,
-        tienda=bool(tienda),
+        telemarketing=bool(telemarketing),
         id_cotizador=_extract_id_cotizador(quote_code, store_id),
         items_base=items_base,
         adjuntos=adjuntos,
@@ -1726,6 +1925,258 @@ def _mark_quote_api_error(quote_id: int, *, error_at_iso: str, error_message: st
         con.close()
 
 
+def _quote_no_status(header: dict[str, Any]) -> str:
+    status = str(header.get("quote_no_status") or _QUOTE_NO_CONFIRMED).strip().lower()
+    if status not in (_QUOTE_NO_CONFIRMED, _QUOTE_NO_PROVISIONAL, _QUOTE_NO_RESERVED):
+        return _QUOTE_NO_CONFIRMED
+    return status
+
+
+def _load_quote_sync_snapshot(quote_id: int) -> tuple[dict[str, Any], list[dict], list[dict]]:
+    con = connect(resolve_db_path())
+    _ensure_schema_once(con)
+    try:
+        header = get_quote_header(con, int(quote_id))
+        items_base, items_shown = get_quote_items(con, int(quote_id))
+        return header, items_base, items_shown
+    finally:
+        con.close()
+
+
+def _reserve_provisional_quote_number(
+    quote_id: int,
+    *,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    qid = int(quote_id)
+    db_path = resolve_db_path()
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        header = get_quote_header(con, qid)
+        if _quote_no_status(header) != _QUOTE_NO_PROVISIONAL:
+            return header
+        quote_context = _quote_context_from_header(header)
+        country_code = _country_code_from_country(str(header.get("country_code") or ""))
+        local_last_value = get_quote_no_value(con, country_code)
+    finally:
+        con.close()
+
+    reserved = reserve_next_quote_code(
+        local_last_value=local_last_value,
+        login_password=login_password,
+        context=quote_context,
+    )
+    reserved_quote_no = str(reserved.get("quote_no") or "").strip()
+    reserved_quote_code = str(reserved.get("quote_code") or "").strip().upper()
+    if not reserved_quote_no or not reserved_quote_code:
+        raise PresupuestoApiError("El API no devolvio un correlativo valido.")
+
+    try:
+        reserved_value = int(reserved_quote_no)
+    except (TypeError, ValueError) as exc:
+        raise PresupuestoApiError("El API devolvio un correlativo no numerico.") from exc
+
+    con = connect(db_path)
+    _ensure_schema_once(con)
+    try:
+        with tx(con):
+            current = con.execute(
+                "SELECT quote_no_status FROM quotes WHERE id = ? LIMIT 1",
+                (qid,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"Cotizacion no encontrada: {qid}")
+            if str(current["quote_no_status"] or "").strip().lower() != _QUOTE_NO_PROVISIONAL:
+                return get_quote_header(con, qid)
+
+            ensure_quote_no_at_least(con, country_code, max(0, reserved_value - 1))
+            local_quote_no = next_quote_no(con, country_code, width=7)
+            if int(local_quote_no) != reserved_value:
+                raise PresupuestoApiError(
+                    "El correlativo local no coincide con la reserva del servidor."
+                )
+
+            con.execute(
+                """
+                UPDATE quotes
+                SET quote_no = ?,
+                    quote_no_status = ?,
+                    api_error_at = '',
+                    api_error_message = ''
+                WHERE id = ?
+                """,
+                (reserved_quote_code, _QUOTE_NO_RESERVED, qid),
+            )
+        return get_quote_header(con, qid)
+    finally:
+        con.close()
+
+
+def _regenerate_quote_artifacts(
+    header: dict[str, Any],
+    items_shown: list[dict],
+    *,
+    quote_code: str,
+) -> tuple[str, str]:
+    from ..app_window_parts.ticket_actions import generar_ticket_para_cotizacion
+    from ..pdfgen import generar_pdf
+
+    quote_context = _quote_context_from_header(header)
+
+    old_pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
+    if not old_pdf_path:
+        raise PresupuestoApiError("La cotizacion no tiene una ruta de PDF valida.")
+
+    old_base = os.path.splitext(os.path.basename(old_pdf_path))[0]
+    if "_" in old_base:
+        suffix = old_base.split("_", 1)[1].strip()
+    else:
+        suffix = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            str(header.get("cliente") or "").strip(),
+        ).strip("_")
+    suffix = suffix or "cliente"
+    new_pdf_path = os.path.join(
+        os.path.dirname(old_pdf_path),
+        f"C-{quote_code}_{suffix}.pdf",
+    )
+
+    metodo_pago = str(header.get("metodo_pago") or "").strip()
+    country_code = _country_code_from_country(str(header.get("country_code") or ""))
+    if not metodo_pago and country_code == "PY":
+        metodo_pago = "Tarjeta"
+    elif not metodo_pago and country_code == "VE":
+        metodo_pago = "Transferencia"
+
+    datos = {
+        "fecha": header.get("created_at", ""),
+        "cliente": header.get("cliente", ""),
+        "cedula": header.get("cedula", ""),
+        "tipo_documento": header.get("tipo_documento", ""),
+        "telefono": header.get("telefono", ""),
+        "direccion": header.get("direccion", "-"),
+        "email": header.get("email", "-"),
+        "metodo_pago": metodo_pago,
+        "items": items_shown,
+        "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
+        "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
+        "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
+    }
+    generated_pdf = generar_pdf(
+        datos,
+        fixed_quote_no=quote_code,
+        out_path=new_pdf_path,
+        country_code=quote_context.scope.country_code,
+        store_id=quote_context.id_cotizador,
+        company_type=quote_context.scope.company_type,
+        currency_code=str(header.get("currency_shown") or quote_context.base_currency),
+    )
+    if not generated_pdf or not os.path.exists(generated_pdf):
+        raise PresupuestoApiError("No se pudo regenerar el PDF con el correlativo reservado.")
+
+    ticket_paths = generar_ticket_para_cotizacion(
+        pdf_path=generated_pdf,
+        items_pdf=items_shown,
+        quote_code=quote_code,
+        country=country_code,
+        store_id=quote_context.id_cotizador,
+        cliente_nombre=str(header.get("cliente") or ""),
+        printer_name="TICKERA",
+        width=48,
+        top_mm=0.0,
+        bottom_mm=10.0,
+        cut_mode="full_feed",
+    )
+    cmd_path = str(ticket_paths.get("ticket_cmd") or "").strip()
+    if not cmd_path or not os.path.exists(cmd_path):
+        raise PresupuestoApiError("No se pudo regenerar el ticket con el correlativo reservado.")
+    return os.path.abspath(generated_pdf), os.path.abspath(cmd_path)
+
+
+def _refresh_reserved_quote_artifacts(quote_id: int) -> dict[str, Any]:
+    qid = int(quote_id)
+    header, _items_base, items_shown = _load_quote_sync_snapshot(qid)
+    if _quote_no_status(header) != _QUOTE_NO_RESERVED:
+        return header
+
+    quote_code = str(header.get("quote_no") or "").strip().upper()
+    old_pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
+    old_cmd_path = _ticket_cmd_path_from_pdf(old_pdf_path)
+    new_pdf_path, _new_cmd_path = _regenerate_quote_artifacts(
+        header,
+        items_shown,
+        quote_code=quote_code,
+    )
+
+    con = connect(resolve_db_path())
+    _ensure_schema_once(con)
+    try:
+        with tx(con):
+            cur = con.execute(
+                """
+                UPDATE quotes
+                SET pdf_path = ?, quote_no_status = ?
+                WHERE id = ? AND quote_no = ? AND quote_no_status = ?
+                """,
+                (
+                    os.path.basename(new_pdf_path),
+                    _QUOTE_NO_CONFIRMED,
+                    qid,
+                    quote_code,
+                    _QUOTE_NO_RESERVED,
+                ),
+            )
+            if int(cur.rowcount or 0) != 1:
+                raise PresupuestoApiError(
+                    "La cotizacion cambio mientras se actualizaban sus artefactos."
+                )
+        updated = get_quote_header(con, qid)
+    finally:
+        con.close()
+
+    for obsolete_path in (old_pdf_path, old_cmd_path):
+        if not obsolete_path:
+            continue
+        if os.path.abspath(obsolete_path) in {
+            os.path.abspath(new_pdf_path),
+            os.path.abspath(_new_cmd_path),
+        }:
+            continue
+        try:
+            if os.path.exists(obsolete_path):
+                os.remove(obsolete_path)
+        except OSError as exc:
+            log.warning("No se pudo eliminar artefacto provisional %s: %s", obsolete_path, exc)
+    return updated
+
+
+def _prepare_quote_number_for_sync(
+    quote_id: int,
+    *,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    header, _items_base, _items_shown = _load_quote_sync_snapshot(int(quote_id))
+    original_code = str(header.get("quote_no") or "").strip()
+    original_status = _quote_no_status(header)
+
+    if original_status == _QUOTE_NO_PROVISIONAL:
+        header = _reserve_provisional_quote_number(
+            int(quote_id),
+            login_password=login_password,
+        )
+    if _quote_no_status(header) == _QUOTE_NO_RESERVED:
+        header = _refresh_reserved_quote_artifacts(int(quote_id))
+
+    return {
+        "header": header,
+        "quote_number_updated": original_status != _QUOTE_NO_CONFIRMED,
+        "previous_quote_code": original_code,
+        "quote_code": str(header.get("quote_no") or "").strip(),
+    }
+
+
 def send_quote_from_history_once(
     *,
     quote_id: int,
@@ -1733,22 +2184,26 @@ def send_quote_from_history_once(
     login_password: str | None = None,
 ) -> dict[str, Any]:
     qid = int(quote_id)
-    if not force:
-        store_id_cfg = str(APP_CONFIG.get("store_id", "") or "").strip()
-        username_cfg = str(APP_CONFIG.get("username", "") or "").strip()
-        if (not store_id_cfg) or (not username_cfg):
-            return {
-                "quote_id": qid,
-                "status": "SKIPPED_SYNC_DISABLED",
-                "reason": "missing_username_or_store_id",
-            }
+    quote_number_updated = False
+    previous_quote_code = ""
     db_path = resolve_db_path()
     con = connect(db_path)
     _ensure_schema_once(con)
     tipo_documento_api = ""
     fecha_emision_ts = ""
+    quote_context = None
     try:
         header = get_quote_header(con, qid)
+        quote_context = _quote_context_from_header(header)
+        if not force and (
+            not str(quote_context.username or "").strip()
+            or not str(quote_context.id_cotizador or "").strip()
+        ):
+            return {
+                "quote_id": qid,
+                "status": "SKIPPED_SYNC_DISABLED",
+                "reason": "missing_username_or_store_id",
+            }
         has_api_sent_at = _has_column(con, "quotes", "api_sent_at")
         has_api_error_at = _has_column(con, "quotes", "api_error_at")
         has_api_error_msg = _has_column(con, "quotes", "api_error_message")
@@ -1767,8 +2222,50 @@ def send_quote_from_history_once(
                 "quote_id": qid,
                 "status": "SKIPPED_DELETED",
             }
+
+        if _quote_no_status(header) in (_QUOTE_NO_PROVISIONAL, _QUOTE_NO_RESERVED):
+            previous_quote_code = str(header.get("quote_no") or "").strip()
+            try:
+                prepared = _prepare_quote_number_for_sync(
+                    qid,
+                    login_password=login_password,
+                )
+                quote_number_updated = bool(prepared.get("quote_number_updated"))
+                previous_quote_code = str(prepared.get("previous_quote_code") or "").strip()
+                header = get_quote_header(con, qid)
+            except Exception as e:
+                err_at = _now_iso_local()
+                err_msg = _normalize_error_message(e)
+                current_quote_code = previous_quote_code
+                try:
+                    current_header, _current_base, _current_shown = _load_quote_sync_snapshot(qid)
+                    current_quote_code = str(current_header.get("quote_no") or "").strip()
+                except Exception as reload_err:
+                    log.warning(
+                        "No se pudo releer correlativo para quote_id=%s: %s",
+                        qid,
+                        reload_err,
+                    )
+                quote_number_updated = bool(
+                    current_quote_code
+                    and current_quote_code != previous_quote_code
+                )
+                try:
+                    _mark_quote_api_error(qid, error_at_iso=err_at, error_message=err_msg)
+                except Exception as mark_err:
+                    log.warning("No se pudo marcar error API para quote_id=%s: %s", qid, mark_err)
+                return {
+                    "quote_id": qid,
+                    "status": "SENT_ERROR",
+                    "api_error_at": err_at,
+                    "api_error_message": err_msg,
+                    "quote_number_updated": quote_number_updated,
+                    "previous_quote_code": previous_quote_code,
+                    "quote_code": current_quote_code,
+                }
+
         raw_quote_code = str(header.get("quote_no") or "").strip()
-        store_id_for_code = str(get_setting(con, "store_id", "") or "").strip().upper()
+        store_id_for_code = str(quote_context.id_cotizador or "").strip().upper()
         api_quote_code = _normalize_quote_code_for_api(raw_quote_code, store_id=store_id_for_code)
         if not api_quote_code:
             return {
@@ -1809,6 +2306,7 @@ def send_quote_from_history_once(
             tipo_documento=tipo_documento_api,
             items_base=items_base,
             login_password=login_password,
+            context=quote_context,
         )
     except Exception as e:
         err_at = _now_iso_local()
@@ -1822,6 +2320,9 @@ def send_quote_from_history_once(
             "status": "SENT_ERROR",
             "api_error_at": err_at,
             "api_error_message": err_msg,
+            "quote_number_updated": bool(quote_number_updated),
+            "previous_quote_code": previous_quote_code,
+            "quote_code": str(header.get("quote_no") or "").strip(),
         }
 
     sent_at = _now_iso_local()
@@ -1831,6 +2332,10 @@ def send_quote_from_history_once(
     out["quote_id"] = qid
     out["api_sent_at"] = sent_at
     out["status"] = "SENT"
+    out["quote_number_updated"] = bool(quote_number_updated)
+    if quote_number_updated:
+        out["previous_quote_code"] = previous_quote_code
+        out["quote_code"] = str(header.get("quote_no") or "").strip()
     return out
 
 
@@ -1880,6 +2385,7 @@ def sync_pending_history_quotes_once(
     skipped = 0
     error_marked = 0
     failed = 0
+    renumbered = 0
     last_id = 0
 
     while True:
@@ -1894,6 +2400,7 @@ def sync_pending_history_quotes_once(
                     "failed": 0,
                 }
             has_api_error_at = _has_column(con, "quotes", "api_error_at")
+            has_quote_no_status = _has_column(con, "quotes", "quote_no_status")
 
             where = [
                 "deleted_at IS NULL",
@@ -1905,13 +2412,18 @@ def sync_pending_history_quotes_once(
             ).isoformat(timespec="seconds")
             params: list[Any] = [int(last_id)]
             if has_api_error_at:
-                where.append(
-                    "("
+                retry_clause = (
                     "(COALESCE(TRIM(api_sent_at), '') = '' AND COALESCE(TRIM(api_error_at), '') = '') "
                     "OR "
                     "(COALESCE(TRIM(api_error_at), '') <> '' AND COALESCE(TRIM(api_error_at), '') <= ?)"
-                    ")"
                 )
+                if has_quote_no_status:
+                    retry_clause = (
+                        "LOWER(TRIM(COALESCE(quote_no_status, ''))) "
+                        "IN ('provisional', 'reserved') OR "
+                        f"({retry_clause})"
+                    )
+                where.append(f"({retry_clause})")
                 params.append(retry_failed_before_iso)
             else:
                 where.append("COALESCE(TRIM(api_sent_at), '') = ''")
@@ -1944,6 +2456,8 @@ def sync_pending_history_quotes_once(
             try:
                 res = send_quote_from_history_once(quote_id=qid, force=False)
                 status = str(res.get("status") or "").strip().upper()
+                if bool(res.get("quote_number_updated")):
+                    renumbered += 1
                 if status.startswith("SKIPPED"):
                     skipped += 1
                 elif status == "SENT_ERROR":
@@ -1961,6 +2475,7 @@ def sync_pending_history_quotes_once(
     return {
         "found": int(found),
         "sent": int(sent),
+        "renumbered": int(renumbered),
         "error_marked": int(error_marked),
         "skipped": int(skipped),
         "failed": int(failed),

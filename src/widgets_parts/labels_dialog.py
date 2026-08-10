@@ -22,11 +22,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import APP_COMPANY_TYPE
+from ..country_rules import normalize_country_name
 from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
 from ..pricing import quantity_in_grams
 from ..product_rules import uses_gram_quantity
 from ..utils import nz
+from .bounded_table_columns import install_bounded_columns
 from sqlModels.db import connect, tx
 from sqlModels.settings_repo import get_setting, set_setting
 from ..api.presupuesto_client import record_and_send_label_print_log
@@ -60,14 +62,7 @@ def _esencia_a_gramos(item: dict, qty: float, country: str) -> float:
 
 
 def _normalize_country(country: str) -> str:
-    c = str(country or "").strip().upper()
-    if c == "PY":
-        return "PARAGUAY"
-    if c == "PE":
-        return "PERU"
-    if c == "VE":
-        return "VENEZUELA"
-    return c
+    return normalize_country_name(country)
 
 
 def _parse_labels_grams(raw: str) -> list[float]:
@@ -154,10 +149,21 @@ class _LabelsTableDelegate(QStyledItemDelegate):
 
 
 class LabelsDialog(QDialog):
-    def __init__(self, parent, *, quote_code: str, country: str, items: list[dict]):
+    def __init__(
+        self,
+        parent,
+        *,
+        quote_code: str,
+        country: str,
+        items: list[dict],
+        company_type: str = APP_COMPANY_TYPE,
+        quote_context=None,
+    ):
         super().__init__(parent)
         self._quote_code = str(quote_code or "").strip()
         self._country = str(country or "").strip().upper()
+        self._company_type = str(company_type or APP_COMPANY_TYPE).strip().upper()
+        self._quote_context = quote_context
         self._updating_table = False
         self.setWindowTitle(f"Etiquetas - {quote_code}".strip(" -"))
         self.resize(860, 500)
@@ -172,6 +178,7 @@ class LabelsDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        install_bounded_columns(self.table, fill_column=3)
         self.table.setItemDelegate(_LabelsTableDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -358,18 +365,21 @@ class LabelsDialog(QDialog):
                 log.warning("Contador confirmo impresion, pero no hay etiquetas confirmadas para registrar.")
                 return
 
-            sync_result = record_and_send_label_print_log(
-                quote_code=self._quote_code,
-                labels=confirmed_labels,
-                requested_labels=confirmation.requested_labels,
-                printed_labels=confirmation.printed_labels,
-                printer_counter_before=confirmation.counter_before,
-                printer_counter_after=confirmation.counter_after,
-                printer_counter_delta=confirmation.counter_delta_rows,
-                printer_status=confirmation.status,
-                printer_ip=ip,
-                printer_port=port,
-            )
+            send_kwargs = {
+                "quote_code": self._quote_code,
+                "labels": confirmed_labels,
+                "requested_labels": confirmation.requested_labels,
+                "printed_labels": confirmation.printed_labels,
+                "printer_counter_before": confirmation.counter_before,
+                "printer_counter_after": confirmation.counter_after,
+                "printer_counter_delta": confirmation.counter_delta_rows,
+                "printer_status": confirmation.status,
+                "printer_ip": ip,
+                "printer_port": port,
+            }
+            if self._quote_context is not None:
+                send_kwargs["context"] = self._quote_context
+            sync_result = record_and_send_label_print_log(**send_kwargs)
             if str(sync_result.get("status") or "").strip().upper() != "SENT":
                 self._wake_background_api_sync()
         except Exception as exc:
@@ -406,7 +416,7 @@ class LabelsDialog(QDialog):
                     except Exception:
                         pass
 
-            logo_path = resolve_logo_path_for_company(APP_COMPANY_TYPE)
+            logo_path = resolve_logo_path_for_company(self._company_type)
             zpl = generar_zpl_lote(labels, logo_path=logo_path)
             requested_labels = count_requested_labels(labels)
             try:

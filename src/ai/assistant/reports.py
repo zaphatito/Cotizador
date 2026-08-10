@@ -33,6 +33,8 @@ _CURRENCY_MAP = {
     "ars": "ARS",
     "brl": "BRL",
     "bob": "BOB",
+    "boliviano": "BOB",
+    "bolivianos": "BOB",
 }
 
 @dataclass
@@ -44,6 +46,7 @@ class ReportSpec:
     date_to: Optional[str] = None     # ISO inclusive (YYYY-MM-DD)
     currency: Optional[str] = None
     country_code: Optional[str] = None
+    company_type: Optional[str] = None
     stock_threshold: float = 0.0
 
 
@@ -81,8 +84,8 @@ def parse_report_query(text: str) -> ReportSpec:
     df, dt = _detect_date_range(ql)
     spec.date_from, spec.date_to = df, dt
 
-    # country_code "PE", "PY", "VE"
-    mcc = re.search(r"\b(pe|py|ve)\b", ql)
+    # country_code "PE", "PY", "VE", "BO"
+    mcc = re.search(r"\b(pe|py|ve|bo)\b", ql)
     if mcc:
         spec.country_code = mcc.group(1).upper()
 
@@ -138,6 +141,7 @@ def run_report(con, spec: ReportSpec) -> str:
         "end": end_excl_iso,
         "currency": spec.currency,
         "cc": spec.country_code,
+        "company_type": spec.company_type,
     }
 
     if spec.kind == "top_products":
@@ -165,6 +169,10 @@ def _base_where(params_common: dict) -> Tuple[str, list]:
     if params_common.get("cc"):
         where.append("q.country_code = ?")
         params.append(params_common["cc"])
+
+    if params_common.get("company_type"):
+        where.append("UPPER(TRIM(COALESCE(q.company_type, ''))) = UPPER(TRIM(?))")
+        params.append(params_common["company_type"])
 
     if params_common.get("currency"):
         where.append("q.currency_shown = ?")

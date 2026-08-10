@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import convert_from_base, get_currency_context
+from ..currency import normalize_currency_code
 from ..utils import fmt_money_ui, nz
 
 MAX_DISCOUNT_PCT = 99.0
@@ -89,8 +90,13 @@ def show_discount_dialog_for_item(
     app_icon: QIcon,
     item: dict,
     base_currency: str,
+    *,
+    converter=None,
+    current_currency: str | None = None,
 ) -> Optional[dict]:
     it = item
+    convert = converter if callable(converter) else convert_from_base
+    explicit_currency = normalize_currency_code(current_currency or "")
 
     try:
         precio_base = float(nz(it.get("precio"), 0.0))
@@ -103,14 +109,14 @@ def show_discount_dialog_for_item(
     d_pct = float(nz(it.get("descuento_pct"), 0.0))
     d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
 
-    precio_ui = convert_from_base(precio_base)
-    subtotal_ui = convert_from_base(subtotal_base)
+    precio_ui = convert(precio_base)
+    subtotal_ui = convert(subtotal_base)
 
     # ✅ hard max monto = 99% del subtotal (calculado en BASE y convertido a UI)
     max_amt_base = round(max(0.0, subtotal_base) * (MAX_DISCOUNT_PCT / 100.0), 2)
-    max_amt_ui = float(convert_from_base(max_amt_base))
+    max_amt_ui = float(convert(max_amt_base))
 
-    d_monto_ui = float(convert_from_base(d_monto_base))
+    d_monto_ui = float(convert(d_monto_base))
 
     # clamp inicial a hard max (solo para valor inicial)
     d_pct = _clamp(d_pct, 0.0, MAX_DISCOUNT_PCT)
@@ -128,8 +134,14 @@ def show_discount_dialog_for_item(
     info = QGroupBox("Resumen de línea")
     info_layout = QFormLayout(info)
     info_layout.addRow("Cantidad:", QLabel(str(qty)))
-    info_layout.addRow("Precio unitario:", QLabel(fmt_money_ui(precio_ui)))
-    info_layout.addRow("Subtotal:", QLabel(fmt_money_ui(subtotal_ui)))
+    info_layout.addRow(
+        "Precio unitario:",
+        QLabel(fmt_money_ui(precio_ui, currency=explicit_currency or None)),
+    )
+    info_layout.addRow(
+        "Subtotal:",
+        QLabel(fmt_money_ui(subtotal_ui, currency=explicit_currency or None)),
+    )
     v.addWidget(info)
 
     grp = QGroupBox("Descuento")
@@ -173,8 +185,9 @@ def show_discount_dialog_for_item(
             lbl_preview.setText("Sin descuento aplicado.")
         else:
             lbl_preview.setText(
-                f"Descuento: {fmt_money_ui(amt)} ({pct:.4f}%) → "
-                f"Total: {fmt_money_ui(total_ui)}"
+                f"Descuento: {fmt_money_ui(amt, currency=explicit_currency or None)} "
+                f"({pct:.4f}%) → "
+                f"Total: {fmt_money_ui(total_ui, currency=explicit_currency or None)}"
             )
 
     def _update_preview_live():
@@ -298,8 +311,18 @@ def show_discount_dialog_for_item(
             payload.clear()
             payload.update({"mode": "clear"})
         else:
-            cur, _, rate = get_currency_context()
-            if cur == base_currency or not rate:
+            base = normalize_currency_code(base_currency or "")
+            if explicit_currency:
+                cur = explicit_currency
+                try:
+                    rate = float(convert(1.0))
+                except Exception:
+                    rate = 1.0
+            else:
+                cur, _, rate = get_currency_context()
+                cur = normalize_currency_code(cur or "")
+
+            if cur == base or not rate:
                 amt_base = amt_ui
             else:
                 amt_base = amt_ui / float(rate)

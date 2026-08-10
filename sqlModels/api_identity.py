@@ -19,6 +19,8 @@ _IDENTITY_MAP: dict[tuple[str, str], tuple[int, str]] = {
     ("PERU", "LA CASA DEL PERFUME"): (1003, "cotizador-PE-2"),
     ("PARAGUAY", "EF PERFUMES"): (1004, "cotizador-PY-1"),
     ("PARAGUAY", "LA CASA DEL PERFUME"): (1005, "cotizador-PY-2"),
+    ("BOLIVIA", "EF PERFUMES"): (1006, "cotizador-BO-1"),
+    ("BOLIVIA", "LA CASA DEL PERFUME"): (1007, "cotizador-BO-2"),
 }
 
 
@@ -30,6 +32,8 @@ def _norm_country(value: str | None) -> str:
         return "PERU"
     if v in ("VE", "VENEZUELA"):
         return "VENEZUELA"
+    if v in ("BO", "BOLIVIA"):
+        return "BOLIVIA"
     return _DEFAULT_COUNTRY
 
 

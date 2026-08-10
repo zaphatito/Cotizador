@@ -6,9 +6,10 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE, STORE_ID
+from .country_rules import normalize_country_name
 from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, resolve_font_asset, DATA_DIR
 from .quote_code import format_quote_code, format_quote_display_no
-from .utils  import fmt_money_pdf, nz
+from .utils  import fmt_money_pdf, fmt_money_pdf_whole, nz
 from .pricing import cantidad_para_mostrar
 
 # =====================================================
@@ -127,6 +128,120 @@ LAYOUT_ALT = {
     },
 }
 
+# --- Bolivia ---
+# Perfil independiente: comienza con las mismas coordenadas que Paraguay,
+# pero no comparte el mismo objeto para poder evolucionarlo sin alterar PY/PE.
+LAYOUT_BO = {
+    # Encabezado
+    "QUOTE_SHOW": True,
+    "QUOTE_FONT_SIZE": 16,
+    "QUOTE_PX": 685, "QUOTE_PY": 182,
+    "DATE_PX": 700, "DATE_PY": 243,
+    "CLIENT_RIGHT_PX": 295,
+    "CLIENT_LABEL_GAP_PX": 6,
+    "CLIENT_VALUE_GAP_PX": 6,
+    "CLIENT_Ys": (325, 347, 369),
+
+    # Tabla
+    "HEADER_Y_PX": 452,
+    "HEADER_TO_FIRST_ROW_GAP": 32,
+    "COLS_PX": {
+        "codigo": 124,
+        "producto": 185,
+        "cantidad": 592,
+        "precio": 664,
+        "subsin": 736,
+        "descuento": 808,
+        "subtotal": 880,
+    },
+    "COLS_HEADER_ANCHOR_ADD": {
+        "codigo": 0, "producto": 0,
+        "cantidad": 0, "precio": 0, "subsin": 0,
+        "descuento": 0, "subtotal": 0,
+    },
+    "TABLE_SHIFT_X": 26, "TABLE_SHIFT_Y": 12,
+    "ROW_LINE_H": 7,
+    "BOTTOM_LIMIT_PY": 880,
+    "CODE_TO_PRODUCT_GAP_PX": 5,
+    "NUM_COL_GAP_PX": 0.75,
+    "QTY_COL_W_PX": 50,
+
+    # Totales
+    "TOTALS_LABEL_TEXTS": ("TOTAL BRUTO:", "DESCUENTO:", "TOTAL:"),
+    "TOTALS_LABEL_X_PXs": (700, 700, 700),
+    "TOTALS_VALUE_X_PXs": (880, 880, 880),
+    "TOTALS_Ys_PX": (908, 948, 980),
+    "TOTALS_FONT_SIZES": (10, 10, 10),
+    "TOTALS_COLOR_LABEL": colors.HexColor("#551f31"),
+    "SHOW_LABELS": {"BRUTO": False, "DESC": True, "FINAL": False},
+
+    # Observaciones
+    "OBS_X_PX": 160,
+    "OBS_START_Y_PX": 940,
+    "OBS_LINE_H": 12,
+    "OBS_MAX_Y_LIMIT_PX": 1350,
+
+    # Cuadro crema
+    "TOTALS_BG": {
+        "color_rgb_255": (255, 255, 255),
+        "x_px": 470, "bottom_py": 1000, "top_py": 880,
+        "width_px": None,
+    },
+}
+
+
+# Cada país selecciona un perfil completo de renderizado. Bolivia mantiene una
+# definición literal propia (sin copiar ni referenciar el perfil PY/PE), aunque
+# hoy sus decisiones visuales sean iguales a las de ese perfil. De este modo se
+# pueden cambiar por separado tanto las coordenadas como la lógica visual.
+PDF_PROFILE_VE = {
+    "name": "VE",
+    "layout": LAYOUT_VE,
+    "font_family": "helvetica",
+    "date_color": colors.white,
+    "client_color": colors.HexColor("#4f3b40"),
+    "table_header_color": colors.HexColor("#4f3b40"),
+    "body_color": colors.black,
+    "observation_color": colors.black,
+    "total_value_color": colors.black,
+    "client_layout": "right",
+    "table_layout": "compact",
+    "body_font_size": 9,
+    "discount_absolute": False,
+}
+
+PDF_PROFILE_ALT = {
+    "name": "PY_PE",
+    "layout": LAYOUT_ALT,
+    "font_family": "lufga",
+    "date_color": colors.HexColor("#551f31"),
+    "client_color": colors.HexColor("#551f31"),
+    "table_header_color": colors.HexColor("#551f31"),
+    "body_color": colors.HexColor("#551f31"),
+    "observation_color": colors.HexColor("#551f31"),
+    "total_value_color": colors.HexColor("#551f31"),
+    "client_layout": "label_colon_value",
+    "table_layout": "extended",
+    "body_font_size": 7,
+    "discount_absolute": True,
+}
+
+PDF_PROFILE_BO = {
+    "name": "BO",
+    "layout": LAYOUT_BO,
+    "font_family": "lufga",
+    "date_color": colors.HexColor("#551f31"),
+    "client_color": colors.HexColor("#551f31"),
+    "table_header_color": colors.HexColor("#551f31"),
+    "body_color": colors.HexColor("#551f31"),
+    "observation_color": colors.HexColor("#551f31"),
+    "total_value_color": colors.HexColor("#551f31"),
+    "client_layout": "label_colon_value",
+    "table_layout": "extended",
+    "body_font_size": 7,
+    "discount_absolute": True,
+}
+
 
 
 # =====================================================
@@ -149,6 +264,28 @@ def _template_path_for_country(cc: str) -> str | None:
         or resolve_country_asset(f"TEMPLATE_{cc}.jpeg", cc)
         or resolve_template_path(cc)
     )
+
+
+def _pdf_profile_for_country(cc: str) -> dict:
+    country_code = str(cc or "").strip().upper()
+    if country_code == "BO":
+        return PDF_PROFILE_BO
+    if country_code in {"PE", "PY"}:
+        return PDF_PROFILE_ALT
+    return PDF_PROFILE_VE
+
+
+def _document_label_for_pdf(cc: str, datos: dict) -> str:
+    if str(cc or "").strip().upper() == "BO":
+        doc_type = str(datos.get("tipo_documento") or "").strip().upper()
+        return {
+            "CI": "CI",
+            "CIE": "CIE",
+            "PAS": "Pasaporte",
+            "OD": "Otro doc.",
+            "NIT": "NIT",
+        }.get(doc_type, "Documento")
+    return id_label_for_country(normalize_country_name(cc, default=APP_COUNTRY))
 
 def _register_lufga_if_available() -> tuple[str, str]:
     reg = resolve_font_asset("Lufga", "Lufga-Regular", exts=("otf","ttf"))
@@ -330,38 +467,63 @@ def _issue_date_text(datos: dict) -> str:
 # Generación de PDF
 # =====================================================
 
-def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | None = None) -> str:
-    cc = _country()
-    is_alt = cc in {"PE", "PY"}
-    L = LAYOUT_ALT if is_alt else LAYOUT_VE
+def generar_pdf(
+    datos: dict,
+    fixed_quote_no: str | None = None,
+    out_path: str | None = None,
+    *,
+    country_code: str | None = None,
+    store_id: str | None = None,
+    company_type: str | None = None,
+    currency_code: str | None = None,
+) -> str:
+    cc = str(country_code or _country()).strip().upper()
+    scoped_store_id = str(store_id or STORE_ID).strip().upper()
+    scoped_company_type = str(company_type or "").strip().upper()
+    scoped_currency = str(currency_code or datos.get("currency_code") or "").strip().upper()
+    profile = _pdf_profile_for_country(cc)
+    L = profile["layout"]
+    uses_extended_table = profile["table_layout"] == "extended"
 
-    TEXT_COLOR = colors.HexColor("#551f31") if is_alt else colors.black
+    def format_money(value: float) -> str:
+        formatter = fmt_money_pdf_whole if cc == "PY" else fmt_money_pdf
+        return formatter(value, currency=scoped_currency or None)
 
     cliente_raw  = (datos.get("cliente","") or "").strip()
     cliente_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", cliente_raw).strip("_")
     if fixed_quote_no:
         quote_code = format_quote_code(
             country_code=cc,
-            store_id=STORE_ID,
+            store_id=scoped_store_id,
             quote_no=fixed_quote_no,
             width=7,
         )
     else:
-        quote_code = _next_quote_number(cc, STORE_ID)
+        quote_code = _next_quote_number(cc, scoped_store_id)
     if not out_path:
         out_path = os.path.join(COTIZACIONES_DIR, f"C-{quote_code}_{cliente_slug}.pdf")
     if out_path:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     c = canvas.Canvas(out_path, pagesize=A4)
     c.setTitle(f"Cotización - {cliente_raw}")
+    if scoped_company_type:
+        c.setSubject(scoped_company_type)
     W, H = A4
 
     TEMPLATE_PATH = _template_path_for_country(cc)
-    FONT_REG, FONT_BOLD = (_register_lufga_if_available() if is_alt else ("Helvetica", "Helvetica-Bold"))
+    FONT_REG, FONT_BOLD = (
+        _register_lufga_if_available()
+        if profile["font_family"] == "lufga"
+        else ("Helvetica", "Helvetica-Bold")
+    )
 
     X = lambda px: _x_img(W, px)
     Y = lambda py: _y_img(H, py)
-    quote_display_no = format_quote_display_no(quote_code=quote_code, store_id=STORE_ID, width=7)
+    quote_display_no = format_quote_display_no(
+        quote_code=quote_code,
+        store_id=scoped_store_id,
+        width=7,
+    )
 
     def draw_background():
         if TEMPLATE_PATH and os.path.exists(TEMPLATE_PATH):
@@ -378,22 +540,22 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
     def draw_header():
         fecha_str = _issue_date_text(datos)
-        id_lbl    = id_label_for_country(APP_COUNTRY)
+        id_lbl = _document_label_for_pdf(cc, datos)
 
         c.setFont(FONT_REG, 10)
-        c.setFillColor(TEXT_COLOR if is_alt else colors.white)
+        c.setFillColor(profile["date_color"])
         c.drawString(X(L["DATE_PX"]), Y(L["DATE_PY"]), f"{fecha_str}")
 
         if L["QUOTE_SHOW"]:
-            c.setFillColor(TEXT_COLOR)
+            c.setFillColor(profile["body_color"])
             c.setFont(FONT_BOLD, int(L.get("QUOTE_FONT_SIZE", 14)))
             c.drawString(X(L["QUOTE_PX"]), Y(L["QUOTE_PY"]), f"{quote_display_no}")
 
         c.setFont(FONT_BOLD, 10)
-        c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
+        c.setFillColor(profile["client_color"])
         y_cli, y_id, y_tel = L["CLIENT_Ys"]
 
-        if is_alt:
+        if profile["client_layout"] == "label_colon_value":
             _draw_label_colon_value(y_cli, "Nombre/Empresa", (datos.get("cliente","") or ""))
             _draw_label_colon_value(y_id,  id_lbl,           (datos.get("cedula","") or ""))
             _draw_label_colon_value(y_tel, "Teléfono",       (datos.get("telefono","") or ""))
@@ -410,9 +572,9 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
     def draw_table_header(shift_x, shift_y):
         header_y = Y(L["HEADER_Y_PX"] + shift_y)
-        c.setFillColor(TEXT_COLOR if is_alt else colors.HexColor("#4f3b40"))
+        c.setFillColor(profile["table_header_color"])
 
-        if is_alt:
+        if uses_extended_table:
             c.setFont(FONT_BOLD, 5)  # ✅ -2 vs 6
             col_codigo   = _anchor_x("codigo",   shift_x)
             col_producto = _anchor_x("producto", shift_x)
@@ -458,7 +620,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
         ax_cantidad  = _anchor_x("cantidad", shift_x)
         ax_precio    = _anchor_x("precio",   shift_x)
 
-        if is_alt:
+        if uses_extended_table:
             ax_subsin   = _anchor_x("subsin",   shift_x)
             ax_desc     = _anchor_x("descuento",shift_x)
             ax_subtotal = _anchor_x("subtotal", shift_x)
@@ -471,7 +633,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
         max_code_width = (col_producto - X(L["CODE_TO_PRODUCT_GAP_PX"])) - col_codigo
 
-        if is_alt:
+        if uses_extended_table:
             gap   = X(L.get("NUM_COL_GAP_PX", 2))
             qty_w = X(L.get("QTY_COL_W_PX", 55))
 
@@ -496,28 +658,29 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             if it.get("observacion"):
                 full_name += f" | {it['observacion']}"
 
-            body_fs = 7 if is_alt else 9  # ✅ -2 vs 7
+            body_fs = int(profile["body_font_size"])
+            money_fs = 6 if cc == "PY" else body_fs
             c.setFont(FONT_REG, body_fs)
 
             prod_lines = _wrap_smart(c, full_name, max_prod_width, FONT_REG, body_fs)
             code_lines = _wrap_code_with_hyphen(c, str(it["codigo"]), max_code_width, FONT_REG, body_fs)
 
-            if is_alt:
-                qty_txt      = cantidad_para_mostrar(it)
-                precio_txt   = fmt_money_pdf(float(nz(it.get("precio"))))
-                subsin_txt   = fmt_money_pdf(float(nz(it.get("subtotal"))))
+            if uses_extended_table:
+                qty_txt      = cantidad_para_mostrar(it, country=cc)
+                precio_txt   = format_money(float(nz(it.get("precio"))))
+                subsin_txt   = format_money(float(nz(it.get("subtotal"))))
 
                 # ✅ descuento SIN "-"
                 d = float(nz(it.get("descuento"), 0.0))
-                d_txt = fmt_money_pdf(abs(d))
+                d_txt = format_money(abs(d))
 
-                subtotal_txt = fmt_money_pdf(float(nz(it.get("total"))))
+                subtotal_txt = format_money(float(nz(it.get("total"))))
 
-                qty_lines      = _wrap_smart(c, qty_txt,      max_qty_width,      FONT_REG, body_fs)
-                precio_lines   = _wrap_smart(c, precio_txt,   max_precio_width,   FONT_REG, body_fs)
-                subsin_lines   = _wrap_smart(c, subsin_txt,   max_subsin_width,   FONT_REG, body_fs)
-                desc_lines     = _wrap_smart(c, d_txt,        max_desc_width,     FONT_REG, body_fs)
-                subtotal_lines = _wrap_smart(c, subtotal_txt, max_subtotal_width, FONT_REG, body_fs)
+                qty_lines      = _wrap_smart(c, qty_txt,      max_qty_width,      FONT_REG, money_fs)
+                precio_lines   = _wrap_smart(c, precio_txt,   max_precio_width,   FONT_REG, money_fs)
+                subsin_lines   = _wrap_smart(c, subsin_txt,   max_subsin_width,   FONT_REG, money_fs)
+                desc_lines     = _wrap_smart(c, d_txt,        max_desc_width,     FONT_REG, money_fs)
+                subtotal_lines = _wrap_smart(c, subtotal_txt, max_subtotal_width, FONT_REG, money_fs)
 
                 n_lines = max(
                     len(prod_lines), len(code_lines),
@@ -530,7 +693,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             if row_y - h_needed < bottom_limit:
                 break
 
-            c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+            c.setFillColor(profile["body_color"])
 
             for lidx, line in enumerate(code_lines):
                 c.drawString(col_codigo, row_y - lidx * line_h, line)
@@ -538,7 +701,8 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
             for lidx, line in enumerate(prod_lines):
                 c.drawString(col_producto, row_y - lidx * line_h, line)
 
-            if is_alt:
+            if uses_extended_table:
+                c.setFont(FONT_REG, money_fs)
                 for lidx, line in enumerate(qty_lines):
                     c.drawRightString(ax_cantidad, row_y - lidx * line_h, line)
                 for lidx, line in enumerate(precio_lines):
@@ -550,10 +714,10 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
                 for lidx, line in enumerate(subtotal_lines):
                     c.drawRightString(ax_subtotal, row_y - lidx * line_h, line)
             else:
-                qty_txt = cantidad_para_mostrar(it)
+                qty_txt = cantidad_para_mostrar(it, country=cc)
                 c.drawRightString(ax_cantidad, row_y, qty_txt)
-                c.drawRightString(ax_precio,   row_y, fmt_money_pdf(float(nz(it.get("precio")))))
-                c.drawRightString(ax_subtotal, row_y, fmt_money_pdf(float(nz(it.get("total")))))
+                c.drawRightString(ax_precio,   row_y, format_money(float(nz(it.get("precio")))))
+                c.drawRightString(ax_subtotal, row_y, format_money(float(nz(it.get("total")))))
 
             obs_txt = (it.get("observacion") or "").strip()
             if obs_txt:
@@ -568,7 +732,7 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
 
         # Observaciones
         c.setFont(FONT_REG, 9)
-        c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+        c.setFillColor(profile["observation_color"])
         obs_x = X(L["OBS_X_PX"])
         obs_y = Y(L["OBS_START_Y_PX"] if L["OBS_START_Y_PX"] is not None else L["TOTALS_Ys_PX"][0])
         obs_min_y = Y(L["OBS_MAX_Y_LIMIT_PX"])
@@ -625,14 +789,14 @@ def generar_pdf(datos: dict, fixed_quote_no: str | None = None, out_path: str | 
                     c.drawRightString(lx, y, L["TOTALS_LABEL_TEXTS"][i])
 
                 c.setFont(FONT_REG, L["TOTALS_FONT_SIZES"][i])
-                c.setFillColor(TEXT_COLOR if is_alt else colors.black)
+                c.setFillColor(profile["total_value_color"])
 
                 val = values[i]
                 # ✅ descuento SIN "-" para PE/PY (y también sin "-" en el total)
-                if i == 1 and is_alt:
-                    txt = fmt_money_pdf(abs(val))
+                if i == 1 and profile["discount_absolute"]:
+                    txt = format_money(abs(val))
                 else:
-                    txt = fmt_money_pdf(val if i != 1 else abs(val))
+                    txt = format_money(val if i != 1 else abs(val))
                     if i == 1 and val != 0:
                         txt = f"- {txt}"
 

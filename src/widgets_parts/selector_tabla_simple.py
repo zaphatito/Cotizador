@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from .excel_table_behavior import ExcelTableController
+from .bounded_table_columns import install_bounded_columns
 
 
 class SelectorTablaSimple(QDialog):
@@ -38,6 +39,7 @@ class SelectorTablaSimple(QDialog):
         self.tabla.setAlternatingRowColors(True)
         self.tabla.setShowGrid(False)
         self.tabla.verticalHeader().setVisible(True)
+        install_bounded_columns(self.tabla, fill_column=1)
         self._excel_table = ExcelTableController(
             self.tabla,
             allow_copy=True,

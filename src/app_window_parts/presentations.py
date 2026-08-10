@@ -5,8 +5,9 @@ from PySide6.QtWidgets import QMessageBox, QDialog
 
 from sqlModels.db import connect
 
-from ..config import ALLOW_NO_STOCK, CATS
+from ..config import CATS
 from ..pricing import price_for_price_id, default_price_id_for_product
+from ..stock_policy import stock_enforcement_enabled
 from ..utils import nz
 from ..presentations import map_pc_to_bottle_code, extract_ml_from_text, ml_from_pres_code_norm
 from ..widgets import SelectorTablaSimple
@@ -241,7 +242,7 @@ class PresentationsMixin:
                 continue
             if (
                 float(nz(bot.get("cantidad_disponible"), 0.0)) <= 0
-                and not ALLOW_NO_STOCK
+                and stock_enforcement_enabled(getattr(self, "quote_context", None))
             ):
                 continue
             ml_b = extract_ml_from_text(bot.get("nombre", "")) or extract_ml_from_text(
@@ -308,7 +309,7 @@ class PresentationsMixin:
                 )
             return False
         combo_stock = self._presentation_available_stock_for_base(pres, base)
-        if (not ALLOW_NO_STOCK) and combo_stock < 1.0:
+        if stock_enforcement_enabled(getattr(self, "quote_context", None)) and combo_stock < 1.0:
             if not silent:
                 QMessageBox.warning(self, "Sin stock", "❌ No hay stock suficiente para esta presentación.")
             return False
@@ -386,10 +387,7 @@ class PresentationsMixin:
                     ).get("cantidad_disponible", 0.0)
                 )
             )
-            if stock_ref > 0 and stock_bot > 0:
-                stock_ref = min(stock_ref, stock_bot)
-            elif stock_bot > 0:
-                stock_ref = stock_bot
+            stock_ref = min(stock_ref, stock_bot)
 
         item = {
             "_prod": {
@@ -473,7 +471,10 @@ class PresentationsMixin:
                 if (pr.get("DEPARTAMENTO", "") or "").upper() == dep_base:
                     pr_gen = (pr.get("GENERO", "") or "").strip().lower()
                     if not pr_gen or pr_gen == gen_base:
-                        if ALLOW_NO_STOCK or self._presentation_available_stock_for_base(pr, p) >= 1.0:
+                        if (
+                            not stock_enforcement_enabled(getattr(self, "quote_context", None))
+                            or self._presentation_available_stock_for_base(pr, p) >= 1.0
+                        ):
                             return True
             return False
 
@@ -544,7 +545,7 @@ class PresentationsMixin:
         ml = ml_botella
 
         combo_stock = self._presentation_available_stock_for_base(pres_final, base)
-        if (not ALLOW_NO_STOCK) and combo_stock < 1.0:
+        if stock_enforcement_enabled(getattr(self, "quote_context", None)) and combo_stock < 1.0:
             QMessageBox.warning(self, "Sin stock", "❌ No hay stock suficiente para esta presentación.")
             return
 
@@ -553,10 +554,7 @@ class PresentationsMixin:
         )
         stock_ref = float(combo_stock)
         if stock_bot is not None:
-            if stock_bot > 0 and stock_ref > 0:
-                stock_ref = min(stock_bot, stock_ref)
-            elif stock_bot > 0:
-                stock_ref = stock_bot
+            stock_ref = min(stock_bot, stock_ref)
 
         item = {
             "_prod": {
@@ -627,7 +625,7 @@ class PresentationsMixin:
             if rel_filtered:
                 base_candidates = rel_filtered
 
-        if not ALLOW_NO_STOCK:
+        if stock_enforcement_enabled(getattr(self, "quote_context", None)):
             base_candidates = [
                 p
                 for p in base_candidates

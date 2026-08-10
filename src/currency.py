@@ -53,7 +53,9 @@ _TEXT_RULES: list[tuple[re.Pattern, str]] = [
     # ARS (ojo: “pesos” es ambiguo; por eso lo amarro a “argentino” o ARS/AR$)
     (re.compile(r"(?:^|[\s,;])(?:ars|ar\$|peso(?:s)?\s+argentino(?:s)?)(?:$|[\s,;])", re.I), "ARS"),
     # BOB
-    (re.compile(r"(?:^|[\s,;])(?:bob|boliviano(?:s)?)(?:$|[\s,;])", re.I), "BOB"),
+    # "Bs" es ambiguo con VES. El filtro allowed decide: VES conserva
+    # prioridad global, pero en un contexto BO (BOB permitido, VES no) es BOB.
+    (re.compile(r"(?:^|[\s,;])(?:bob|boliviano(?:s)?|bs\.?)(?:$|[\s,;])", re.I), "BOB"),
 ]
 
 

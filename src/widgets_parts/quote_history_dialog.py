@@ -37,8 +37,6 @@ from ..api.presupuesto_client import (
     verify_cotizador_signature_once,
 )
 from ..catalog_sync import (
-    sync_catalog_from_excel_to_db,
-    load_catalog_from_db,
     validate_products_catalog_df,
     products_update_required_message,
 )
@@ -48,6 +46,7 @@ from ..config import (
     APP_CURRENCY,
     APP_COUNTRY,
     COUNTRY_CODE,
+    SUPPORTED_COUNTRIES,
     STORE_ID,
     get_currency_context,
     set_currency_context,
@@ -56,7 +55,15 @@ from ..config import (
     is_recommendations_enabled,
     set_recommendations_enabled,
 )
+from ..catalog_server_sync import CatalogStockSyncService
+from ..catalog_context import CatalogScope, QuoteContext
+from ..quote_context_service import build_quote_context
+from ..country_rules import country_code_for, normalize_country_name, uses_peru_business_rules
 from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits
+from ..server_identity import (
+    has_complete_server_identity,
+    validate_server_identity_pair,
+)
 from ..ui_theme import (
     normalize_theme_mode,
     set_theme_mode,
@@ -80,6 +87,10 @@ from .quote_status_dialog import QuoteStatusDialog
 from .labels_dialog import LabelsDialog
 from .status_colors import bg_for_status, best_text_color_for_bg
 from .status_colors_dialog import StatusColorsDialog
+from .stock_matrix_dialog import StockMatrixDialog
+from .catalog_scope_dialog import select_catalog_scope
+from .manual_catalog_dialog import select_local_catalog
+from .bounded_table_columns import install_bounded_columns
 
 # ✅ NUEVO: dock assistant
 
@@ -130,6 +141,31 @@ def _parse_dt(value) -> datetime.datetime | None:
             continue
 
     return None
+
+
+def _quote_context_from_header(header: dict) -> QuoteContext:
+    return QuoteContext.from_values(
+        country_code=country_code_for(
+            header.get("country_code"),
+            default=COUNTRY_CODE,
+        ),
+        company_type=str(
+            header.get("company_type")
+            or APP_CONFIG.get("company_type")
+            or "LA CASA DEL PERFUME"
+        ).strip(),
+        username=str(
+            header.get("cotizador_username")
+            or APP_CONFIG.get("username")
+            or ""
+        ).strip(),
+        id_cotizador=str(
+            header.get("id_cotizador") or STORE_ID
+        ).strip(),
+        base_currency=str(
+            header.get("base_currency") or APP_CURRENCY
+        ).strip(),
+    )
 
 
 def format_dt_legible(value) -> str:
@@ -255,6 +291,9 @@ class HistoryConfigDialog(QDialog):
     def __init__(self, history_window: "QuoteHistoryWindow"):
         super().__init__(history_window)
         self._history = history_window
+        self._server_managed = bool(
+            getattr(getattr(history_window, "catalog_manager", None), "server_mode", False)
+        )
         self.setWindowTitle("Configuración")
         self.setMinimumWidth(520)
 
@@ -292,7 +331,7 @@ class HistoryConfigDialog(QDialog):
 
         form = QFormLayout(self.grp_app_values)
         self.cmb_country = QComboBox()
-        self.cmb_country.addItems(["PARAGUAY", "PERU", "VENEZUELA"])
+        self.cmb_country.addItems(list(SUPPORTED_COUNTRIES))
 
         self.cmb_listing_type = QComboBox()
         self.cmb_listing_type.addItems(["AMBOS", "PRODUCTOS", "PRESENTACIONES"])
@@ -307,21 +346,21 @@ class HistoryConfigDialog(QDialog):
 
         self.ed_username = QLineEdit()
         self.ed_username.setPlaceholderText("Nombre de usuario")
-        self.chk_tienda = QCheckBox("Este equipo es tienda")
-        self.chk_tienda.setToolTip("Marcado: si. Desmarcado: no.")
+        self.chk_telemarketing = QCheckBox("Este equipo es telemarketing")
+        self.chk_telemarketing.setToolTip("Marcado: sí. Desmarcado: no.")
         self.ed_label_printer_ip = QLineEdit()
         self.ed_label_printer_ip.setPlaceholderText("Ej: 192.168.1.50")
         self.ed_label_printer_port = QLineEdit()
         self.ed_label_printer_port.setPlaceholderText("9100")
 
         form.addRow("", self.chk_ai)
-        form.addRow("País:", self.cmb_country)
+        form.addRow("País predeterminado:", self.cmb_country)
         form.addRow("Tipo de listado:", self.cmb_listing_type)
         form.addRow("", self.chk_allow_no_stock)
-        form.addRow("Store ID:", self.ed_store_id)
-        form.addRow("Compañía:", self.cmb_company_type)
+        form.addRow("ID del cotizador:", self.ed_store_id)
+        form.addRow("Empresa predeterminada:", self.cmb_company_type)
         form.addRow("Nombre de usuario:", self.ed_username)
-        form.addRow("Tienda:", self.chk_tienda)
+        form.addRow("Telemarketing:", self.chk_telemarketing)
         form.addRow("IP impresora etiquetas:", self.ed_label_printer_ip)
         form.addRow("Puerto impresora etiquetas:", self.ed_label_printer_port)
 
@@ -358,6 +397,28 @@ class HistoryConfigDialog(QDialog):
         layout.addWidget(btn_close)
 
         self._load_app_values()
+        if self._server_managed:
+            managed_note = QLabel(
+                "La identidad, preferencias, países, empresas, tiendas y stocks son "
+                "administrados por el servidor. Aquí solo se guardan valores propios "
+                "de este equipo, como la impresora."
+            )
+            managed_note.setWordWrap(True)
+            form.insertRow(0, managed_note)
+            for control in (
+                self.chk_ai,
+                self.chk_recs,
+                self.cmb_country,
+                self.cmb_listing_type,
+                self.chk_allow_no_stock,
+                self.ed_store_id,
+                self.cmb_company_type,
+                self.ed_username,
+                self.chk_telemarketing,
+            ):
+                control.setEnabled(False)
+            self.chk_ai.setToolTip("Valor administrado por el servidor.")
+            self.chk_recs.setToolTip("Valor administrado por el servidor.")
         self._sync_controls()
         self.adjustSize()
 
@@ -469,7 +530,7 @@ class HistoryConfigDialog(QDialog):
         store_id = str(APP_CONFIG.get("store_id", "")).strip()
         company_type = str(APP_CONFIG.get("company_type", ALLOWED_COMPANY_TYPES[0])).strip().upper()
         username = str(APP_CONFIG.get("username", "")).strip()
-        tienda = self._parse_optional_bool(APP_CONFIG.get("tienda"))
+        telemarketing = self._parse_optional_bool(APP_CONFIG.get("telemarketing"))
         label_printer_ip = "192.168.1.50"
         label_printer_port = "9100"
 
@@ -484,8 +545,12 @@ class HistoryConfigDialog(QDialog):
             store_id = get_setting(con, "store_id", store_id).strip()
             company_type = get_setting(con, "company_type", company_type).strip().upper()
             username = get_setting(con, "username", username).strip()
-            tienda_default = None if tienda is None else ("1" if tienda else "0")
-            tienda = self._parse_optional_bool(get_setting(con, "tienda", tienda_default))
+            telemarketing_default = (
+                None if telemarketing is None else ("1" if telemarketing else "0")
+            )
+            telemarketing = self._parse_optional_bool(
+                get_setting(con, "telemarketing", telemarketing_default)
+            )
             label_printer_ip = get_setting(con, "label_printer_ip", label_printer_ip).strip() or "192.168.1.50"
             label_printer_port = get_setting(con, "label_printer_port", label_printer_port).strip() or "9100"
         except Exception:
@@ -503,6 +568,9 @@ class HistoryConfigDialog(QDialog):
         self.ed_store_id.setText(store_id)
         self._set_combo_value(self.cmb_company_type, company_type)
         self.ed_username.setText(username)
+        self.chk_telemarketing.setCheckState(
+            self._optional_bool_to_check_state(telemarketing)
+        )
         self.ed_label_printer_ip.setText(label_printer_ip)
         self.ed_label_printer_port.setText(label_printer_port)
 
@@ -574,7 +642,11 @@ class HistoryConfigDialog(QDialog):
         log.info("Se habilitaron los valores protegidos de configuración.")
 
     def _save_app_values(self) -> None:
-        allowed_countries = {"PARAGUAY", "PERU", "VENEZUELA"}
+        if self._server_managed:
+            self._save_local_device_values()
+            return
+
+        allowed_countries = set(SUPPORTED_COUNTRIES)
         allowed_listing_types = {"AMBOS", "PRODUCTOS", "PRESENTACIONES"}
         allowed_company_types = {str(x).strip().upper() for x in ALLOWED_COMPANY_TYPES}
 
@@ -584,7 +656,9 @@ class HistoryConfigDialog(QDialog):
         store_id = str(self.ed_store_id.text() or "").strip().upper()
         company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
         username = str(self.ed_username.text() or "").strip()
-        tienda = self._check_state_to_optional_bool(self.chk_tienda.checkState())
+        telemarketing = self._check_state_to_optional_bool(
+            self.chk_telemarketing.checkState()
+        )
         label_printer_ip = str(self.ed_label_printer_ip.text() or "").strip()
         label_printer_port = str(self.ed_label_printer_port.text() or "").strip()
 
@@ -596,6 +670,11 @@ class HistoryConfigDialog(QDialog):
             return
         if company_type not in allowed_company_types:
             QMessageBox.warning(self, "Validación", "Compañía inválida.")
+            return
+        try:
+            validate_server_identity_pair(username, store_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Validación", str(exc))
             return
         if store_id and not re.fullmatch(r"[A-Za-z0-9]+", store_id):
             QMessageBox.warning(
@@ -626,7 +705,11 @@ class HistoryConfigDialog(QDialog):
                 set_setting(con, "store_id", store_id)
                 set_setting(con, "company_type", company_type)
                 set_setting(con, "username", username)
-                set_setting(con, "tienda", "1" if tienda else "0")
+                set_setting(
+                    con,
+                    "telemarketing",
+                    "1" if telemarketing else "0",
+                )
                 set_setting(con, "label_printer_ip", label_printer_ip)
                 set_setting(con, "label_printer_port", str(port_num))
                 api_vals = build_api_settings(
@@ -653,20 +736,20 @@ class HistoryConfigDialog(QDialog):
         APP_CONFIG["store_id"] = store_id
         APP_CONFIG["company_type"] = company_type
         APP_CONFIG["username"] = username
-        APP_CONFIG["tienda"] = tienda
+        APP_CONFIG["telemarketing"] = telemarketing
         APP_CONFIG["id_user_api"] = str(api_vals.get("id_user_api", ""))
         APP_CONFIG["user_api"] = str(api_vals.get("user_api", ""))
         APP_CONFIG["password_api_hash"] = str(api_vals.get("password_api_hash", ""))
 
         log.info(
-            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s tienda=%s",
+            "Configuración protegida actualizada: country=%s listing_type=%s allow_no_stock=%s store_id=%s company_type=%s username=%s telemarketing=%s",
             country,
             listing_type,
             allow_no_stock,
             store_id,
             company_type,
             username,
-            tienda,
+            telemarketing,
         )
         try:
             if self._history is not None and hasattr(self._history, "_wake_background_api_sync"):
@@ -677,6 +760,41 @@ class HistoryConfigDialog(QDialog):
             self,
             "Configuración guardada",
             "Los cambios fueron guardados.\nReinicie la aplicación para aplicar todos los cambios globales.",
+        )
+
+    def _save_local_device_values(self) -> None:
+        label_printer_ip = str(self.ed_label_printer_ip.text() or "").strip()
+        label_printer_port = str(self.ed_label_printer_port.text() or "").strip()
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", label_printer_ip):
+            QMessageBox.warning(self, "Validación", "IP de impresora inválida.")
+            return
+        if not re.fullmatch(r"\d{1,5}", label_printer_port):
+            QMessageBox.warning(self, "Validación", "Puerto de impresora inválido.")
+            return
+        port_num = int(label_printer_port)
+        if port_num <= 0 or port_num > 65535:
+            QMessageBox.warning(self, "Validación", "Puerto de impresora fuera de rango.")
+            return
+
+        con = None
+        try:
+            con = connect(resolve_db_path())
+            with tx(con):
+                set_setting(con, "label_printer_ip", label_printer_ip)
+                set_setting(con, "label_printer_port", str(port_num))
+        except Exception as exc:
+            log.exception("No se pudo guardar la configuración local de impresora.")
+            QMessageBox.critical(self, "Error", f"No se pudieron guardar los cambios:\n{exc}")
+            return
+        finally:
+            if con is not None:
+                con.close()
+
+        QMessageBox.information(
+            self,
+            "Configuración guardada",
+            "La configuración local de la impresora fue guardada. Los demás valores "
+            "se actualizarán desde el servidor.",
         )
 
     def _detect_label_printer(self) -> None:
@@ -762,11 +880,11 @@ class HistoryConfigDialog(QDialog):
 
 
 class QuotesTableModel(QAbstractTableModel):
-    def __init__(self, *, show_payment: bool):
+    def __init__(self, *, show_payment: bool, country: str = APP_COUNTRY):
         super().__init__()
         self.rows: list[dict] = []
         self.show_payment = bool(show_payment)
-        doc_hdr = _doc_header_for_country(APP_COUNTRY)
+        doc_hdr = _doc_header_for_country(country) if str(country or "").strip() else "Documento"
 
         if self.show_payment:
             self.HEADERS = [
@@ -890,7 +1008,13 @@ class QuotesTableModel(QAbstractTableModel):
                 qn_text = qn_digits
         else:
             qn_text = qn_raw
-        row["_cache_quote_no_txt"] = qn_text
+        quote_no_status = str(row.get("quote_no_status") or "confirmed").strip().lower()
+        row["_cache_quote_no_is_provisional"] = quote_no_status in ("provisional", "reserved")
+        row["_cache_quote_no_txt"] = (
+            f"{qn_text} (offline)"
+            if row["_cache_quote_no_is_provisional"]
+            else qn_text
+        )
         row["_cache_quote_no_key"] = self._text_key(qn_text)
         try:
             row["_cache_quote_no_num"] = int(quote_match_key(qn))
@@ -953,8 +1077,14 @@ class QuotesTableModel(QAbstractTableModel):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
 
-        if role == Qt.ToolTipRole and c == self._idx_pdf():
-            return r.get("_cache_pdf_path", "")
+        if role == Qt.ToolTipRole:
+            if c == self._idx_no() and r.get("_cache_quote_no_is_provisional"):
+                return (
+                    "Correlativo provisional. Se reemplazara automaticamente al "
+                    "recuperar la conexion con el servidor."
+                )
+            if c == self._idx_pdf():
+                return r.get("_cache_pdf_path", "")
 
         return None
 
@@ -1039,6 +1169,7 @@ class QuotesTableModel(QAbstractTableModel):
 
 class QuoteHistoryWindow(QMainWindow):
     lockdown_requested = Signal(str)
+    history_refresh_requested = Signal()
     _DEFAULT_SIZE = (1300, 720)
     _MIN_REASONABLE = (980, 620)
     _WIN_KEY_PREFIX = "ui_window_history"
@@ -1064,8 +1195,22 @@ class QuoteHistoryWindow(QMainWindow):
         if is_ai_enabled(refresh=True):
             self._attach_assistant()
 
-        show_payment = (APP_COUNTRY in ("PARAGUAY", "PERU"))
-        self.model = QuotesTableModel(show_payment=show_payment)
+        server_mode = bool(getattr(self.catalog_manager, "server_mode", False))
+        scope_countries = {
+            normalize_country_name(getattr(scope, "country_code", ""))
+            for scope in (getattr(self.catalog_manager, "available_scopes", ()) or ())
+            if str(getattr(scope, "country_code", "") or "").strip()
+        }
+        if server_mode:
+            # El historial puede mezclar scopes. Mantener la columna de pago
+            # visible evita que una cotizacion PE/BO quede interpretada con la
+            # configuracion local de otra ventana.
+            show_payment = True
+            model_country = next(iter(scope_countries)) if len(scope_countries) == 1 else ""
+        else:
+            show_payment = APP_COUNTRY == "PARAGUAY" or uses_peru_business_rules(APP_COUNTRY)
+            model_country = APP_COUNTRY
+        self.model = QuotesTableModel(show_payment=show_payment, country=model_country)
 
         self.page_size = 50
         self.offset = 0
@@ -1100,7 +1245,10 @@ class QuoteHistoryWindow(QMainWindow):
         self._api_sync_stop_event = threading.Event()
         self._api_sync_wake_event = threading.Event()
         self._api_sync_thread: threading.Thread | None = None
+        self._catalog_sync_service: CatalogStockSyncService | None = None
+        self._stock_matrix_dialog: StockMatrixDialog | None = None
         self.lockdown_requested.connect(self._apply_admin_lockdown)
+        self.history_refresh_requested.connect(self._reload_first_page)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1197,6 +1345,8 @@ class QuoteHistoryWindow(QMainWindow):
         except Exception:
             pass
 
+        install_bounded_columns(self.table, fill_column=1)
+
         main.addWidget(self.table)
 
         self.btn_pdf = QPushButton("Abrir PDF")
@@ -1239,7 +1389,8 @@ class QuoteHistoryWindow(QMainWindow):
         self.refresh_recommendations_controls()
         self._reload_first_page()
         QTimer.singleShot(350, self._preload_status_catalog)
-        QTimer.singleShot(1500, self._start_background_api_sync)
+        QTimer.singleShot(350, self._start_background_api_sync)
+        QTimer.singleShot(3000, self._start_catalog_stock_sync)
 
     # -----------------------------
     #  ✅ CONTROL DE VENTANAS HIJAS
@@ -1464,7 +1615,90 @@ class QuoteHistoryWindow(QMainWindow):
         self._rt_timer.start()
         self._wake_background_api_sync()
 
+    def _start_catalog_stock_sync(self):
+        username = str(APP_CONFIG.get("username") or "").strip()
+        id_cotizador = str(APP_CONFIG.get("store_id") or "").strip()
+        if not username or not id_cotizador:
+            return
+
+        try:
+            if (
+                not bool(getattr(self.catalog_manager, "server_mode", False))
+                or str(getattr(self.catalog_manager, "username", "")) != username
+                or str(getattr(self.catalog_manager, "id_cotizador", "")) != id_cotizador
+            ):
+                self.catalog_manager.configure_server_cache(
+                    db_path=self._db_path,
+                    username=username,
+                    id_cotizador=id_cotizador,
+                )
+        except Exception as exc:
+            log.warning("No se pudo cargar el cache de catalogo remoto al iniciar: %s", exc)
+
+        if self._catalog_sync_service is not None:
+            self._catalog_sync_service.stop()
+        service = CatalogStockSyncService(
+            username=username,
+            id_cotizador=id_cotizador,
+            db_path=self._db_path,
+            parent=self,
+        )
+        service.sync_succeeded.connect(self._on_catalog_stock_synced)
+        service.sync_failed.connect(self._on_catalog_stock_sync_failed)
+        self._catalog_sync_service = service
+        dialog = self._stock_matrix_dialog
+        if dialog is not None:
+            try:
+                dialog.set_sync_service(service)
+            except RuntimeError:
+                self._stock_matrix_dialog = None
+        service.start()
+
+    def _stop_catalog_stock_sync(self):
+        service = self._catalog_sync_service
+        if service is not None:
+            service.stop()
+        dialog = self._stock_matrix_dialog
+        if dialog is not None:
+            try:
+                dialog.set_sync_service(None)
+            except RuntimeError:
+                self._stock_matrix_dialog = None
+
+    def _on_catalog_stock_synced(self, _outcome: object):
+        try:
+            self.catalog_manager.reload_server_cache()
+        except Exception as exc:
+            log.exception("El cache se sincronizo, pero no se pudo recargar el catalogo: %s", exc)
+
+        configuration = getattr(_outcome, "configuration", None)
+        if bool(getattr(configuration, "restart_required", False)):
+            changed = sorted(
+                str(key)
+                for key in dict(getattr(configuration, "changed_settings", {}) or {})
+            )
+            log.info(
+                "Se aplico configuracion remota; requiere reinicio. keys=%s",
+                ",".join(changed),
+            )
+            QMessageBox.information(
+                self,
+                "Configuración actualizada",
+                "El servidor actualizó la configuración de este cotizador.\n\n"
+                "Los catálogos, tiendas y stocks ya fueron recargados. Reinicie "
+                "la aplicación para aplicar completamente las preferencias globales.",
+            )
+
+    def _on_catalog_stock_sync_failed(self, message: str):
+        log.warning("Se conserva el ultimo catalogo/stock local: %s", message)
+
     def _start_background_api_sync(self):
+        if not has_complete_server_identity(
+            APP_CONFIG.get("username"),
+            APP_CONFIG.get("store_id"),
+        ):
+            log.info("Sync API automático deshabilitado: modo offline.")
+            return
         if (self._api_sync_thread is not None) and self._api_sync_thread.is_alive():
             return
         self._api_sync_stop_event.clear()
@@ -1475,6 +1709,7 @@ class QuoteHistoryWindow(QMainWindow):
             daemon=True,
         )
         self._api_sync_thread.start()
+        self._api_sync_wake_event.set()
 
     def _wake_background_api_sync(self):
         try:
@@ -1483,6 +1718,7 @@ class QuoteHistoryWindow(QMainWindow):
             pass
 
     def _stop_background_api_sync(self):
+        self._stop_catalog_stock_sync()
         try:
             self._api_sync_stop_event.set()
             self._api_sync_wake_event.set()
@@ -1553,16 +1789,21 @@ class QuoteHistoryWindow(QMainWindow):
                 sent = int(res.get("sent") or 0)
                 skipped = int(res.get("skipped") or 0)
                 failed = int(res.get("failed") or 0)
+                renumbered = int(res.get("renumbered") or 0)
                 label_res = sync_pending_label_print_logs_once(limit=batch_limit)
                 label_found = int(label_res.get("found") or 0)
                 label_sent = int(label_res.get("sent") or 0)
                 label_failed = int(label_res.get("failed") or 0)
 
-                if sent or failed or label_sent or label_failed:
+                if renumbered:
+                    self.history_refresh_requested.emit()
+
+                if sent or failed or renumbered or label_sent or label_failed:
                     log.info(
-                        "Sync API automatico: found=%s sent=%s skipped=%s failed=%s labels_found=%s labels_sent=%s labels_failed=%s",
+                        "Sync API automatico: found=%s sent=%s renumbered=%s skipped=%s failed=%s labels_found=%s labels_sent=%s labels_failed=%s",
                         found,
                         sent,
+                        renumbered,
                         skipped,
                         failed,
                         label_found,
@@ -1617,6 +1858,23 @@ class QuoteHistoryWindow(QMainWindow):
 
     def _on_catalog_updated(self, *_):
         self._apply_catalog_gate()
+        if not bool(getattr(self.catalog_manager, "server_mode", False)):
+            QTimer.singleShot(0, self._rebuild_local_catalog_index)
+
+    def _rebuild_local_catalog_index(self) -> None:
+        try:
+            from ..ai.search_index import LocalSearchIndex
+
+            index = LocalSearchIndex(self._db_path)
+            if is_ai_enabled(refresh=True):
+                index.ensure_and_rebuild()
+            else:
+                index.drop_schema()
+        except Exception as exc:
+            log.warning(
+                "No se pudo reconstruir el índice local tras cambiar de catálogo: %s",
+                exc,
+            )
 
     def _catalog_health(self) -> tuple[bool, str]:
         try:
@@ -1638,6 +1896,14 @@ class QuoteHistoryWindow(QMainWindow):
         ok, _reason = self._catalog_health()
         return bool(ok)
 
+    def _catalog_unavailable_message(self, reason: str = "") -> str:
+        if bool(getattr(self.catalog_manager, "server_mode", False)):
+            return (
+                str(reason or "No hay un catalogo remoto guardado para este usuario/cotizador.").strip()
+                + "\n\nComprueba las tiendas asignadas y usa 'Stock por tiendas' para actualizar."
+            )
+        return products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+
     def _apply_catalog_gate(self):
         ok, reason = self._catalog_health()
         ai_on = bool(is_ai_enabled(refresh=True))
@@ -1649,7 +1915,7 @@ class QuoteHistoryWindow(QMainWindow):
         if ok:
             tip = "Primero importa/actualiza productos para poder abrir/crear cotizaciones."
         else:
-            tip = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            tip = self._catalog_unavailable_message(reason)
             if not tip.strip():
                 tip = reason or "Debes actualizar productos."
         self.btn_new.setToolTip("" if ok else tip)
@@ -1724,6 +1990,15 @@ class QuoteHistoryWindow(QMainWindow):
             return None
         return self.model.get_id_at(idx.row())
 
+    def _selected_quote_country(self) -> str:
+        idx = self.table.selectionModel().currentIndex()
+        if idx.isValid() and 0 <= idx.row() < len(self.model.rows):
+            return normalize_country_name(
+                self.model.rows[idx.row()].get("country_code"),
+                default=APP_COUNTRY,
+            )
+        return normalize_country_name(APP_COUNTRY)
+
     def _select_row_by_quote_id(self, quote_id: int):
         try:
             for i, r in enumerate(self.model.rows or []):
@@ -1796,7 +2071,7 @@ class QuoteHistoryWindow(QMainWindow):
     def _on_table_double_clicked(self, index: QModelIndex):
         ok, reason = self._catalog_health()
         if not ok:
-            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            msg = self._catalog_unavailable_message(reason)
             if not msg.strip():
                 msg = reason or "Debes actualizar productos."
             QMessageBox.warning(self, "Catalogo invalido", msg)
@@ -1829,7 +2104,7 @@ class QuoteHistoryWindow(QMainWindow):
         act_hide = QAction("🗑️ Eliminar", self)
 
         act_edit_pay = None
-        if APP_COUNTRY == "PERU":
+        if uses_peru_business_rules(self._selected_quote_country()):
             act_edit_pay = QAction("💳 Editar pago…", self)
             act_edit_pay.setEnabled(has_sel)
 
@@ -1870,7 +2145,7 @@ class QuoteHistoryWindow(QMainWindow):
         elif picked is act_labels:
             fn = self._open_labels_dialog
         elif act_edit_pay is not None and picked is act_edit_pay:
-            fn = self._edit_payment_peru
+            fn = self._edit_free_payment
         elif picked is act_ticket:
             fn = self._reprint_ticket
         elif picked is act_regen:
@@ -1884,7 +2159,7 @@ class QuoteHistoryWindow(QMainWindow):
     def _open_chat(self):
         ok, reason = self._catalog_health()
         if not ok:
-            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            msg = self._catalog_unavailable_message(reason)
             if not msg.strip():
                 msg = reason or "Debes actualizar productos."
             QMessageBox.warning(self, "Catalogo invalido", msg)
@@ -1944,10 +2219,7 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-    def _edit_payment_peru(self):
-        if APP_COUNTRY != "PERU":
-            return
-
+    def _edit_free_payment(self):
         qid = self._selected_quote_id()
         if not qid:
             QMessageBox.information(self, "Atención", "Selecciona una cotización.")
@@ -1967,6 +2239,9 @@ class QuoteHistoryWindow(QMainWindow):
                     con.close()
                 except Exception:
                     pass
+
+        if not uses_peru_business_rules(header.get("country_code") or APP_COUNTRY):
+            return
 
         current_mp = (header.get("metodo_pago") or "").strip()
 
@@ -2003,20 +2278,50 @@ class QuoteHistoryWindow(QMainWindow):
                     pass
 
     def _open_new_quote(self):
-        ok, reason = self._catalog_health()
+        quote_context = None
+        local_catalog_id = None
+        df_productos = self.catalog_manager.df_productos
+        df_presentaciones = self.catalog_manager.df_presentaciones
+
+        if bool(getattr(self.catalog_manager, "server_mode", False)):
+            scope = select_catalog_scope(self, self.catalog_manager)
+            if scope is None:
+                return
+            df_productos, df_presentaciones = self.catalog_manager.catalog_for_scope(scope)
+            ok, reason = self.catalog_manager.catalog_health(scope)
+            if ok:
+                quote_context = build_quote_context(self.catalog_manager, scope)
+        else:
+            local_catalogs = tuple(
+                getattr(self.catalog_manager, "available_local_catalogs", ()) or ()
+            )
+            if local_catalogs:
+                selected_catalog = select_local_catalog(self, self.catalog_manager)
+                if selected_catalog is None:
+                    return
+                local_catalog_id = int(selected_catalog["id"])
+                df_productos, df_presentaciones = self.catalog_manager.catalog_for_local(
+                    local_catalog_id
+                )
+                ok, reason = self.catalog_manager.local_catalog_health(local_catalog_id)
+            else:
+                ok, reason = self._catalog_health()
+
         if not ok:
-            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
+            msg = self._catalog_unavailable_message(reason)
             if not msg.strip():
                 msg = reason or "Debes actualizar productos."
             QMessageBox.warning(self, "Catalogo invalido", msg)
             return
 
         win = SistemaCotizaciones(
-            df_productos=self.catalog_manager.df_productos,
-            df_presentaciones=self.catalog_manager.df_presentaciones,
+            df_productos=df_productos,
+            df_presentaciones=df_presentaciones,
             app_icon=self.windowIcon(),
             catalog_manager=self.catalog_manager,
             quote_events=self.quote_events,
+            quote_context=quote_context,
+            local_catalog_id=local_catalog_id,
         )
 
         win._history_window = self
@@ -2031,7 +2336,36 @@ class QuoteHistoryWindow(QMainWindow):
             quote_events=self.quote_events,
             app_icon=self.windowIcon(),
             parent=self,
+            stock_matrix_opener=self._open_stock_matrix,
         )
+
+    def _open_stock_matrix(self):
+        if not bool(getattr(self.catalog_manager, "server_mode", False)):
+            QMessageBox.information(
+                self,
+                "Stock por tiendas",
+                "La matriz esta disponible cuando hay un usuario de Cotizador configurado.",
+            )
+            return
+
+        dialog = self._stock_matrix_dialog
+        if dialog is not None and self._is_qt_alive(dialog):
+            dialog.reload()
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dialog = StockMatrixDialog(
+            catalog_manager=self.catalog_manager,
+            sync_service=self._catalog_sync_service,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_: setattr(self, "_stock_matrix_dialog", None))
+        self._stock_matrix_dialog = dialog
+        dialog.show()
+        center_on_screen(dialog)
 
     def _open_config_dialog(self):
         dlg = HistoryConfigDialog(self)
@@ -2071,23 +2405,100 @@ class QuoteHistoryWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{e}")
 
     def _duplicate(self):
-        ok, reason = self._catalog_health()
-        if not ok:
-            msg = products_update_required_message(getattr(self.catalog_manager, "df_productos", None))
-            if not msg.strip():
-                msg = reason or "Debes actualizar productos."
-            QMessageBox.warning(self, "Catalogo invalido", msg)
-            return
-
         qid = self._selected_quote_id()
         if not qid:
             QMessageBox.information(self, "Atención", "Selecciona una cotización.")
             return
         try:
             con = connect(self._db_path)
+            try:
+                header = get_quote_header(con, qid)
+                items_base, items_shown = get_quote_items(con, qid)
+            finally:
+                con.close()
 
-            header = get_quote_header(con, qid)
-            items_base, _items_shown = get_quote_items(con, qid)
+            quote_context = None
+            local_catalog_id = None
+            df_productos = self.catalog_manager.df_productos
+            df_presentaciones = self.catalog_manager.df_presentaciones
+            if bool(getattr(self.catalog_manager, "server_mode", False)):
+                historical_scope = CatalogScope(
+                    country_code=country_code_for(
+                        header.get("country_code"),
+                        default=COUNTRY_CODE,
+                    ),
+                    company_type=str(header.get("company_type") or "").strip(),
+                )
+                if historical_scope not in tuple(self.catalog_manager.available_scopes or ()):
+                    QMessageBox.warning(
+                        self,
+                        "Catálogo histórico no autorizado",
+                        "La cotización usa un país y empresa que ya no están asignados "
+                        "a este usuario/cotizador.",
+                    )
+                    return
+
+                current_username = str(self.catalog_manager.username or "").strip()
+                current_id = str(self.catalog_manager.id_cotizador or "").strip()
+                historical_username = str(header.get("cotizador_username") or "").strip()
+                historical_id = str(header.get("id_cotizador") or "").strip()
+                different_owner = (
+                    historical_username
+                    and historical_username.casefold() != current_username.casefold()
+                ) or (
+                    historical_id
+                    and historical_id.casefold() != current_id.casefold()
+                )
+                if different_owner:
+                    QMessageBox.warning(
+                        self,
+                        "Caché de otro cotizador",
+                        "No se puede duplicar esta cotización con el catálogo de otra "
+                        "identidad de usuario/cotizador.",
+                    )
+                    return
+
+                # Duplicar/reabrir conserva el país+empresa histórico. El scope
+                # no se vuelve a elegir mientras se reconstruye esa cotización.
+                scope = historical_scope
+                df_productos, df_presentaciones = self.catalog_manager.catalog_for_scope(scope)
+                ok, reason = validate_products_catalog_df(df_productos)
+                if ok:
+                    default_context = build_quote_context(self.catalog_manager, scope)
+                    quote_context = QuoteContext.from_values(
+                        country_code=scope.country_code,
+                        company_type=scope.company_type,
+                        username=historical_username or default_context.username,
+                        id_cotizador=historical_id or default_context.id_cotizador,
+                        base_currency=(
+                            str(header.get("base_currency") or "").strip()
+                            or default_context.base_currency
+                        ),
+                    )
+            else:
+                local_catalogs = tuple(
+                    getattr(self.catalog_manager, "available_local_catalogs", ()) or ()
+                )
+                if local_catalogs:
+                    selected_catalog = select_local_catalog(self, self.catalog_manager)
+                    if selected_catalog is None:
+                        return
+                    local_catalog_id = int(selected_catalog["id"])
+                    df_productos, df_presentaciones = (
+                        self.catalog_manager.catalog_for_local(local_catalog_id)
+                    )
+                    ok, reason = self.catalog_manager.local_catalog_health(
+                        local_catalog_id
+                    )
+                else:
+                    ok, reason = self._catalog_health()
+
+            if not ok:
+                msg = self._catalog_unavailable_message(reason)
+                if not msg.strip():
+                    msg = reason or "Debes actualizar productos."
+                QMessageBox.warning(self, "Catálogo inválido", msg)
+                return
 
             payload = {
                 "cliente": header.get("cliente", ""),
@@ -2097,19 +2508,31 @@ class QuoteHistoryWindow(QMainWindow):
                 "direccion": header.get("direccion", ""),
                 "email": header.get("email", ""),
                 "items_base": items_base,
+                "items_shown": items_shown,
+                "base_currency": header.get("base_currency", ""),
+                "currency_shown": header.get("currency_shown", ""),
+                "tasa_shown": header.get("tasa_shown"),
+                "shown_totals": {
+                    "subtotal_bruto": header.get("subtotal_bruto_shown", 0.0),
+                    "descuento_total": header.get("descuento_total_shown", 0.0),
+                    "total_general": header.get("total_neto_shown", 0.0),
+                },
             }
 
             win = SistemaCotizaciones(
-                df_productos=self.catalog_manager.df_productos,
-                df_presentaciones=self.catalog_manager.df_presentaciones,
+                df_productos=df_productos,
+                df_presentaciones=df_presentaciones,
                 app_icon=self.windowIcon(),
                 catalog_manager=self.catalog_manager,
                 quote_events=self.quote_events,
+                quote_context=quote_context,
+                local_catalog_id=local_catalog_id,
             )
 
             win._history_window = self
 
-            if APP_COUNTRY == "PARAGUAY":
+            free_payment = None
+            if win.country_name == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
                 is_cash = (mp == "efectivo")
 
@@ -2138,13 +2561,8 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-            elif APP_COUNTRY == "PERU":
-                mp = (header.get("metodo_pago") or "")
-                try:
-                    if getattr(win, "entry_metodo_pago", None) is not None:
-                        win.entry_metodo_pago.setText(mp)
-                except Exception:
-                    pass
+            elif uses_peru_business_rules(win.country_name):
+                free_payment = header.get("metodo_pago") or ""
 
             win.show()
             center_on_screen(win)
@@ -2152,7 +2570,14 @@ class QuoteHistoryWindow(QMainWindow):
 
             win.load_from_history_payload(payload)
 
-            if APP_COUNTRY == "PARAGUAY":
+            if free_payment is not None:
+                try:
+                    if getattr(win, "entry_metodo_pago", None) is not None:
+                        win.entry_metodo_pago.setText(free_payment)
+                except Exception:
+                    pass
+
+            if win.country_name == "PARAGUAY":
                 mp = (header.get("metodo_pago") or "").strip().lower()
                 is_cash = (mp == "efectivo")
                 try:
@@ -2199,9 +2624,11 @@ class QuoteHistoryWindow(QMainWindow):
 
             pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
             cliente = header.get("cliente", "")
+            ticket_context = _quote_context_from_header(header)
+            historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
             quote_code = format_quote_code(
                 country_code=header.get("country_code") or COUNTRY_CODE,
-                store_id=STORE_ID,
+                store_id=historical_store_id,
                 quote_no=header.get("quote_no"),
                 width=7,
             )
@@ -2211,6 +2638,9 @@ class QuoteHistoryWindow(QMainWindow):
                 items_pdf=items_shown,
                 quote_code=quote_code,
                 country=header.get("country_code") or APP_COUNTRY,
+                store_id=historical_store_id,
+                company_type=ticket_context.scope.company_type,
+                context=ticket_context,
                 cliente_nombre=cliente,
                 printer_name="TICKERA",
                 width=48,
@@ -2251,17 +2681,46 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
+        historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
         quote_code = format_quote_code(
             country_code=header.get("country_code") or COUNTRY_CODE,
-            store_id=STORE_ID,
+            store_id=historical_store_id,
             quote_no=header.get("quote_no"),
             width=7,
         )
+        label_quote_context = None
+        try:
+            historical_id = str(header.get("id_cotizador") or STORE_ID).strip()
+            if historical_id:
+                label_quote_context = QuoteContext.from_values(
+                    country_code=country_code_for(
+                        header.get("country_code"),
+                        default=COUNTRY_CODE,
+                    ),
+                    company_type=str(
+                        header.get("company_type")
+                        or APP_CONFIG.get("company_type")
+                        or "LA CASA DEL PERFUME"
+                    ).strip(),
+                    username=str(
+                        header.get("cotizador_username")
+                        or APP_CONFIG.get("username")
+                        or ""
+                    ).strip(),
+                    id_cotizador=historical_id,
+                    base_currency=str(
+                        header.get("base_currency") or APP_CURRENCY
+                    ).strip(),
+                )
+        except (TypeError, ValueError):
+            label_quote_context = None
         dlg = LabelsDialog(
             self,
             quote_code=quote_code,
             country=header.get("country_code") or APP_COUNTRY,
             items=items_shown,
+            company_type=str(header.get("company_type") or "").strip(),
+            quote_context=label_quote_context,
         )
         dlg.exec()
 
@@ -2282,9 +2741,18 @@ class QuoteHistoryWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
                 return
 
+            historical_country_code = country_code_for(
+                header.get("country_code"),
+                default=COUNTRY_CODE,
+            )
+            historical_country = normalize_country_name(
+                historical_country_code,
+                default=APP_COUNTRY,
+            )
+            historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
             quote_code = format_quote_code(
-                country_code=header.get("country_code") or COUNTRY_CODE,
-                store_id=STORE_ID,
+                country_code=historical_country_code,
+                store_id=historical_store_id,
                 quote_no=header.get("quote_no"),
                 width=7,
             )
@@ -2300,9 +2768,9 @@ class QuoteHistoryWindow(QMainWindow):
             new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
 
             metodo_pago = (header.get("metodo_pago") or "").strip()
-            if APP_COUNTRY == "PERU":
+            if uses_peru_business_rules(historical_country):
                 pass
-            elif APP_COUNTRY == "PARAGUAY":
+            elif historical_country == "PARAGUAY":
                 if not metodo_pago:
                     metodo_pago = "Tarjeta"
             else:
@@ -2313,6 +2781,7 @@ class QuoteHistoryWindow(QMainWindow):
                 "fecha": (header.get("created_at", "") or "")[:10],
                 "cliente": header.get("cliente", ""),
                 "cedula": header.get("cedula", ""),
+                "tipo_documento": header.get("tipo_documento", ""),
                 "telefono": header.get("telefono", ""),
                 "metodo_pago": metodo_pago,
                 "items": items_shown,
@@ -2321,7 +2790,15 @@ class QuoteHistoryWindow(QMainWindow):
                 "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
             }
 
-            generar_pdf(datos, fixed_quote_no=quote_code, out_path=new_out_path)
+            generar_pdf(
+                datos,
+                fixed_quote_no=quote_code,
+                out_path=new_out_path,
+                country_code=historical_country_code,
+                store_id=historical_store_id,
+                company_type=str(header.get("company_type") or "").strip(),
+                currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
+            )
 
             con = connect(self._db_path)
 
@@ -2370,9 +2847,18 @@ class QuoteHistoryWindow(QMainWindow):
         if not old_out_path:
             raise RuntimeError("La cotización no tiene ruta de PDF.")
 
+        historical_country_code = country_code_for(
+            header.get("country_code"),
+            default=COUNTRY_CODE,
+        )
+        historical_country = normalize_country_name(
+            historical_country_code,
+            default=APP_COUNTRY,
+        )
+        historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
         quote_code = format_quote_code(
-            country_code=header.get("country_code") or COUNTRY_CODE,
-            store_id=STORE_ID,
+            country_code=historical_country_code,
+            store_id=historical_store_id,
             quote_no=header.get("quote_no"),
             width=7,
         )
@@ -2388,9 +2874,9 @@ class QuoteHistoryWindow(QMainWindow):
         new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
 
         metodo_pago = (header.get("metodo_pago") or "").strip()
-        if APP_COUNTRY == "PERU":
+        if uses_peru_business_rules(historical_country):
             pass
-        elif APP_COUNTRY == "PARAGUAY":
+        elif historical_country == "PARAGUAY":
             if not metodo_pago:
                 metodo_pago = "Tarjeta"
         else:
@@ -2401,6 +2887,7 @@ class QuoteHistoryWindow(QMainWindow):
             "fecha": (header.get("created_at", "") or "")[:10],
             "cliente": header.get("cliente", ""),
             "cedula": header.get("cedula", ""),
+            "tipo_documento": header.get("tipo_documento", ""),
             "telefono": header.get("telefono", ""),
             "metodo_pago": metodo_pago,
             "items": items_shown,
@@ -2409,7 +2896,15 @@ class QuoteHistoryWindow(QMainWindow):
             "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
         }
 
-        generar_pdf(datos, fixed_quote_no=quote_code, out_path=new_out_path)
+        generar_pdf(
+            datos,
+            fixed_quote_no=quote_code,
+            out_path=new_out_path,
+            country_code=historical_country_code,
+            store_id=historical_store_id,
+            company_type=str(header.get("company_type") or "").strip(),
+            currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
+        )
 
         con = None
         try:
@@ -2452,11 +2947,15 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
+        ticket_context = _quote_context_from_header(header)
         ticket_paths = generar_ticket_para_cotizacion(
             pdf_path=new_pdf_path,
             items_pdf=items_shown,
             quote_code=quote_code,
             country=header.get("country_code") or APP_COUNTRY,
+            store_id=str(header.get("id_cotizador") or STORE_ID).strip(),
+            company_type=ticket_context.scope.company_type,
+            context=ticket_context,
             cliente_nombre=header.get("cliente", ""),
             printer_name="TICKERA",
             width=48,

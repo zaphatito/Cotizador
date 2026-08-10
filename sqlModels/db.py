@@ -66,16 +66,21 @@ def _column_exists(con: sqlite3.Connection, table: str, col: str) -> bool:
         return False
 
 
-def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
-    """
-    Detecta una DB nueva creada con el DDL actual (sin meta.schema_version).
-    En ese caso evitamos ejecutar migraciones antiguas.
-    """
+def _looks_like_recent_schema_without_meta(
+    con: sqlite3.Connection,
+    *,
+    require_history_factor: bool,
+) -> bool:
     required = [
         ("quotes", "api_sent_at"),
         ("quotes", "api_error_at"),
         ("quotes", "api_error_message"),
         ("quotes", "id_cliente"),
+        ("quotes", "quote_no_status"),
+        ("quotes", "company_type"),
+        ("quotes", "base_currency"),
+        ("quotes", "cotizador_username"),
+        ("quotes", "id_cotizador"),
         ("quote_items", "id_precioventa"),
         ("quote_items", "tipo_prod"),
         ("clients", "documento_norm"),
@@ -90,9 +95,14 @@ def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
         ("presentations_current", "p_min"),
         ("presentations_current", "p_oferta"),
     ]
+    if require_history_factor:
+        required.append(("quote_items", "factor_total"))
     for table, col in required:
         if not _column_exists(con, table, col):
             return False
+
+    if not _table_exists(con, "catalog_cache_owners"):
+        return False
 
     forbidden = [
         ("quotes", "cliente"),
@@ -110,6 +120,17 @@ def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
         if _column_exists(con, table, col):
             return False
     return True
+
+
+def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
+    """
+    Detecta una DB nueva creada con el DDL actual (sin meta.schema_version).
+    En ese caso evitamos ejecutar migraciones antiguas.
+    """
+    return _looks_like_recent_schema_without_meta(
+        con,
+        require_history_factor=True,
+    )
 
 
 def _infer_schema_version(con: sqlite3.Connection) -> int:
@@ -179,6 +200,17 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         if cur_v_s is None:
             if _looks_like_head_schema_without_meta(con):
                 cur_v = SCHEMA_VERSION
+            elif (
+                not _column_exists(con, "quote_items", "factor_total")
+                and _looks_like_recent_schema_without_meta(
+                    con,
+                    require_history_factor=False,
+                )
+            ):
+                # v39 ya contiene el cache remoto y el contexto de cotizacion.
+                # Reconocerlo evita reejecutar migraciones legacy incompatibles
+                # cuando solo falta el snapshot agregado en v40.
+                cur_v = 39
             else:
                 cur_v = _infer_schema_version(con)
             meta_dirty = True
@@ -205,6 +237,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
 
         # 4.5) Post-setup solo cuando migra o falta meta.
         if migrated or meta_dirty:
+            from .offline_catalogs_repo import bootstrap_current_catalog
+
+            bootstrap_current_catalog(con)
+
             try:
                 from .clients_repo import ensure_generic_clients
 

@@ -230,6 +230,93 @@ def _clients_table_has_rows(con: sqlite3.Connection) -> bool:
     return _table_exists(con, "clients")
 
 
+def _load_fuzzy_clients(con: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Carga solo clientes; no consulta ninguna tabla de catalogo legacy."""
+    if _clients_table_has_rows(con):
+        direccion_expr = (
+            "COALESCE(NULLIF(TRIM(direccion), ''), '-')"
+            if _column_exists(con, "clients", "direccion")
+            else "'-'"
+        )
+        email_expr = (
+            "COALESCE(NULLIF(TRIM(email), ''), '-')"
+            if _column_exists(con, "clients", "email")
+            else "'-'"
+        )
+        country_expr = (
+            "COALESCE(country_code, '')"
+            if _column_exists(con, "clients", "country_code")
+            else "''"
+        )
+        tipo_doc_expr = (
+            "COALESCE(tipo_documento, '')"
+            if _column_exists(con, "clients", "tipo_documento")
+            else "''"
+        )
+        deleted_filter = (
+            " AND deleted_at IS NULL"
+            if _column_exists(con, "clients", "deleted_at")
+            else ""
+        )
+        rows = con.execute(
+            f"""
+            SELECT
+                COALESCE(nombre, '') AS cliente,
+                COALESCE(documento, '') AS cedula,
+                COALESCE(telefono, '') AS telefono,
+                {direccion_expr} AS direccion,
+                {email_expr} AS email,
+                {country_expr} AS country_code,
+                {tipo_doc_expr} AS tipo_documento
+            FROM clients
+            WHERE TRIM(COALESCE(nombre, '')) <> ''
+              {deleted_filter}
+            ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
+            """
+        ).fetchall()
+    else:
+        country_expr = (
+            "COALESCE(country_code, '')"
+            if _column_exists(con, "quotes", "country_code")
+            else "''"
+        )
+        tipo_doc_expr = (
+            "COALESCE(tipo_documento, '')"
+            if _column_exists(con, "quotes", "tipo_documento")
+            else "''"
+        )
+        rows = con.execute(
+            f"""
+            SELECT
+                cliente,
+                cedula,
+                telefono,
+                '-' AS direccion,
+                '-' AS email,
+                {country_expr} AS country_code,
+                {tipo_doc_expr} AS tipo_documento
+            FROM quotes
+            WHERE deleted_at IS NULL
+              AND TRIM(COALESCE(cliente,'')) <> ''
+            GROUP BY cliente, cedula, telefono, country_code, tipo_documento
+            ORDER BY MAX(created_at) DESC
+            """
+        ).fetchall()
+
+    return [
+        {
+            "cliente": str(row["cliente"] or ""),
+            "cedula": str(row["cedula"] or ""),
+            "telefono": str(row["telefono"] or ""),
+            "direccion": str(row["direccion"] or "-"),
+            "email": str(row["email"] or "-"),
+            "country_code": str(row["country_code"] or ""),
+            "tipo_documento": str(row["tipo_documento"] or ""),
+        }
+        for row in rows
+    ]
+
+
 def _country_code_norm(value: Any) -> str:
     v = str(value or "").strip().upper()
     if v in ("PE", "PERU"):
@@ -238,6 +325,8 @@ def _country_code_norm(value: Any) -> str:
         return "PY"
     if v in ("VE", "VENEZUELA"):
         return "VE"
+    if v in ("BO", "BOLIVIA"):
+        return "BO"
     return v
 
 
@@ -724,16 +813,25 @@ class _FuzzyCache:
 
 
 _GLOBAL_FUZZY_CACHE: Dict[str, _FuzzyCache] = {}
+_GLOBAL_CLIENTS_FUZZY_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 _GLOBAL_FUZZY_CACHE_LOCK = threading.Lock()
 
 
 class LocalSearchIndex:
-    def __init__(self, db_path: str, *, auto_create_fts: bool = True):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        auto_create_fts: bool = True,
+        country_code: str = "",
+    ):
         self.db_path = os.path.abspath(str(db_path))
         self._auto_create_fts = bool(auto_create_fts)
+        self._country_code = _country_code_norm(country_code)
         self._lock = threading.Lock()
         self._fts_available: Optional[bool] = None
         self._fuzzy: Optional[_FuzzyCache] = None
+        self._clients_fuzzy: Optional[List[Dict[str, Any]]] = None
         self._prewarm_started = False
 
     def _connect(self) -> sqlite3.Connection:
@@ -926,15 +1024,34 @@ class LocalSearchIndex:
             finally:
                 con.close()
             self._fuzzy = None
+            self._clients_fuzzy = None
             self._prewarm_started = False
             with _GLOBAL_FUZZY_CACHE_LOCK:
                 _GLOBAL_FUZZY_CACHE.pop(self.db_path, None)
+                _GLOBAL_CLIENTS_FUZZY_CACHE.pop(self.db_path, None)
 
         # Regenera cache persistente fuera del lock.
         try:
             self.prewarm()
         except Exception:
             pass
+
+    def ensure_and_rebuild_clients(self) -> None:
+        """Actualiza solo clientes sin consultar el catalogo Excel legacy."""
+        with self._lock:
+            con = self._connect()
+            try:
+                self._fts_available = ensure_ai_schema(con)
+                rebuild_clients_index(con)
+                con.commit()
+            finally:
+                con.close()
+            self._fuzzy = None
+            self._clients_fuzzy = None
+            self._prewarm_started = False
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                _GLOBAL_FUZZY_CACHE.pop(self.db_path, None)
+                _GLOBAL_CLIENTS_FUZZY_CACHE.pop(self.db_path, None)
 
     def drop_schema(self) -> None:
         with self._lock:
@@ -946,9 +1063,11 @@ class LocalSearchIndex:
                 con.close()
             self._fts_available = False
             self._fuzzy = None
+            self._clients_fuzzy = None
             self._prewarm_started = False
             with _GLOBAL_FUZZY_CACHE_LOCK:
                 _GLOBAL_FUZZY_CACHE.pop(self.db_path, None)
+                _GLOBAL_CLIENTS_FUZZY_CACHE.pop(self.db_path, None)
 
     def prewarm(self) -> None:
         try:
@@ -971,74 +1090,45 @@ class LocalSearchIndex:
         t = threading.Thread(target=self.prewarm, daemon=True)
         t.start()
 
+    def _ensure_clients_fuzzy_cache(self) -> List[Dict[str, Any]]:
+        """Cache fuzzy independiente que nunca carga productos ni presentaciones."""
+        with self._lock:
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                global_cached = _GLOBAL_CLIENTS_FUZZY_CACHE.get(self.db_path)
+            if self._clients_fuzzy is not None and global_cached is self._clients_fuzzy:
+                return self._clients_fuzzy
+            if global_cached is not None:
+                self._clients_fuzzy = global_cached
+                return self._clients_fuzzy
+
+            self._clients_fuzzy = None
+            con = self._connect()
+            try:
+                clients = _load_fuzzy_clients(con)
+            finally:
+                con.close()
+
+            self._clients_fuzzy = clients
+            with _GLOBAL_FUZZY_CACHE_LOCK:
+                _GLOBAL_CLIENTS_FUZZY_CACHE[self.db_path] = clients
+            return clients
+
     def _ensure_fuzzy_cache(self) -> _FuzzyCache:
         with self._lock:
-            if self._fuzzy is not None:
-                return self._fuzzy
             with _GLOBAL_FUZZY_CACHE_LOCK:
                 global_cached = _GLOBAL_FUZZY_CACHE.get(self.db_path)
+            if self._fuzzy is not None and global_cached is self._fuzzy:
+                return self._fuzzy
             if global_cached is not None:
                 self._fuzzy = global_cached
                 return self._fuzzy
+            # Otra instancia pudo invalidar el cache global despues de editar
+            # clientes. No reutilizar una referencia local que ya quedo stale.
+            self._fuzzy = None
 
             con = self._connect()
             try:
-                if _clients_table_has_rows(con):
-                    direccion_expr = "COALESCE(NULLIF(TRIM(direccion), ''), '-')" if _column_exists(con, "clients", "direccion") else "'-'"
-                    email_expr = "COALESCE(NULLIF(TRIM(email), ''), '-')" if _column_exists(con, "clients", "email") else "'-'"
-                    country_expr = "COALESCE(country_code, '')" if _column_exists(con, "clients", "country_code") else "''"
-                    tipo_doc_expr = "COALESCE(tipo_documento, '')" if _column_exists(con, "clients", "tipo_documento") else "''"
-                    deleted_filter = " AND deleted_at IS NULL" if _column_exists(con, "clients", "deleted_at") else ""
-                    crows = con.execute(
-                        f"""
-                        SELECT
-                            COALESCE(nombre, '') AS cliente,
-                            COALESCE(documento, '') AS cedula,
-                            COALESCE(telefono, '') AS telefono,
-                            {direccion_expr} AS direccion,
-                            {email_expr} AS email,
-                            {country_expr} AS country_code,
-                            {tipo_doc_expr} AS tipo_documento
-                        FROM clients
-                        WHERE TRIM(COALESCE(nombre, '')) <> ''
-                          {deleted_filter}
-                        ORDER BY COALESCE(source_created_at, updated_at, created_at) DESC, id DESC
-                        """
-                    ).fetchall()
-                else:
-                    country_expr = "COALESCE(country_code, '')" if _column_exists(con, "quotes", "country_code") else "''"
-                    tipo_doc_expr = "COALESCE(tipo_documento, '')" if _column_exists(con, "quotes", "tipo_documento") else "''"
-                    crows = con.execute(
-                        f"""
-                        SELECT
-                            cliente,
-                            cedula,
-                            telefono,
-                            '-' AS direccion,
-                            '-' AS email,
-                            {country_expr} AS country_code,
-                            {tipo_doc_expr} AS tipo_documento
-                        FROM quotes
-                        WHERE deleted_at IS NULL
-                          AND TRIM(COALESCE(cliente,'')) <> ''
-                        GROUP BY cliente, cedula, telefono, country_code, tipo_documento
-                        ORDER BY MAX(created_at) DESC
-                        """
-                    ).fetchall()
-
-                clients: List[Dict[str, Any]] = []
-                for r in crows:
-                    clients.append(
-                        {
-                            "cliente": str(r["cliente"] or ""),
-                            "cedula": str(r["cedula"] or ""),
-                            "telefono": str(r["telefono"] or ""),
-                            "direccion": str(r["direccion"] or "-"),
-                            "email": str(r["email"] or "-"),
-                            "country_code": str(r["country_code"] or ""),
-                            "tipo_documento": str(r["tipo_documento"] or ""),
-                        }
-                    )
+                clients = _load_fuzzy_clients(con)
 
                 essence_cats = {"ESENCIA", "ESENCIAS", "AROMATERAPIA"}
                 prows = con.execute(
@@ -1829,7 +1919,7 @@ class LocalSearchIndex:
             has_clients_table = _clients_table_has_rows(con)
             has_client_direccion = _column_exists(con, "clients", "direccion") if has_clients_table else False
             has_client_email = _column_exists(con, "clients", "email") if has_clients_table else False
-            app_country_code = _load_app_country_code(con)
+            app_country_code = self._country_code or _load_app_country_code(con)
 
             def _client_key(row: Dict[str, Any]) -> str:
                 cc = str(row.get("country_code") or "").strip().lower()
@@ -1919,6 +2009,8 @@ class LocalSearchIndex:
                 for qv in variants:
                     rows = _search_clients_fts(con, qv, max(collect_limit, 60))
                     for r in rows or []:
+                        if app_country_code and _country_code_norm(r.get("country_code")) != app_country_code:
+                            continue
                         key = _client_key(r)
                         if key in seen:
                             continue
@@ -1930,6 +2022,8 @@ class LocalSearchIndex:
             for qv in variants:
                 rows = _search_clients_like(con, qv, max(collect_limit, 60))
                 for r in rows or []:
+                    if app_country_code and _country_code_norm(r.get("country_code")) != app_country_code:
+                        continue
                     key = _client_key(r)
                     if key in seen:
                         continue
@@ -1940,10 +2034,12 @@ class LocalSearchIndex:
 
             if not out and not short:
                 # FUZZY fallback
-                cache = self._ensure_fuzzy_cache()
+                fuzzy_clients = self._ensure_clients_fuzzy_cache()
 
                 choices: Dict[str, str] = {}
-                for i, rec in enumerate(cache.clients):
+                for i, rec in enumerate(fuzzy_clients):
+                    if app_country_code and _country_code_norm((rec or {}).get("country_code")) != app_country_code:
+                        continue
                     cli = str((rec or {}).get("cliente") or "")
                     doc = str((rec or {}).get("cedula") or "")
                     tel = str((rec or {}).get("telefono") or "")
@@ -1968,7 +2064,7 @@ class LocalSearchIndex:
                     if score < 72:
                         continue
                     i = int(key)
-                    rec = dict(cache.clients[i] or {})
+                    rec = dict(fuzzy_clients[i] or {})
                     rec["score"] = score
                     rec["_rel"] = float(score)
                     out.append(rec)

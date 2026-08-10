@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Optional, Any
 
+from ...currency import pick_currency_from_text
 from ...logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -44,6 +45,10 @@ def find_currency_in_text(text: str, currencies: list[str]) -> str:
     t = (text or "").strip()
     if not t:
         return ""
+
+    detected = pick_currency_from_text(t, allowed=currencies)
+    if detected:
+        return detected
 
     t_low = t.lower()
     curset = {str(c or "").strip().upper() for c in (currencies or []) if str(c or "").strip()}

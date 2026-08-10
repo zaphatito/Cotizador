@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 
 from .paths import set_win_app_id, load_app_icon, ensure_data_seed_if_empty, DATA_DIR
 from .logging_setup import get_logger
-from .config import COUNTRY_CODE, APP_CONFIG, ENABLE_AI
+from .config import COUNTRY_CODE, APP_CONFIG, APP_USERNAME, ENABLE_AI, STORE_ID
 
 from .db_path import resolve_db_path
 from .catalog_sync import (
@@ -29,11 +29,13 @@ from .catalog_manager import CatalogManager
 from .quote_events import QuoteEvents
 
 from sqlModels.db import connect, ensure_schema, tx
+from sqlModels import offline_catalogs_repo
 from .widgets_parts.quote_history_dialog import QuoteHistoryWindow
 
 from .ai.search_index import LocalSearchIndex
 from .ai.assistant.ollama_bootstrap import ensure_ollama_on_startup
 from .api.presupuesto_client import verify_cotizador_signature_once
+from .server_identity import has_complete_server_identity
 from .ui_theme import apply_modern_theme
 log = get_logger(__name__)
 
@@ -275,6 +277,53 @@ def _verify_access_before_startup(*, app_icon=None) -> bool:
     return True
 
 
+def _load_startup_catalog(
+    con,
+    db_path: str,
+    *,
+    server_catalog_mode: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carga el catálogo Excel únicamente cuando no hay identidad remota completa."""
+    if server_catalog_mode:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_productos = pd.DataFrame()
+    df_presentaciones = pd.DataFrame()
+    try:
+        with tx(con):
+            active_catalog = offline_catalogs_repo.get_active_catalog(con)
+            if active_catalog is not None:
+                offline_catalogs_repo.materialize_catalog(
+                    con,
+                    int(active_catalog["id"]),
+                )
+            else:
+                sync_catalog_from_excel_to_db(con, DATA_DIR)
+                candidate_products, _candidate_presentations = load_catalog_from_db(con)
+                candidate_ok, _candidate_reason = validate_products_catalog_df(
+                    candidate_products
+                )
+                if candidate_ok:
+                    offline_catalogs_repo.bootstrap_current_catalog(con)
+    except Exception as exc:
+        log.exception("Falló la preparación del catálogo offline: %s", exc)
+
+    try:
+        df_productos, df_presentaciones = load_catalog_from_db(con)
+    except Exception as exc:
+        log.exception("Falló load_catalog_from_db (se abre sin catálogo): %s", exc)
+
+    try:
+        idx = LocalSearchIndex(db_path)
+        if ENABLE_AI:
+            idx.ensure_and_rebuild()
+        else:
+            idx.drop_schema()
+    except Exception as exc:
+        log.exception("AI index: no se pudo sincronizar: %s", exc)
+    return df_productos, df_presentaciones
+
+
 def run_app():
     set_win_app_id()
     _single_instance_or_raise_existing()
@@ -286,8 +335,15 @@ def run_app():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    if not _verify_access_before_startup(app_icon=app_icon):
-        return
+    server_catalog_mode = has_complete_server_identity(APP_USERNAME, STORE_ID)
+    if server_catalog_mode:
+        if not _verify_access_before_startup(app_icon=app_icon):
+            return
+    else:
+        log.info(
+            "Modo offline: se omite la verificacion remota porque no hay "
+            "username/id_cotizador completos."
+        )
 
     # ===== CUADRO DE UPDATE =====
     dlg = UpdateProgressDialog(app_icon=app_icon)
@@ -351,7 +407,8 @@ def run_app():
         log.exception("No se pudo mostrar el changelog")
 
     # ===== normal arranque =====
-    ensure_data_seed_if_empty()
+    if not server_catalog_mode:
+        ensure_data_seed_if_empty()
 
     df_productos = pd.DataFrame()
     df_presentaciones = pd.DataFrame()
@@ -361,26 +418,11 @@ def run_app():
         con = connect(db_path)
         ensure_schema(con)
 
-        try:
-            with tx(con):
-                sync_catalog_from_excel_to_db(con, DATA_DIR)
-        except Exception as e:
-            log.exception("Falló sync_catalog_from_excel_to_db (se abre sin catálogo): %s", e)
-
-        try:
-            df_productos, df_presentaciones = load_catalog_from_db(con)
-        except Exception as e:
-            log.exception("Falló load_catalog_from_db (se abre sin catálogo): %s", e)
-
-        try:
-            idx = LocalSearchIndex(db_path)
-            if ENABLE_AI:
-                # Rebuild rapido (2000 productos es nada). Esto habilita autocompletado smart.
-                idx.ensure_and_rebuild()
-            else:
-                idx.drop_schema()
-        except Exception as e:
-            log.exception("AI index: no se pudo sincronizar: %s", e)
+        df_productos, df_presentaciones = _load_startup_catalog(
+            con,
+            db_path,
+            server_catalog_mode=server_catalog_mode,
+        )
 
         con.close()
 
@@ -390,7 +432,7 @@ def run_app():
             df_presentaciones = pd.DataFrame()
 
         ok_catalog, reason_catalog = validate_products_catalog_df(df_productos)
-        if not ok_catalog:
+        if (not server_catalog_mode) and (not ok_catalog):
             log.warning("Catalogo de productos invalido al iniciar: %s", reason_catalog)
             QMessageBox.warning(
                 None,
@@ -404,7 +446,13 @@ def run_app():
         QMessageBox.critical(None, "Error", f"❌ Error inicializando la base de datos:\n{e}")
         sys.exit(1)
 
-    catalog = CatalogManager(df_productos, df_presentaciones)
+    catalog = CatalogManager(
+        df_productos,
+        df_presentaciones,
+        db_path=db_path,
+        username=APP_USERNAME if server_catalog_mode else "",
+        id_cotizador=STORE_ID if server_catalog_mode else "",
+    )
     events = QuoteEvents()
     win = QuoteHistoryWindow(catalog_manager=catalog, quote_events=events, app_icon=app_icon)
     win.show()

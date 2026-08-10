@@ -86,7 +86,7 @@ Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; Group
 
 [Run]
 ; Solo ejecutar al finalizar si es instalación NUEVA (no reinstalación silenciosa)
-Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstall
+Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstallAndConfigured
 
 [Code]
 #ifdef UNICODE
@@ -266,6 +266,8 @@ var
   PrevDir: string;
   PrevVersion: string;
   IsReinstall: Boolean;
+  InitialSetupSucceeded: Boolean;
+  OldInitialSetupRequired: Boolean;
 
   PaisPage: TWizardPage;
   cbPais: TNewComboBox;
@@ -463,11 +465,12 @@ begin
   if CT = '' then JsonExtractStr(J, 'company_type', CT);
   if SID = '' then JsonExtractStr(J, 'store_id', SID);
   if UN = '' then JsonExtractStr(J, 'username', UN);
+  if not HasT then HasT := JsonExtractBool(J, 'telemarketing', T);
   if not HasT then HasT := JsonExtractBool(J, 'tienda', T);
   if not JsonExtractBool(J, 'allow_no_stock', A) then A := False;
 
   C := UpperCase(Trim(C));
-  if (C <> 'PERU') and (C <> 'VENEZUELA') then
+  if (C <> 'PERU') and (C <> 'VENEZUELA') and (C <> 'BOLIVIA') then
     C := 'PARAGUAY';
 
   L := UpperCase(Trim(L));
@@ -490,7 +493,7 @@ begin
     '  "company_type": "' + JsonEscape(CT) + '",' + #13#10 +
     '  "store_id": "' + JsonEscape(SID) + '",' + #13#10 +
     '  "username": "' + JsonEscape(UN) + '",' + #13#10 +
-    '  "tienda": ' + TiendaStr + ',' + #13#10 +
+    '  "telemarketing": ' + TiendaStr + ',' + #13#10 +
     '  "allow_no_stock": ' + AllowStr + #13#10 +
     '}',
     False
@@ -511,11 +514,16 @@ begin
   OldAllow := False;
   PrevDir := '';
   PrevVersion := '';
+  OldInitialSetupRequired := False;
 
   IsReinstall := TryGetPrevAppDir();
+  InitialSetupSucceeded := IsReinstall;
 
   if IsReinstall then
   begin
+    OldInitialSetupRequired :=
+      FileExists(PrevDir + '\config\initial_configuration.required') or
+      FileExists(PrevDir + '\config\initial_configuration.pending.json');
     if not RegReadStrAnyView(HKLM, UNINST_KEY, 'DisplayVersion', PrevVersion) then
       RegReadStrAnyView(HKCU, UNINST_KEY, 'DisplayVersion', PrevVersion);
 
@@ -527,7 +535,9 @@ begin
       if JsonExtractStr(J, 'company_type', OldCompanyType) then ;
       if JsonExtractStr(J, 'store_id', OldStoreId) then ;
       if JsonExtractStr(J, 'username', OldUsername) then ;
-      OldTiendaKnown := JsonExtractBool(J, 'tienda', OldTienda);
+      OldTiendaKnown := JsonExtractBool(J, 'telemarketing', OldTienda);
+      if not OldTiendaKnown then
+        OldTiendaKnown := JsonExtractBool(J, 'tienda', OldTienda);
       if not JsonExtractBool(J, 'allow_no_stock', OldAllow) then OldAllow := False;
       OldCompanyType := NormalizeCompanyType(OldCompanyType);
       OldStoreId := Trim(OldStoreId);
@@ -566,6 +576,11 @@ begin
   Result := not IsReinstall;
 end;
 
+function IsFreshInstallAndConfigured(): Boolean;
+begin
+  Result := (not IsReinstall) and InitialSetupSucceeded;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if IsReinstall then
@@ -587,7 +602,7 @@ begin
   PaisPage := CreateCustomPage(
     wpSelectDir,
     'País por defecto',
-    'Elija el país con el que operará el sistema (afecta moneda y reglas de cantidad).'
+    'Elija el país predeterminado. Luego podrá asignar múltiples países, empresas y tiendas.'
   );
   cbPais := TNewComboBox.Create(PaisPage.Surface);
   cbPais.Parent := PaisPage.Surface;
@@ -598,6 +613,7 @@ begin
   cbPais.Items.Add('Paraguay');
   cbPais.Items.Add('Perú');
   cbPais.Items.Add('Venezuela');
+  cbPais.Items.Add('Bolivia');
   cbPais.ItemIndex := 0;
 
   ListadoPage := CreateCustomPage(
@@ -627,7 +643,7 @@ begin
   EmpresaPage := CreateCustomPage(
     ListadoPage.ID,
     'Tipo de empresa',
-    'Elija el tipo de empresa.'
+    'Elija la empresa predeterminada. Luego podrá agregar todas las empresas autorizadas.'
   );
   cbEmpresa := TNewComboBox.Create(EmpresaPage.Surface);
   cbEmpresa.Parent := EmpresaPage.Surface;
@@ -641,12 +657,12 @@ begin
 
   TiendaUsuarioPage := CreateCustomPage(
     EmpresaPage.ID,
-    'Tienda y usuario',
-    'Ingrese el Store ID y el nombre de usuario de este equipo.'
+    'Cotizador y usuario',
+    'Ingrese ambos datos para usar el servidor, o deje ambos vacíos para trabajar offline sin enviar datos.'
   );
   lblStoreId := TNewStaticText.Create(TiendaUsuarioPage.Surface);
   lblStoreId.Parent := TiendaUsuarioPage.Surface;
-  lblStoreId.Caption := 'Store ID:';
+  lblStoreId.Caption := 'ID del cotizador (opcional):';
   lblStoreId.Left := ScaleX(0);
   lblStoreId.Top := ScaleY(8);
   lblStoreId.AutoSize := True;
@@ -660,7 +676,7 @@ begin
 
   lblUsername := TNewStaticText.Create(TiendaUsuarioPage.Surface);
   lblUsername.Parent := TiendaUsuarioPage.Surface;
-  lblUsername.Caption := 'Nombre de usuario:';
+  lblUsername.Caption := 'Nombre de usuario (opcional):';
   lblUsername.Left := ScaleX(0);
   lblUsername.Top := txtStoreId.Top + txtStoreId.Height + ScaleY(12);
   lblUsername.AutoSize := True;
@@ -674,12 +690,52 @@ begin
 
   chkTienda := TNewCheckBox.Create(TiendaUsuarioPage.Surface);
   chkTienda.Parent := TiendaUsuarioPage.Surface;
-  chkTienda.Caption := 'Es tienda (sin definir / sí / no)';
+  chkTienda.Caption := 'Este equipo es telemarketing';
   chkTienda.Left := ScaleX(0);
   chkTienda.Top := txtUsername.Top + txtUsername.Height + ScaleY(12);
   chkTienda.Width := TiendaUsuarioPage.SurfaceWidth;
-  chkTienda.AllowGrayed := True;
-  chkTienda.State := cbGrayed;
+  chkTienda.AllowGrayed := False;
+  chkTienda.State := cbUnchecked;
+end;
+
+procedure RunInitialSetupWizard();
+var
+  ExePath, SeedPath, Params: string;
+  RC: Integer;
+begin
+  InitialSetupSucceeded := False;
+  if IsSilentMode() then
+  begin
+    Log('WARN: La configuracion inicial interactiva se omitio en modo silencioso.');
+    Exit;
+  end;
+
+  ExePath := ExpandConstant('{app}\{#MyAppExeName}');
+  SeedPath := ExpandConstant('{app}\config\config.json');
+  SaveStringToFile(
+    ExpandConstant('{app}\config\initial_configuration.required'),
+    '1',
+    False
+  );
+  Params := '--initial-setup --seed "' + SeedPath + '"';
+  if not Exec(ExePath, Params, ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, RC) then
+  begin
+    MsgBox(
+      'No se pudo abrir el asistente de configuracion inicial.',
+      mbError,
+      MB_OK
+    );
+    Exit;
+  end;
+
+  InitialSetupSucceeded := RC = 0;
+  if not InitialSetupSucceeded then
+    MsgBox(
+      'La aplicacion fue instalada, pero la configuracion inicial no quedo completada.' + #13#10#13#10 +
+      'Al abrir el sistema se solicitara completar nuevamente este paso.',
+      mbError,
+      MB_OK
+    );
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -718,6 +774,7 @@ begin
           case cbPais.ItemIndex of
             1: PaisSel := 'PERU';
             2: PaisSel := 'VENEZUELA';
+            3: PaisSel := 'BOLIVIA';
           else
             PaisSel := 'PARAGUAY';
           end;
@@ -756,7 +813,7 @@ begin
       end;
 
       PaisSel := UpperCase(Trim(PaisSel));
-      if (PaisSel <> 'PERU') and (PaisSel <> 'VENEZUELA') then
+      if (PaisSel <> 'PERU') and (PaisSel <> 'VENEZUELA') and (PaisSel <> 'BOLIVIA') then
         PaisSel := 'PARAGUAY';
 
       ListadoSelUpper := UpperCase(Trim(ListadoSelUpper));
@@ -778,7 +835,7 @@ begin
         '  "company_type": "' + JsonEscape(CompanySel) + '",' + #13#10 +
         '  "store_id": "' + JsonEscape(StoreIdSel) + '",' + #13#10 +
         '  "username": "' + JsonEscape(UsernameSel) + '",' + #13#10 +
-        '  "tienda": ' + TiendaStr + ',' + #13#10 +
+        '  "telemarketing": ' + TiendaStr + ',' + #13#10 +
         '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
         '  "update_mode": "SILENT",' + #13#10 +
         '  "update_check_on_startup": true,' + #13#10 +
@@ -789,7 +846,9 @@ begin
         '}';
 
       if not SaveStringToFile(FJson, ConfJson, False) then
-        Log('WARN: No se pudo crear config.json en ' + FJson);
+        Log('WARN: No se pudo crear config.json en ' + FJson)
+      else if (not IsReinstall) or OldInitialSetupRequired then
+        RunInitialSetupWizard();
     end;
 
   except

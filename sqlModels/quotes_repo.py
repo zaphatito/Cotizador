@@ -41,6 +41,13 @@ TIPO_PROD_SERV = "serv"
 TIPO_PROD_PRES = "pres"
 
 _DOC_RULES_BY_COUNTRY_CODE: dict[str, list[dict[str, Any]]] = {
+    "BO": [
+        {"id": 1, "nombre": "CI", "descripcion": "CEDULA DE IDENTIDAD", "regex_validation": r"^[0-9]{5,12}(?:-[0-9A-Z]{1,5})?$", "validation_pad": 0},
+        {"id": 2, "nombre": "CIE", "descripcion": "CEDULA DE IDENTIDAD DE EXTRANJERO", "regex_validation": r"^(?:E-)?[0-9]{5,12}(?:-[0-9A-Z]{1,5})?$", "validation_pad": 0},
+        {"id": 3, "nombre": "PAS", "descripcion": "PASAPORTE", "regex_validation": r"^[0-9A-Z][0-9A-Z./-]{0,19}$", "validation_pad": 0},
+        {"id": 4, "nombre": "OD", "descripcion": "OTRO DOCUMENTO DE IDENTIDAD", "regex_validation": r"^[ -~]{1,20}$", "validation_pad": 0},
+        {"id": 5, "nombre": "NIT", "descripcion": "NUMERO DE IDENTIFICACION TRIBUTARIA", "regex_validation": r"^[0-9]{5,13}$", "validation_pad": 0},
+    ],
     "VE": [
         {"id": 1, "nombre": "V", "descripcion": "CEDULA DE IDENTIDAD", "regex_validation": r"^[0-9]+$", "validation_pad": 0},
         {"id": 2, "nombre": "P", "descripcion": "PASAPORTE", "regex_validation": r"^[a-zA-Z0-9]+$", "validation_pad": 0},
@@ -62,6 +69,16 @@ _DOC_RULES_BY_COUNTRY_CODE: dict[str, list[dict[str, Any]]] = {
 }
 
 _DOC_TYPE_ALIASES: dict[str, dict[str, str]] = {
+    "BO": {
+        "CE": "CIE",
+        "CEX": "CIE",
+        "P": "PAS",
+        "PASAPORTE": "PAS",
+        "OTRO": "OD",
+        "ODI": "OD",
+        "RUC": "NIT",
+        "CEDULA": "CI",
+    },
     "VE": {
         "CI": "V",    # legacy
         "CE": "E",    # legacy
@@ -79,6 +96,7 @@ _DOC_TYPE_ALIASES: dict[str, dict[str, str]] = {
 }
 
 _DEFAULT_DOC_TYPE_BY_COUNTRY: dict[str, str] = {
+    "BO": "CI",
     "VE": "V",
     "PE": "DNI",
     "PY": "CI",
@@ -112,6 +130,8 @@ _DOC_TYPES_BY_COUNTRY_CODE, _DOC_BODY_BY_COUNTRY_AND_TYPE, _DOC_VALIDATION_PAD_B
 
 def _country_code_norm(country_code: Any) -> str:
     c = str(country_code or "").strip().upper()
+    if c in ("BO", "BOLIVIA"):
+        return "BO"
     if c in ("PE", "PERU"):
         return "PE"
     if c in ("VE", "VENEZUELA"):
@@ -205,15 +225,32 @@ def _normalize_phone_for_compare(value: Any) -> str:
     return re.sub(r"\s+", "", s).lower()
 
 
-def _normalize_doc_for_compare(value: Any) -> str:
+def normalize_document_identity_key(
+    country_code: Any,
+    tipo_documento: Any,
+    value: Any,
+) -> str:
+    """Construye la clave estable de identidad sin perder letras del documento."""
+    cc = _country_code_norm(country_code)
+    doc_type = _normalize_doc_type(cc, tipo_documento)
     s = str(value or "").strip().upper()
     if not s:
         return ""
-    m = re.match(r"^([A-Z]+)-(.+)$", s)
-    if m:
-        s = str(m.group(2) or "").strip().upper()
+
+    if cc == "BO":
+        # En CIE, E- identifica el formato del documento extranjero; el tipo ya
+        # conserva esa información. Para PAS/OD, en cambio, una letra inicial
+        # sí forma parte del número y nunca debe eliminarse.
+        if doc_type == "CIE" and s.startswith("E-"):
+            s = s[2:]
+    else:
+        # Compatibilidad con documentos legacy guardados como <TIPO>-<NUMERO>.
+        m = re.match(r"^([A-Z]+)-(.+)$", s)
+        if m:
+            s = str(m.group(2) or "").strip().upper()
+
     s = re.sub(r"\s+", "", s)
-    # Para comparar identidad, usamos cuerpo alfanumerico sin separadores.
+    # La presentación conserva separadores; la identidad usa valor alfanumérico.
     return re.sub(r"[^0-9A-Z]", "", s)
 
 
@@ -232,11 +269,13 @@ def find_doc_identity_conflict(
     Regla de negocio:
     - El mismo documento no puede quedar asociado a otro nombre o telefono.
     """
-    doc_key = _normalize_doc_for_compare(cedula)
-    if not doc_key:
-        return None
     cc = _country_code_norm(country_code or "")
     incoming_tipo = _normalize_doc_type(cc, tipo_documento or "")
+    if not incoming_tipo:
+        incoming_tipo = infer_tipo_documento_from_doc(cc, cedula)
+    doc_key = normalize_document_identity_key(cc, incoming_tipo, cedula)
+    if not doc_key:
+        return None
 
     # Esquema actual: clientes en tabla maestra y quotes con id_cliente.
     if _table_exists(con, "clients") and _has_column(con, "quotes", "id_cliente"):
@@ -369,11 +408,15 @@ def find_doc_identity_conflict(
     tel_key = _normalize_phone_for_compare(telefono)
     for r in rows:
         d = dict(r)
-        other_doc_key = _normalize_doc_for_compare(d.get("cedula", ""))
+        other_tipo = _normalize_doc_type(cc, d.get("tipo_documento", ""))
+        other_doc_key = normalize_document_identity_key(
+            cc,
+            other_tipo,
+            d.get("cedula", ""),
+        )
         if not other_doc_key or other_doc_key != doc_key:
             continue
 
-        other_tipo = _normalize_doc_type(cc, d.get("tipo_documento", ""))
         if incoming_tipo and other_tipo and incoming_tipo != other_tipo:
             continue
 
@@ -458,6 +501,11 @@ def infer_tipo_documento_from_doc(
     if not raw:
         return ""
     compact = re.sub(r"\s+", "", raw)
+
+    # En Bolivia, E- es parte del formato oficial de la CIE, no un alias de
+    # tipo documental que deba descartarse como los prefijos legacy.
+    if cod == "BO" and compact.startswith("E-") and _doc_body_matches(cod, "CIE", compact):
+        return "CIE"
 
     # Legacy con prefijo: <TIPO>-<NUMERO>
     m = re.match(r"^([A-Z]+)-(.+)$", compact)
@@ -645,6 +693,53 @@ def _table_exists(con: sqlite3.Connection, table: str) -> bool:
         return False
 
 
+def _setting_value(con: sqlite3.Connection, key: str) -> str:
+    if not _table_exists(con, "settings"):
+        return ""
+    try:
+        row = con.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (str(key),),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row["value"] or "").strip() if row else ""
+
+
+def _infer_id_cotizador(quote_no: Any) -> str:
+    match = re.match(r"^[^-]+-([^-]+)-[0-9]{7}$", str(quote_no or "").strip())
+    return str(match.group(1) if match else "").strip()
+
+
+def _resolve_quote_context(
+    con: sqlite3.Connection,
+    *,
+    country_code: Any,
+    quote_no: Any,
+    company_type: Any,
+    base_currency: Any,
+    cotizador_username: Any,
+    id_cotizador: Any,
+) -> tuple[str, str, str, str]:
+    country = _country_code_norm(country_code)
+    company = str(company_type or "").strip()
+    if not company:
+        company = _setting_value(con, "company_type") or _setting_value(con, "company")
+    base = str(base_currency or "").strip().upper()
+    if not base:
+        base = {
+            "BO": "BOB",
+            "PE": "PEN",
+            "PY": "PYG",
+            "VE": "USD",
+        }.get(country, "")
+    username = str(cotizador_username or "").strip() or _setting_value(con, "username")
+    cotizador = str(id_cotizador or "").strip()
+    if not cotizador:
+        cotizador = _infer_id_cotizador(quote_no) or _setting_value(con, "store_id")
+    return company, base, username, cotizador
+
+
 def _normalize_tipo_prod(value: Any) -> str:
     t = str(value or "").strip().lower()
     aliases = {
@@ -746,6 +841,13 @@ def insert_quote(
 
     quote_no: str,
 
+    quote_no_status: str = "confirmed",
+
+    company_type: str = "",
+    base_currency: str = "",
+    cotizador_username: str = "",
+    id_cotizador: str = "",
+
     created_at: str,
     cliente: str,
     cedula: str,
@@ -785,13 +887,33 @@ def insert_quote(
 
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
+    has_quote_no_status = _has_column(con, "quotes", "quote_no_status")
+    has_company_type = _has_column(con, "quotes", "company_type")
+    has_base_currency = _has_column(con, "quotes", "base_currency")
+    has_cotizador_username = _has_column(con, "quotes", "cotizador_username")
+    has_id_cotizador = _has_column(con, "quotes", "id_cotizador")
     has_id_cliente = _has_column(con, "quotes", "id_cliente")
     has_price_id = _has_column(con, "quote_items", "id_precioventa")
     has_tipo_prod = _has_column(con, "quote_items", "tipo_prod")
+    has_factor_total = _has_column(con, "quote_items", "factor_total")
     tipo_documento_norm = infer_tipo_documento_from_doc(
         country_code,
         cedula,
         explicit_tipo=tipo_documento,
+    )
+    (
+        company_type_resolved,
+        base_currency_resolved,
+        cotizador_username_resolved,
+        id_cotizador_resolved,
+    ) = _resolve_quote_context(
+        con,
+        country_code=country_code,
+        quote_no=quote_no,
+        company_type=company_type,
+        base_currency=base_currency,
+        cotizador_username=cotizador_username,
+        id_cotizador=id_cotizador,
     )
 
 
@@ -801,6 +923,23 @@ def insert_quote(
     vals: list[Any] = [
         country_code, quote_no, created_at,
     ]
+
+    for has_column, column, value in (
+        (has_company_type, "company_type", company_type_resolved),
+        (has_base_currency, "base_currency", base_currency_resolved),
+        (has_cotizador_username, "cotizador_username", cotizador_username_resolved),
+        (has_id_cotizador, "id_cotizador", id_cotizador_resolved),
+    ):
+        if has_column:
+            cols.append(column)
+            vals.append(value)
+
+    if has_quote_no_status:
+        normalized_quote_no_status = str(quote_no_status or "confirmed").strip().lower()
+        if normalized_quote_no_status not in ("confirmed", "provisional", "reserved"):
+            raise ValueError("Estado de correlativo no valido.")
+        cols.append("quote_no_status")
+        vals.append(normalized_quote_no_status)
 
     if has_id_cliente:
         cols.append("id_cliente")
@@ -847,6 +986,10 @@ def insert_quote(
     item_cols.extend([
         "fragancia", "observacion",
         "cantidad",
+    ])
+    if has_factor_total:
+        item_cols.append("factor_total")
+    item_cols.extend([
         "precio_base", "subtotal_base",
         "descuento_mode", "descuento_pct", "descuento_monto_base",
         "total_base",
@@ -889,6 +1032,7 @@ def insert_quote(
             "fragancia": str(b.get("fragancia") or ""),
             "observacion": str(b.get("observacion") or ""),
             "cantidad": float(b.get("cantidad") or 0.0),
+            "factor_total": float(b.get("factor_total") or 1.0),
             "precio_base": precio_base,
             "subtotal_base": float(b.get("subtotal_base") or 0.0),
             "descuento_mode": (b.get("descuento_mode") or None),
@@ -1045,6 +1189,11 @@ def list_quotes(
 
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
+    has_quote_no_status = _has_column(con, "quotes", "quote_no_status")
+    has_company_type = _has_column(con, "quotes", "company_type")
+    has_base_currency = _has_column(con, "quotes", "base_currency")
+    has_cotizador_username = _has_column(con, "quotes", "cotizador_username")
+    has_id_cotizador = _has_column(con, "quotes", "id_cotizador")
     has_client_ref = _has_column(con, "quotes", "id_cliente") and _table_exists(con, "clients")
     has_status_catalog = _table_exists(con, "quote_statuses")
 
@@ -1317,6 +1466,15 @@ def list_quotes(
     pago_expr = "q.metodo_pago" if has_mp else "'' AS metodo_pago"
 
     estado_expr = "q.estado" if has_estado else "'' AS estado"
+    quote_no_status_expr = (
+        "q.quote_no_status"
+        if has_quote_no_status
+        else "'confirmed' AS quote_no_status"
+    )
+    company_type_expr = "q.company_type" if has_company_type else "''"
+    base_currency_expr = "q.base_currency" if has_base_currency else "''"
+    cotizador_username_expr = "q.cotizador_username" if has_cotizador_username else "''"
+    id_cotizador_expr = "q.id_cotizador" if has_id_cotizador else "''"
 
 
 
@@ -1329,6 +1487,12 @@ def list_quotes(
             q.id,
             q.created_at,
             q.quote_no,
+            {quote_no_status_expr},
+            q.country_code,
+            {company_type_expr} AS company_type,
+            {base_currency_expr} AS base_currency,
+            {cotizador_username_expr} AS cotizador_username,
+            {id_cotizador_expr} AS id_cotizador,
             {cliente_expr} AS cliente,
             {cedula_expr} AS cedula,
             {telefono_expr} AS telefono,
@@ -1414,6 +1578,19 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
         out["direccion"] = "-"
     if not str(out.get("email") or "").strip():
         out["email"] = "-"
+    company, base, username, cotizador = _resolve_quote_context(
+        con,
+        country_code=out.get("country_code"),
+        quote_no=out.get("quote_no"),
+        company_type=out.get("company_type"),
+        base_currency=out.get("base_currency"),
+        cotizador_username=out.get("cotizador_username"),
+        id_cotizador=out.get("id_cotizador"),
+    )
+    out["company_type"] = company
+    out["base_currency"] = base
+    out["cotizador_username"] = username
+    out["id_cotizador"] = cotizador
     return out
 
 
@@ -1421,6 +1598,7 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
 def get_quote_items(con: sqlite3.Connection, quote_id: int) -> tuple[list[dict], list[dict]]:
     has_price_id = _has_column(con, "quote_items", "id_precioventa")
     has_tipo_prod = _has_column(con, "quote_items", "tipo_prod")
+    has_factor_total = _has_column(con, "quote_items", "factor_total")
     rows = con.execute(
         "SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id ASC",
         (int(quote_id),),
@@ -1464,6 +1642,7 @@ def get_quote_items(con: sqlite3.Connection, quote_id: int) -> tuple[list[dict],
             "fragancia": d.get("fragancia", ""),
             "observacion": d.get("observacion", ""),
             "cantidad": d.get("cantidad", 0.0),
+            "factor_total": d.get("factor_total", 1.0) if has_factor_total else 1.0,
 
             "precio": precio_base,
             "subtotal_base": d.get("subtotal_base", 0.0),

@@ -38,6 +38,7 @@ from ..db_path import resolve_db_path
 from ..ai.search_index import LocalSearchIndex
 from ..api.presupuesto_client import fetch_country_clients_page
 from .excel_table_behavior import ExcelTableController
+from .bounded_table_columns import install_bounded_columns
 
 
 def center_on_screen(w) -> None:
@@ -329,6 +330,7 @@ class _ClientsLoadTask(QRunnable):
         limit: int,
         offset: int,
         db_path: str,
+        quote_context: Any = None,
     ):
         super().__init__()
         self.session_id = int(session_id)
@@ -338,6 +340,7 @@ class _ClientsLoadTask(QRunnable):
         self.limit = max(1, int(limit))
         self.offset = max(0, int(offset))
         self.db_path = str(db_path or "")
+        self.quote_context = quote_context
         self.signals = _ClientsLoadSignals()
 
     def run(self):
@@ -350,6 +353,8 @@ class _ClientsLoadTask(QRunnable):
                     search_text=self.search_text,
                     limit=self.limit,
                     offset=self.offset,
+                    country_code=self.country_code,
+                    context=self.quote_context,
                 )
                 rows = list(page.get("rows") or [])
                 has_more = bool(page.get("has_more"))
@@ -388,7 +393,15 @@ class ClientsEditorDialog(QDialog):
     SOURCE_LOCAL = "local"
     SOURCE_COUNTRY = "country"
 
-    def __init__(self, parent=None, *, app_icon: QIcon | None = None, country_code: str = COUNTRY_CODE):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        app_icon: QIcon | None = None,
+        country_code: str = COUNTRY_CODE,
+        quote_context: Any = None,
+        server_mode: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Editor de clientes")
         self.resize(980, 620)
@@ -396,6 +409,8 @@ class ClientsEditorDialog(QDialog):
             self.setWindowIcon(app_icon)
 
         self._country_code = str(country_code or "").strip().upper()
+        self._quote_context = quote_context
+        self._server_mode = bool(server_mode or quote_context is not None)
         self._current_client_id: int | None = None
         self._doc_types = self._doc_types_for_country()
         self._country_load_error = ""
@@ -462,6 +477,7 @@ class ClientsEditorDialog(QDialog):
         hh.setSectionResizeMode(5, QHeaderView.Stretch)
         hh.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        install_bounded_columns(self.table, fill_column=0)
         self._excel_table = ExcelTableController(
             self.table,
             allow_copy=True,
@@ -508,7 +524,10 @@ class ClientsEditorDialog(QDialog):
         try:
             idx = LocalSearchIndex(resolve_db_path())
             if is_ai_enabled(refresh=True):
-                idx.ensure_and_rebuild()
+                if self._server_mode:
+                    idx.ensure_and_rebuild_clients()
+                else:
+                    idx.ensure_and_rebuild()
             else:
                 idx.drop_schema()
         except Exception:
@@ -591,6 +610,7 @@ class ClientsEditorDialog(QDialog):
             limit=limit,
             offset=offset,
             db_path=self._db_path,
+            quote_context=self._quote_context,
         )
         task.signals.done.connect(self._on_load_done)
         self._pool.start(task)

@@ -1,6 +1,7 @@
 # src/widgets_parts/currency_dialog.py
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..currency import normalize_currency_code
+
 
 def show_currency_dialog(
     parent: QWidget,
@@ -27,6 +30,9 @@ def show_currency_dialog(
     secondary_currency: str,
     exchange_rate: Optional[float],
     saved_rates: Optional[dict[str, float]] = None,
+    *,
+    current_currency: str | None = None,
+    secondary_currencies: Iterable[str] | None = None,
 ) -> Optional[dict]:
     """
     Diálogo de moneda y tasas de cambio.
@@ -57,13 +63,23 @@ def show_currency_dialog(
     # imports locales para evitar ciclos
     from ..config import APP_CURRENCY, get_secondary_currencies, get_currency_context
 
-    base = (base_currency or APP_CURRENCY).upper()
+    base = normalize_currency_code(base_currency or APP_CURRENCY)
 
-    sec_list = [c.upper() for c in (get_secondary_currencies() or []) if c]
+    secondary_values = (
+        get_secondary_currencies()
+        if secondary_currencies is None
+        else secondary_currencies
+    )
+    sec_list = [
+        normalize_currency_code(str(code or ""))
+        for code in (secondary_values or [])
+        if str(code or "").strip()
+    ]
     if secondary_currency:
-        sec = secondary_currency.upper()
+        sec = normalize_currency_code(secondary_currency)
         if sec not in sec_list:
             sec_list.append(sec)
+    sec_list = [code for code in dict.fromkeys(sec_list) if code and code != base]
 
     all_codes = [base] + [c for c in sec_list if c != base]
     all_codes = list(dict.fromkeys(all_codes))
@@ -77,18 +93,25 @@ def show_currency_dialog(
                 val = 0.0
             rates[code] = val if val > 0 else 0.0
 
+    if current_currency is None:
+        legacy_cur, _sec_principal, legacy_rate = get_currency_context()
+        cur = normalize_currency_code(legacy_cur or "")
+        current_rate = legacy_rate
+    else:
+        cur = normalize_currency_code(current_currency or "") or base
+        current_rate = exchange_rate
+
+    if cur not in all_codes:
+        cur = base
+
     if not rates and exchange_rate and sec_list:
         try:
             val = float(exchange_rate)
         except Exception:
             val = 0.0
         if val > 0:
-            rates[sec_list[0]] = val
-
-    cur, _sec_principal, rate_global = get_currency_context()
-    cur = (cur or "").upper()
-    if cur not in all_codes:
-        cur = base
+            rate_code = cur if cur in sec_list else sec_list[0]
+            rates[rate_code] = val
 
     v.addWidget(QLabel("Seleccione la moneda en la que desea trabajar:"))
 
@@ -138,8 +161,8 @@ def show_currency_dialog(
 
         initial = rates.get(code, 0.0)
         if initial <= 0.0:
-            if code == cur and cur != base and rate_global and rate_global > 0:
-                initial = float(rate_global)
+            if code == cur and cur != base and current_rate and current_rate > 0:
+                initial = float(current_rate)
             else:
                 initial = 1.0
         sp.setValue(initial)

@@ -14,8 +14,14 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from ...db_path import resolve_db_path
 from ...app_window import SistemaCotizaciones
 from ...logging_setup import get_logger
-from ...config import APP_COUNTRY
+from ...config import (
+    APP_COUNTRY,
+    currency_for_country,
+    secondary_currencies_for_country,
+)
+from ...country_rules import normalize_country_name
 from ...quote_code import quote_match_key
+from ...catalog_context import CatalogScope
 
 from sqlModels.quotes_repo import ALL_STATUSES
 
@@ -45,10 +51,51 @@ from .actions import (
     normalize_qty_for_code, normalize_price,
     lookup_base_price_for_code, product_prices_text, report_text,
 )
+from .resolvers import effective_catalog_scope
 
 log = get_logger(__name__)
 
 _REPEAT_RE = re.compile(r"^\s*(hazlo\s+de\s+nuevo|otra\s+vez|repite|rep[ií]telo|lo\s+mismo|de\s+nuevo)\s*$", re.I)
+
+
+def matching_quote_rows(
+    rows,
+    quote_reference: object = "",
+    *,
+    quote_id: object = None,
+) -> list[dict]:
+    normalized_rows = [dict(row or {}) for row in (rows or [])]
+    if quote_id not in (None, ""):
+        try:
+            wanted_id = int(quote_id)
+        except (TypeError, ValueError):
+            return []
+        matches = []
+        for row in normalized_rows:
+            try:
+                row_id = int(row.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if row_id == wanted_id:
+                matches.append(row)
+        return matches
+
+    raw = str(quote_reference or "").strip().lstrip("#").upper()
+    if not raw:
+        return []
+    if not raw.isdigit():
+        return [
+            row
+            for row in normalized_rows
+            if str(row.get("quote_no") or "").strip().upper() == raw
+        ]
+
+    key = quote_match_key(raw)
+    return [
+        row
+        for row in normalized_rows
+        if quote_match_key(row.get("quote_no")) == key
+    ]
 
 
 class AssistantController(ClarifyFlowMixin):
@@ -116,6 +163,7 @@ class AssistantController(ClarifyFlowMixin):
         self._audit_cache_examples: list[dict] = []
         self._audit_cache_prompt: str = ""
         self._pending_open_quote_no: str = ""
+        self._pending_open_quote: dict | None = None
         self._pool = QThreadPool.globalInstance()
         self._sc_toggle: Optional[QShortcut] = None
         self._sc_esc: Optional[QShortcut] = None
@@ -322,8 +370,13 @@ class AssistantController(ClarifyFlowMixin):
             pass
 
     def _context_for_planner(self) -> dict:
+        scope = effective_catalog_scope(self.w)
         base = str(getattr(self.w, "base_currency", "") or "").upper()
         secs = [str(x or "").upper() for x in (getattr(self.w, "secondary_currencies", []) or [])]
+        if scope is not None and not base:
+            base = currency_for_country(scope.country_code)
+        if scope is not None and not secs:
+            secs = secondary_currencies_for_country(scope.country_code)
         currencies = [c for c in ([base] + secs) if c]
         if not currencies:
             currencies = ["PEN", "USD"]
@@ -346,11 +399,19 @@ class AssistantController(ClarifyFlowMixin):
         except Exception:
             examples = []
 
+        country = normalize_country_name(
+            getattr(scope, "country_code", "")
+            or getattr(self.w, "country_name", "")
+            or getattr(self.w, "country_code", "")
+            or APP_COUNTRY,
+            default=APP_COUNTRY,
+        )
+
         return {
             "statuses": statuses,
             "currencies": currencies,
             "session": session,
-            "country": APP_COUNTRY,
+            "country": country,
             "recent_plan_examples": examples,
             "recent_examples": self._load_recent_examples_prompt(limit=5),
         }
@@ -409,7 +470,7 @@ class AssistantController(ClarifyFlowMixin):
 
     def _parse_open_command(self, text: str) -> tuple[str, str]:
         """
-        Retorna (quote_no_digits, target)
+        Retorna (referencia completa o dígitos, target)
         target: "ask" | "pdf" | "quote" | ""
         """
         s = (text or "").strip()
@@ -435,24 +496,93 @@ class AssistantController(ClarifyFlowMixin):
         )
         if not mnum:
             return "", ""
-        qn = self._norm_quote_no(mnum.group(1))
+        qn = str(mnum.group(1) or "").strip().lstrip("#").upper()
         return qn, target
 
-    def _ask_open_target(self, quote_no_digits: str, *, pdf_path: str = ""):
+    def _resolve_quote_reference(
+        self,
+        quote_reference: object = "",
+        *,
+        quote_id: object = None,
+        refresh: bool = True,
+    ) -> dict | None:
+        if isinstance(quote_reference, dict):
+            row = dict(quote_reference)
+            quote_id = row.get("id")
+            quote_reference = row.get("quote_no")
+            refresh = False
+
+        if refresh:
+            self._ensure_list_loaded(limit=400)
+        rows = getattr(self.w, "_assistant_last_list", None) or []
+        matches = matching_quote_rows(
+            rows,
+            quote_reference,
+            quote_id=quote_id,
+        )
+        if len(matches) == 1:
+            return matches[0]
+
+        raw = str(quote_reference or "").strip()
+        if not matches:
+            if self.dock:
+                self.dock.add_message(
+                    "assistant",
+                    f"No encontre la cotizacion {raw or quote_id} en este contexto.",
+                )
+            return None
+
+        if self.dock:
+            options = []
+            for row in matches[:8]:
+                code = str(row.get("quote_no") or "").strip()
+                company = str(row.get("company_type") or "").strip()
+                options.append(f"- {code}" + (f" ({company})" if company else ""))
+            self.dock.add_message(
+                "assistant",
+                "Ese numero coincide con varias cotizaciones. Usa el codigo completo:\n"
+                + "\n".join(options),
+            )
+        return None
+
+    def _ask_open_target(
+        self,
+        quote_reference: object,
+        *,
+        pdf_path: str = "",
+        quote_id: object = None,
+    ):
         if not self.dock:
             return
 
-        qn = self._norm_quote_no(quote_no_digits)
-        qpretty = str(int(qn)).zfill(7) if qn.isdigit() else str(quote_no_digits)
+        row = self._resolve_quote_reference(
+            quote_reference,
+            quote_id=quote_id,
+            refresh=not isinstance(quote_reference, dict),
+        )
+        if row is None:
+            return
+        identity = dict(row)
+        qpretty = str(identity.get("quote_no") or "").strip()
+        pdf_path = str(pdf_path or identity.get("pdf_path") or "").strip()
 
-        self._pending_open_quote_no = qn
+        self._pending_open_quote = identity
+        self._pending_open_quote_no = qpretty
 
         buttons = [
-            ChatButton("🧾 Cotización", lambda _=False, q=qn: self._open_quote_target(q, "quote")),
+            ChatButton(
+                "🧾 Cotización",
+                lambda _=False, q=identity: self._open_quote_target(q, "quote"),
+            ),
         ]
 
         if pdf_path:
-            buttons.append(ChatButton("📄 PDF", lambda _=False, q=qn: self._open_quote_target(q, "pdf")))
+            buttons.append(
+                ChatButton(
+                    "📄 PDF",
+                    lambda _=False, q=identity: self._open_quote_target(q, "pdf"),
+                )
+            )
         else:
             buttons.append(ChatButton("📄 PDF", lambda _=False: self.dock.add_message("assistant", "Esa cotización no tiene ruta de PDF guardada.")))
 
@@ -460,18 +590,20 @@ class AssistantController(ClarifyFlowMixin):
 
         self.dock.add_message(
             "assistant",
-            f"¿Qué quieres abrir de la cotización #{qpretty}?",
+            f"¿Qué quieres abrir de la cotización {qpretty}?",
             buttons=buttons
         )
 
     def _clear_pending_open(self):
         self._pending_open_quote_no = ""
+        self._pending_open_quote = None
 
     def _try_resolve_pending_open(self, text: str) -> bool:
         """
         Si antes preguntamos "¿cotización o PDF?" y el usuario responde, resolvemos sin LLM.
         """
-        if not self._pending_open_quote_no:
+        pending = getattr(self, "_pending_open_quote", None)
+        if not pending:
             return False
 
         s = (text or "").strip().lower()
@@ -479,13 +611,13 @@ class AssistantController(ClarifyFlowMixin):
             return True
 
         if re.search(r"\bpdf\b", s, flags=re.I):
-            q = self._pending_open_quote_no
+            q = dict(pending)
             self._clear_pending_open()
             self._open_quote_target(q, "pdf")
             return True
 
         if re.search(r"\b(cotizaci[oó]n|cotizacion|panel)\b", s, flags=re.I):
-            q = self._pending_open_quote_no
+            q = dict(pending)
             self._clear_pending_open()
             self._open_quote_target(q, "quote")
             return True
@@ -495,34 +627,32 @@ class AssistantController(ClarifyFlowMixin):
             self.dock.add_message("assistant", "Responde 'cotización' o 'pdf'.")
         return True
 
-    def _open_quote_target(self, quote_no_digits: str, target: str, *_):
+    def _open_quote_target(self, quote_reference: object, target: str, *_):
         """
         target: "quote" | "pdf"
         """
         if not self.dock:
             return
 
-        qn = self._norm_quote_no(quote_no_digits)
-        if not qn:
-            self.dock.add_message("assistant", "Dime el número. Ej: abrir 0000187")
+        hit = self._resolve_quote_reference(
+            quote_reference,
+            refresh=not isinstance(quote_reference, dict),
+        )
+        if hit is None:
             return
-
-        # refresca lista para obtener pdf_path
-        self._ensure_list_loaded(limit=400)
-        lst = getattr(self.w, "_assistant_last_list", None) or []
-
-        hit = None
-        for r in lst:
-            if self._norm_quote_no((r or {}).get("quote_no")) == qn:
-                hit = r
-                break
-
-        pdf = str((hit or {}).get("pdf_path") or "").strip()
+        quote_code = str(hit.get("quote_no") or "").strip()
+        quote_id = hit.get("id")
+        pdf = str(hit.get("pdf_path") or "").strip()
 
         # 1) intenta abrir por UI (selecciona fila + click botón)
         try:
             from .open_ui import open_quote_or_pdf_via_ui
-            ok, msg = open_quote_or_pdf_via_ui(self.w, qn, "pdf" if target == "pdf" else "quote")
+            ok, msg = open_quote_or_pdf_via_ui(
+                self.w,
+                quote_code,
+                "pdf" if target == "pdf" else "quote",
+                quote_id=quote_id,
+            )
             if ok:
                 self.dock.add_message("assistant", msg)
                 return
@@ -540,11 +670,10 @@ class AssistantController(ClarifyFlowMixin):
                 pass
 
         # 3) si no se pudo
-        qpretty = str(int(qn)).zfill(7) if qn.isdigit() else qn
         if target == "pdf":
-            self.dock.add_message("assistant", f"No pude abrir el PDF de la cotización #{qpretty}. PDF: {pdf or '—'}")
+            self.dock.add_message("assistant", f"No pude abrir el PDF de la cotización {quote_code}. PDF: {pdf or '—'}")
         else:
-            self.dock.add_message("assistant", f"No pude abrir la cotización #{qpretty} desde el histórico.")
+            self.dock.add_message("assistant", f"No pude abrir la cotización {quote_code} desde el histórico.")
 
     def _apply_edits_to_resolved(self, resolved: dict, edit_text: str) -> bool:
         if not resolved:
@@ -700,7 +829,7 @@ class AssistantController(ClarifyFlowMixin):
         self.st.active_plan_req = 0
 
         ctx = self._context_for_planner()
-        plan = fallback_parse_plan(text, ctx, country=APP_COUNTRY)
+        plan = fallback_parse_plan(text, ctx, country=ctx.get("country") or APP_COUNTRY)
         self._handle_plan_from_planner(text, plan)
 
     def _start_planning_async(self, text: str, ctx: dict):
@@ -726,7 +855,7 @@ class AssistantController(ClarifyFlowMixin):
             text=text,
             ctx=ctx,
             today_iso=datetime.date.today().isoformat(),
-            country=APP_COUNTRY,
+            country=str(ctx.get("country") or APP_COUNTRY),
         )
         task.signals.finished.connect(self._on_planning_finished)
         self.st.plan_tasks[req_id] = task
@@ -779,12 +908,20 @@ class AssistantController(ClarifyFlowMixin):
         self._handle_plan_from_planner(text, plan)
 
     def _ensure_list_loaded(self, *, limit: int = 200):
+        self.w._assistant_last_list = []
         try:
-            list_quotes_filtered(self.w, {"limit": int(limit)})
+            list_quotes_filtered(
+                self.w,
+                {
+                    "limit": int(limit),
+                    "date_from": "1900-01-01",
+                    "date_to": "2999-12-31",
+                },
+            )
         except Exception:
             pass
 
-    def _find_last_quote_for_client(self, client_query: str) -> Optional[str]:
+    def _find_last_quote_for_client(self, client_query: str) -> Optional[dict]:
         cq = (client_query or "").strip().lower()
         if not cq:
             return None
@@ -792,46 +929,42 @@ class AssistantController(ClarifyFlowMixin):
         for r in lst:
             c = str(r.get("client") or r.get("cliente") or "").strip().lower()
             if c and cq in c:
-                qn = str(r.get("quote_no") or "").strip()
-                if qn:
-                    return qn
+                if str(r.get("quote_no") or "").strip():
+                    return dict(r)
         return None
 
     def _handle_open_quote(self, args: dict):
         which = str(args.get("which") or "last").strip()
-        quote_no = self._norm_quote_no(args.get("quote_no"))
+        quote_no = str(args.get("quote_no") or "").strip()
+        quote_id = args.get("quote_id")
         client_q = str(args.get("client_query") or "").strip()
 
         target = str(args.get("target") or "ask").strip().lower()
         if target not in ("ask", "pdf", "quote"):
             target = "ask"
 
-        def _open(qn: str):
-            # necesitamos pdf_path para decidir si el botón PDF tiene sentido
-            self._ensure_list_loaded(limit=400)
-            lst = getattr(self.w, "_assistant_last_list", None) or []
-
-            hit = None
-            for r in lst:
-                if self._norm_quote_no((r or {}).get("quote_no")) == self._norm_quote_no(qn):
-                    hit = r
-                    break
-            pdf_path = str((hit or {}).get("pdf_path") or "").strip()
-
+        def _open(reference: object, *, selected_id: object = None):
+            hit = self._resolve_quote_reference(
+                reference,
+                quote_id=selected_id,
+                refresh=not isinstance(reference, dict),
+            )
+            if hit is None:
+                return
             if target == "ask":
-                self._ask_open_target(qn, pdf_path=pdf_path)
+                self._ask_open_target(hit)
             else:
-                self._open_quote_target(qn, target)
+                self._open_quote_target(hit, target)
 
-        if which == "by_number" and quote_no:
-            _open(quote_no)
+        if which == "by_number" and (quote_no or quote_id not in (None, "")):
+            _open(quote_no, selected_id=quote_id)
             return
 
         if client_q:
             self._ensure_list_loaded(limit=400)
-            qn = self._find_last_quote_for_client(client_q)
-            if qn:
-                _open(qn)
+            row = self._find_last_quote_for_client(client_q)
+            if row:
+                _open(row)
                 return
             self.dock.add_message("assistant", f"No encontré una cotización reciente para '{client_q}'. Prueba con el número (ej: abrir 0000187).")
             return
@@ -839,9 +972,9 @@ class AssistantController(ClarifyFlowMixin):
         self._ensure_list_loaded(limit=200)
         lst = getattr(self.w, "_assistant_last_list", None) or []
         if lst:
-            qn = str((lst[0] or {}).get("quote_no") or "").strip()
-            if qn:
-                _open(qn)
+            row = dict(lst[0] or {})
+            if str(row.get("quote_no") or "").strip():
+                _open(row)
                 return
 
         self.dock.add_message("assistant", "No pude abrir ninguna. Prueba: 'Muéstrame las cotizaciones' y luego 'abrir 0000187'.")
@@ -1071,20 +1204,12 @@ class AssistantController(ClarifyFlowMixin):
         # 2) comando abrir (ambigüo pregunta; explícito abre directo)
         qn, target = self._parse_open_command(text)
         if qn:
-            # arma hit para saber si hay pdf
-            self._ensure_list_loaded(limit=400)
-            lst = getattr(self.w, "_assistant_last_list", None) or []
-            hit = None
-            for r in lst:
-                if self._norm_quote_no((r or {}).get("quote_no")) == self._norm_quote_no(qn):
-                    hit = r
-                    break
-            pdf = str((hit or {}).get("pdf_path") or "").strip()
-
-            if target == "ask":
-                self._ask_open_target(qn, pdf_path=pdf)
-            elif target in ("pdf", "quote"):
-                self._open_quote_target(qn, target)
+            hit = self._resolve_quote_reference(qn)
+            if hit is not None:
+                if target == "ask":
+                    self._ask_open_target(hit)
+                elif target in ("pdf", "quote"):
+                    self._open_quote_target(hit, target)
             return
 
         # 3) atajo: reportes sin depender del LLM
@@ -1106,20 +1231,69 @@ class AssistantController(ClarifyFlowMixin):
         self.st.clarify_queue = []
         self.st.clarify_resolved = None
 
-    def _ensure_quote_window_target(self):
+    @staticmethod
+    def _scope_from_resolved(resolved: dict | None):
+        raw = (resolved or {}).get("catalog_scope")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return CatalogScope.from_mapping(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _ensure_quote_window_target(self, resolved: dict | None = None):
+        pending_scope = self._scope_from_resolved(resolved)
         if hasattr(self.w, "limpiar_formulario"):
+            current_scope = effective_catalog_scope(self.w)
+            if pending_scope is not None and current_scope != pending_scope:
+                raise RuntimeError(
+                    "El contexto de la cotizacion pendiente no coincide con esta ventana."
+                )
             return self.w
 
         cm = self.catalog_manager or getattr(self.w, "catalog_manager", None)
         if cm is None:
             raise RuntimeError("No hay catalog_manager disponible para crear una cotización nueva.")
 
+        quote_context = None
+        local_catalog_id = None
+        df_productos = cm.df_productos
+        df_presentaciones = cm.df_presentaciones
+        if bool(getattr(cm, "server_mode", False)):
+            from ...quote_context_service import build_quote_context
+
+            scope = pending_scope or effective_catalog_scope(self.w)
+            if scope is None:
+                from ...widgets_parts.catalog_scope_dialog import select_catalog_scope
+
+                scope = select_catalog_scope(self.w, cm)
+            if scope is None:
+                raise RuntimeError("No se seleccionó un país y empresa para la cotización.")
+            available = tuple(getattr(cm, "available_scopes", ()) or ())
+            if available and scope not in available:
+                raise RuntimeError(
+                    "El pais y empresa de la cotizacion pendiente ya no estan autorizados."
+                )
+            self.w._assistant_catalog_scope = scope
+            df_productos, df_presentaciones = cm.catalog_for_scope(scope)
+            quote_context = build_quote_context(cm, scope)
+        else:
+            active_local_id = getattr(cm, "active_local_catalog_id", None)
+            local_catalogs = tuple(getattr(cm, "available_local_catalogs", ()) or ())
+            if active_local_id is not None and local_catalogs:
+                local_catalog_id = int(active_local_id)
+                df_productos, df_presentaciones = cm.catalog_for_local(
+                    local_catalog_id
+                )
+
         win = SistemaCotizaciones(
-            df_productos=cm.df_productos,
-            df_presentaciones=cm.df_presentaciones,
+            df_productos=df_productos,
+            df_presentaciones=df_presentaciones,
             app_icon=self.w.windowIcon(),
             catalog_manager=cm,
             quote_events=self.quote_events,
+            quote_context=quote_context,
+            local_catalog_id=local_catalog_id,
         )
         try:
             win._history_window = self.w
@@ -1141,7 +1315,7 @@ class AssistantController(ClarifyFlowMixin):
         self.st.pending_resolved = None
 
         try:
-            target = self._ensure_quote_window_target()
+            target = self._ensure_quote_window_target(resolved)
             msg = execute_create_quote(target, resolved)
             self._audit("executed", plan=plan, resolved=resolved, user_text=user_text)
 
@@ -1156,8 +1330,8 @@ class AssistantController(ClarifyFlowMixin):
         if not self.dock:
             return
 
-        qn_in = self._norm_quote_no(quote_no)
-        if not qn_in:
+        quote_reference = str(quote_no or "").strip()
+        if not quote_reference:
             self.dock.add_message("assistant", "Dime el número. Ej: abrir 0000171")
             return
 
@@ -1167,14 +1341,11 @@ class AssistantController(ClarifyFlowMixin):
             self._ensure_list_loaded(limit=250)
             lst = getattr(self.w, "_assistant_last_list", None) or []
 
-        hit = None
-        for r in lst:
-            if self._norm_quote_no((r or {}).get("quote_no")) == qn_in:
-                hit = r
-                break
-
-        if not hit:
-            self.dock.add_message("assistant", f"No encontré la cotización #{str(quote_no).strip()}.")
+        hit = self._resolve_quote_reference(
+            quote_reference,
+            refresh=not bool(lst),
+        )
+        if hit is None:
             return
 
         pdf = str(hit.get("pdf_path") or "").strip()

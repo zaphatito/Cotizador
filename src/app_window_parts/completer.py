@@ -4,7 +4,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, QStringListModel
 from PySide6.QtWidgets import QCompleter, QApplication
 
-from ..config import listing_allows_products, listing_allows_presentations, ALLOW_NO_STOCK, CATS
+from ..config import listing_allows_products, listing_allows_presentations, CATS
+from ..stock_policy import stock_enforcement_enabled
 from ..utils import nz
 
 
@@ -63,9 +64,16 @@ def _global_fixed_component_codes(presentaciones, *, generic_categories: set[str
     return fixed_codes
 
 
-def build_completer_strings(productos, botellas_pc, presentaciones=None):
+def build_completer_strings(
+    productos,
+    botellas_pc,
+    presentaciones=None,
+    *,
+    quote_context=None,
+):
     sugs = []
     seen = set()
+    enforce_stock = stock_enforcement_enabled(quote_context)
     prod_map = {
         str(p.get("id", "")).strip().upper(): p
         for p in (productos or [])
@@ -89,7 +97,9 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
 
     if listing_allows_products():
         for p in productos or []:
-            if (not ALLOW_NO_STOCK) and float(nz(p.get("cantidad_disponible"), 0.0)) <= 0.0:
+            if enforce_stock and float(
+                nz(p.get("cantidad_disponible"), 0.0)
+            ) <= 0.0:
                 continue
 
             cat = p.get("categoria", "")
@@ -107,7 +117,7 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
                     0.0,
                 )
             )
-            if (not ALLOW_NO_STOCK) and stock <= 0.0:
+            if enforce_stock and stock <= 0.0:
                 continue
 
             code = str(pr.get("CODIGO") or pr.get("codigo") or pr.get("CODIGO_NORM") or "").strip().upper()
@@ -156,7 +166,7 @@ def build_completer_strings(productos, botellas_pc, presentaciones=None):
                     continue
 
                 base_stock = float(nz(base.get("cantidad_disponible"), 0.0))
-                if (not ALLOW_NO_STOCK) and base_stock <= 0.0:
+                if enforce_stock and base_stock <= 0.0:
                     continue
 
                 base_gen = str(base.get("genero") or "").strip().lower()
@@ -289,7 +299,9 @@ class CompleterMixin:
         except Exception:
             pass
 
-        if bool(getattr(self, "_use_ai_completer", False)):
+        if bool(getattr(self, "_use_ai_completer", False)) and not bool(
+            getattr(self, "_server_catalog_mode", False)
+        ):
             try:
                 self._setup_ai_completers()
             except Exception:
@@ -297,7 +309,12 @@ class CompleterMixin:
             return
 
         self._sug_model = QStringListModel(
-            build_completer_strings(self.productos, self._botellas_pc, self.presentaciones)
+            build_completer_strings(
+                self.productos,
+                self._botellas_pc,
+                self.presentaciones,
+                quote_context=getattr(self, "quote_context", None),
+            )
         )
         self._completer = QCompleter(self._sug_model, self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)

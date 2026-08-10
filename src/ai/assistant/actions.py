@@ -12,10 +12,17 @@ from sqlModels.db import connect, ensure_schema
 from sqlModels.quotes_repo import STATUS_PENDIENTE
 
 from ...paths import DATA_DIR
-from ...config import APP_COUNTRY
+from ...db_path import resolve_db_path
+from ...config import APP_COUNTRY, currency_for_country
+from ...country_rules import normalize_country_name, uses_peru_business_rules
 from ...product_rules import uses_gram_quantity
-from .resolvers import resolve_client_from_history, resolve_product_candidates, month_range_from_today
-from .reports import report_text_from_db
+from .resolvers import (
+    effective_catalog_scope,
+    month_range_from_today,
+    resolve_client_from_history,
+    resolve_product_candidates,
+)
+from .reports import parse_report_query, report_text_from_db, run_report
 
 
 YES_WORDS = {
@@ -53,6 +60,11 @@ def _first_nonzero(prod: dict, keys: list[str]) -> Optional[float]:
 
 
 def product_prices_text(window, args: dict) -> str:
+    cm = _get_catalog_manager(window)
+    if cm is not None and bool(getattr(cm, "server_mode", False)):
+        if _ensure_effective_catalog_scope(window) is None:
+            return "Selecciona un pais y empresa para consultar precios."
+
     code = _upper_code((args or {}).get("code") or (args or {}).get("query"))
     if not code:
         return "Dime el cÃ³digo. Ej: **precios del CH1104**."
@@ -313,17 +325,61 @@ def _get_catalog_manager(window):
     return getattr(window, "_catalog_manager", None) or getattr(window, "catalog_manager", None)
 
 
+def _ensure_effective_catalog_scope(window):
+    scope = effective_catalog_scope(window)
+    cm = _get_catalog_manager(window)
+    if scope is not None or cm is None or not bool(getattr(cm, "server_mode", False)):
+        return scope
+
+    from ...widgets_parts.catalog_scope_dialog import select_catalog_scope
+
+    scope = select_catalog_scope(
+        window,
+        cm,
+        preferred=getattr(window, "_assistant_catalog_scope", None),
+    )
+    if scope is not None:
+        window._assistant_catalog_scope = scope
+    return scope
+
+
+def _country_for_window(window) -> str:
+    scope = effective_catalog_scope(window)
+    return normalize_country_name(
+        getattr(scope, "country_code", "")
+        or getattr(window, "country_name", "")
+        or getattr(window, "country_code", "")
+        or APP_COUNTRY,
+        default=APP_COUNTRY,
+    )
+
+
 def _get_catalog_dfs_and_lists(window):
     cm = _get_catalog_manager(window)
 
-    dfp = getattr(cm, "df_productos", None) if cm is not None else getattr(window, "df_productos", None)
-    dfpr = getattr(cm, "df_presentaciones", None) if cm is not None else getattr(window, "df_presentaciones", None)
+    scope = effective_catalog_scope(window)
+    server_mode = cm is not None and bool(getattr(cm, "server_mode", False))
+    if server_mode:
+        if scope is None:
+            dfp, dfpr = None, None
+        else:
+            try:
+                dfp, dfpr = cm.catalog_for_scope(scope)
+            except Exception:
+                dfp, dfpr = None, None
+    else:
+        dfp = getattr(cm, "df_productos", None) if cm is not None else getattr(window, "df_productos", None)
+        dfpr = getattr(cm, "df_presentaciones", None) if cm is not None else getattr(window, "df_presentaciones", None)
 
-    prods = getattr(window, "productos", None)
-    pres = getattr(window, "presentaciones", None)
-
-    prods_list = prods if isinstance(prods, list) else []
-    pres_list = pres if isinstance(pres, list) else []
+    if server_mode:
+        # No mezclar el catálogo del scope con aliases globales o listas de otro
+        # país/empresa que puedan quedar en la ventana de histórico.
+        prods_list, pres_list = [], []
+    else:
+        prods = getattr(window, "productos", None)
+        pres = getattr(window, "presentaciones", None)
+        prods_list = prods if isinstance(prods, list) else []
+        pres_list = pres if isinstance(pres, list) else []
 
     return dfp, dfpr, prods_list, pres_list
 
@@ -386,17 +442,18 @@ def is_cats_code(window, code: str) -> bool:
             "codigo": _get_ci(r, "codigo") or code,
             "categoria": category,
         }
-        if uses_gram_quantity(item_for_rules, country=APP_COUNTRY):
+        if uses_gram_quantity(item_for_rules, country=_country_for_window(window)):
             return True
 
     return False
 
 
 def normalize_qty_for_code(window, code: str, kind: str, qty_raw) -> float:
+    country = _country_for_window(window)
     if is_cats_code(window, code):
-        if APP_COUNTRY == "PERU":
+        if uses_peru_business_rules(country):
             return float(_parse_qty_peru_cats(qty_raw))
-        if APP_COUNTRY in ("PARAGUAY", "VENEZUELA"):
+        if country in ("PARAGUAY", "VENEZUELA"):
             return float(_parse_qty_py_vz_cats(qty_raw))
         q = _to_float(qty_raw, 0.001)
         q = round(q, 3)
@@ -641,8 +698,6 @@ def export_catalog_for_assistant(catalog_manager) -> None:
 
 
 def set_currency_on_window(window, currency: str) -> tuple[str, float]:
-    from ...config import set_currency_context
-
     cur = (currency or "").upper().strip()
     base = str(getattr(window, "base_currency", "") or "").upper()
 
@@ -651,7 +706,12 @@ def set_currency_on_window(window, currency: str) -> tuple[str, float]:
         rates = getattr(window, "_rates", {}) or {}
         rate = float(rates.get(cur) or 0.0) or 1.0
 
-    set_currency_context(cur or base, float(rate))
+    if hasattr(window, "_set_currency_context"):
+        window._set_currency_context(cur or base, float(rate))
+    else:
+        from ...config import set_currency_context
+
+        set_currency_context(cur or base, float(rate))
     try:
         window._update_currency_label()
     except Exception:
@@ -689,8 +749,32 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
         "warnings": [],
     }
 
+    cm = _get_catalog_manager(window)
+    assistant_scope = _ensure_effective_catalog_scope(window)
+    if assistant_scope is None and cm is not None and bool(getattr(cm, "server_mode", False)):
+        if assistant_scope is None:
+            resolved["unresolved"].append(
+                {"query": "", "reason": "catalog_scope_required"}
+            )
+            return "Debes seleccionar un país y empresa para crear la cotización.", resolved
+
+    if assistant_scope is not None:
+        resolved["catalog_scope"] = assistant_scope.to_dict()
+
+    country_code = str(
+        getattr(assistant_scope, "country_code", "")
+        or getattr(window, "country_code", "")
+    ).strip()
     db_path = window._ai_db_path
-    cli_trip = resolve_client_from_history(db_path, client_q) if client_q else None
+    cli_trip = (
+        resolve_client_from_history(
+            db_path,
+            client_q,
+            country_code=country_code,
+        )
+        if client_q
+        else None
+    )
 
     if cli_trip:
         resolved["client"]["cliente"] = str(cli_trip[0] or "")
@@ -847,14 +931,15 @@ def execute_create_quote(window, resolved: dict) -> str:
 
     mp = _normalize_payment_method_text(str(resolved.get("payment_method") or "").strip())
     if mp:
-        if APP_COUNTRY == "PARAGUAY":
+        country = _country_for_window(window)
+        if country == "PARAGUAY":
             is_cash = mp.lower() == "efectivo"
             try:
                 if hasattr(window, "_set_py_cash_mode"):
                     window._set_py_cash_mode(is_cash, assume_items_already=True)
             except Exception:
                 pass
-        elif APP_COUNTRY == "PERU":
+        elif uses_peru_business_rules(country):
             try:
                 if getattr(window, "entry_metodo_pago", None) is not None:
                     window.entry_metodo_pago.setText(mp)
@@ -952,7 +1037,67 @@ def _to_iso_end_exclusive_bound(date_from: str, date_to: str) -> str:
     return f"{d_excl.isoformat()}T00:00:00"
 
 
+def _quote_history_context(window) -> dict[str, str]:
+    scope = effective_catalog_scope(window)
+    quote_context = getattr(window, "quote_context", None)
+    cm = _get_catalog_manager(window)
+    username = str(
+        getattr(quote_context, "username", "")
+        or getattr(cm, "username", "")
+        or ""
+    ).strip()
+    id_cotizador = str(
+        getattr(quote_context, "id_cotizador", "")
+        or getattr(cm, "id_cotizador", "")
+        or ""
+    ).strip().upper()
+    return {
+        "country_code": str(getattr(scope, "country_code", "") or "").strip().upper(),
+        "company_type": str(getattr(scope, "company_type", "") or "").strip().upper(),
+        "username": username,
+        "id_cotizador": id_cotizador,
+    }
+
+
+def _append_quote_history_context_filters(
+    where: list[str],
+    params: list[Any],
+    window,
+) -> None:
+    context = _quote_history_context(window)
+    for column, key in (
+        ("country_code", "country_code"),
+        ("company_type", "company_type"),
+        ("cotizador_username", "username"),
+        ("id_cotizador", "id_cotizador"),
+    ):
+        value = str(context.get(key) or "").strip()
+        if not value:
+            continue
+        where.append(f"UPPER(TRIM(COALESCE(q.{column}, ''))) = ?")
+        params.append(value.upper())
+
+
+def _default_history_currency(window) -> str:
+    quote_context = getattr(window, "quote_context", None)
+    scope = effective_catalog_scope(window)
+    return str(
+        getattr(window, "current_currency", "")
+        or getattr(quote_context, "base_currency", "")
+        or (currency_for_country(scope.country_code) if scope is not None else "")
+        or "USD"
+    ).strip().upper()
+
+
 def list_quotes_filtered(window, args: dict) -> str:
+    # La lista es parte del contexto efectivo; nunca conservar resultados de un
+    # scope anterior si la recarga actual falla o se cancela.
+    window._assistant_last_list = []
+    cm = _get_catalog_manager(window)
+    if cm is not None and bool(getattr(cm, "server_mode", False)):
+        if _ensure_effective_catalog_scope(window) is None:
+            return "Selecciona un pais y empresa para consultar cotizaciones."
+
     st_raw = (args or {}).get("status", None)
     if st_raw is None:
         status: Optional[str] = None
@@ -980,6 +1125,7 @@ def list_quotes_filtered(window, args: dict) -> str:
     try:
         where = ["q.deleted_at IS NULL"]
         params: list[Any] = []
+        _append_quote_history_context_filters(where, params, window)
 
         if status is not None:
             if status == "":
@@ -1004,6 +1150,10 @@ def list_quotes_filtered(window, args: dict) -> str:
                 q.id,
                 q.created_at,
                 q.quote_no,
+                q.country_code,
+                q.company_type,
+                q.cotizador_username,
+                q.id_cotizador,
                 COALESCE(c.nombre, '') AS cliente,
                 q.estado,
                 q.total_neto_shown,
@@ -1028,7 +1178,10 @@ def list_quotes_filtered(window, args: dict) -> str:
             lines.append(
                 f"â€¢ #{qn}  {r['cliente']}  {r['currency_shown']} {float(r['total_neto_shown'] or 0):.2f}  ({r['estado'] or ''})"
             )
-        lines.append("\nSi quieres abrir una, dime por ejemplo: 'abrir 0000123'.")
+        lines.append(
+            "\nPara abrir una, usa el codigo completo; por ejemplo: "
+            "'abrir PE-007-0000123'."
+        )
 
         window._assistant_last_list = [dict(x) for x in rows]
         return "\n".join(lines)
@@ -1037,7 +1190,14 @@ def list_quotes_filtered(window, args: dict) -> str:
 
 
 def top_clients(window, args: dict) -> str:
-    currency = str((args or {}).get("currency") or "USD").strip().upper()
+    cm = _get_catalog_manager(window)
+    if cm is not None and bool(getattr(cm, "server_mode", False)):
+        if _ensure_effective_catalog_scope(window) is None:
+            return "Selecciona un pais y empresa para consultar clientes."
+
+    currency = str(
+        (args or {}).get("currency") or _default_history_currency(window)
+    ).strip().upper()
     date_from = str((args or {}).get("date_from") or "").strip()
     date_to = str((args or {}).get("date_to") or "").strip()
     limit = int((args or {}).get("limit") or 10)
@@ -1055,6 +1215,7 @@ def top_clients(window, args: dict) -> str:
     try:
         where = ["q.deleted_at IS NULL", "q.currency_shown = ?"]
         params: list[Any] = [currency]
+        _append_quote_history_context_filters(where, params, window)
 
         if df_iso:
             where.append("q.created_at >= ?")
@@ -1096,4 +1257,47 @@ def report_text(w, args: dict) -> str:
         q = str(args.get("query") or args.get("text") or args.get("user_query") or "").strip()
     if not q:
         return "Dime quÃ© reporte quieres. Ej: 'productos mÃ¡s vendidos', 'ventas por dÃ­a', 'ventas por mÃ©todo de pago', 'stock bajo 5'."
+
+    cm = _get_catalog_manager(w)
+    if cm is not None and bool(getattr(cm, "server_mode", False)):
+        scope = _ensure_effective_catalog_scope(w)
+        if scope is None:
+            return "Selecciona un país y empresa para consultar el reporte."
+
+        spec = parse_report_query(q)
+        if spec.kind == "low_stock":
+            matrix = cm.stock_matrix(scope)
+            rows = list(matrix.get("rows") or []) if isinstance(matrix, dict) else []
+            threshold = float(spec.stock_threshold)
+            filtered = []
+            for row in rows:
+                try:
+                    total = float(row.get("total_stock") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if total <= threshold:
+                    filtered.append((total, row))
+            filtered.sort(
+                key=lambda item: (
+                    item[0],
+                    str(item[1].get("codigo") or item[1].get("codigo_norm") or ""),
+                )
+            )
+            if not filtered:
+                return f"No hay productos con stock total <= {threshold:g}."
+            lines = [f"Productos con stock total <= {threshold:g}:"]
+            for index, (total, row) in enumerate(filtered[: int(spec.limit)], 1):
+                code = str(row.get("codigo") or row.get("codigo_norm") or "").strip()
+                name = str(row.get("nombre") or "").strip()
+                lines.append(f"{index}) {code} — {name} — stock={total:g}")
+            return "\n".join(lines)
+
+        spec.country_code = scope.country_code
+        spec.company_type = scope.company_type
+        con = connect(resolve_db_path())
+        ensure_schema(con)
+        try:
+            return run_report(con, spec)
+        finally:
+            con.close()
     return report_text_from_db(q)

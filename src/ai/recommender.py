@@ -6,8 +6,10 @@ import datetime as _dt
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Set
 
-from ..config import ALLOW_NO_STOCK, listing_allows_products, listing_allows_presentations
+from ..config import APP_COUNTRY, ALLOW_NO_STOCK, listing_allows_products, listing_allows_presentations
+from ..country_rules import country_code_for
 from ..presentations import map_pc_to_bottle_code
+from ..stock_policy import stock_enforcement_enabled
 
 
 @dataclass
@@ -26,7 +28,7 @@ def _norm_client(s: str) -> str:
 
 
 def _cutoff_date_iso(days: int) -> str:
-    d = (_dt.datetime.utcnow() - _dt.timedelta(days=int(days))).date()
+    d = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=int(days))).date()
     return d.strftime("%Y-%m-%d")
 
 
@@ -38,8 +40,43 @@ class QuoteRecommender:
     - Sin cliente completo: solo recomienda si hay 'seeds' (productos ya elegidos) y usa últimos 3 meses.
     - Umbral: P(cand|seed) >= 0.20 y soporte co-oc >= 2.   ✅
     """
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        country: str | None = None,
+        company_type: str = "",
+        products: list[dict] | None = None,
+        presentations: list[dict] | None = None,
+        quote_context=None,
+    ):
         self.db_path = str(db_path)
+        scope = getattr(quote_context, "scope", None)
+        self._quote_context = quote_context
+        self.country_code = country_code_for(
+            getattr(scope, "country_code", "") or country or APP_COUNTRY,
+            default="PY",
+        )
+        self.company_type = str(
+            getattr(scope, "company_type", "") or company_type or ""
+        ).strip().upper()
+        self.cotizador_username = str(
+            getattr(quote_context, "username", "") or ""
+        ).strip()
+        self.id_cotizador = str(
+            getattr(quote_context, "id_cotizador", "") or ""
+        ).strip()
+        self._runtime_catalog_only = products is not None or presentations is not None
+        self._runtime_products = {
+            str(row.get("id") or row.get("codigo") or "").strip().upper(): row
+            for row in (products or [])
+            if str(row.get("id") or row.get("codigo") or "").strip()
+        }
+        self._runtime_presentations = {
+            str(row.get("codigo_norm") or row.get("codigo") or "").strip().upper(): row
+            for row in (presentations or [])
+            if str(row.get("codigo_norm") or row.get("codigo") or "").strip()
+        }
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)
@@ -61,6 +98,23 @@ class QuoteRecommender:
         """
         code_u = (code_u or "").strip().upper()
         if not code_u:
+            return None
+
+        runtime_product = self._runtime_products.get(code_u)
+        if runtime_product is not None:
+            name = str(runtime_product.get("nombre") or runtime_product.get("NOMBRE") or "")
+            return ("pc" if code_u.startswith("PC") else "product", code_u, name)
+        runtime_presentation = self._runtime_presentations.get(code_u)
+        if runtime_presentation is not None:
+            code = str(
+                runtime_presentation.get("codigo")
+                or runtime_presentation.get("codigo_norm")
+                or code_u
+            ).strip().upper()
+            name = str(runtime_presentation.get("nombre") or runtime_presentation.get("NOMBRE") or "")
+            return ("presentation", code, name)
+
+        if self._runtime_catalog_only:
             return None
 
         # 1) PC... (se agregan con código tal cual)
@@ -98,7 +152,7 @@ class QuoteRecommender:
         return None
 
     def _product_stock_ok(self, con: sqlite3.Connection, code_u: str) -> bool:
-        if ALLOW_NO_STOCK:
+        if ALLOW_NO_STOCK or not stock_enforcement_enabled(self._quote_context):
             return True
         r = con.execute(
             "SELECT COALESCE(cantidad_disponible,0) AS s FROM products_current WHERE UPPER(id)=? LIMIT 1",
@@ -112,7 +166,7 @@ class QuoteRecommender:
             return False
 
     def _pc_bottle_stock_ok(self, con: sqlite3.Connection, pc_code_u: str) -> bool:
-        if ALLOW_NO_STOCK:
+        if ALLOW_NO_STOCK or not stock_enforcement_enabled(self._quote_context):
             return True
         bot_code = (map_pc_to_bottle_code(pc_code_u) or "").strip().upper()
         if not bot_code:
@@ -153,8 +207,28 @@ class QuoteRecommender:
         con = self._connect()
         try:
             # Scope
-            params: List[object] = []
-            where = ["q.deleted_at IS NULL"]
+            params: List[object] = [self.country_code]
+            where = [
+                "q.deleted_at IS NULL",
+                "UPPER(TRIM(COALESCE(q.country_code, ''))) = ?",
+            ]
+            quote_columns = {
+                str(row[1]).strip().lower()
+                for row in con.execute("PRAGMA table_info(quotes)").fetchall()
+            }
+            if self.company_type and "company_type" in quote_columns:
+                where.append("UPPER(TRIM(COALESCE(q.company_type, ''))) = ?")
+                params.append(self.company_type)
+            if self.cotizador_username and "cotizador_username" in quote_columns:
+                where.append(
+                    "LOWER(TRIM(COALESCE(q.cotizador_username, ''))) = LOWER(TRIM(?))"
+                )
+                params.append(self.cotizador_username)
+            if self.id_cotizador and "id_cotizador" in quote_columns:
+                where.append(
+                    "UPPER(TRIM(COALESCE(q.id_cotizador, ''))) = UPPER(TRIM(?))"
+                )
+                params.append(self.id_cotizador)
 
             # Cliente completo: TODO el historial
             if client_triplet and all(client_triplet):

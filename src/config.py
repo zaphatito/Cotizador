@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, Tuple, List
 
 from .currency import normalize_currency_code
+from .country_rules import SUPPORTED_COUNTRIES, country_code_for, normalize_country_name
 from .paths import DATA_DIR, user_docs_dir
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.api_identity import API_LOGIN_PASSWORD, build_api_settings
@@ -28,13 +29,17 @@ DEFAULT_CONFIG_STR: dict[str, str | None] = {
     "company_type": "LA CASA DEL PERFUME",
     "store_id": "",
     "username": "",
-    "tienda": None,
+    "telemarketing": None,
     "id_user_api": "",
     "user_api": "",
     "password_api_hash": "",
     "allow_no_stock": "0",
     "enable_ai": "0",
     "enable_recommendations": "1",
+    "remote_configuration_revision": "",
+    "remote_configuration_applied_at": "",
+    "remote_configuration_pending_restart": "0",
+    "default_store_assignment_id": "",
     "update_mode": "ASK",
     "update_check_on_startup": "1",
     "update_manifest_url": "",
@@ -234,8 +239,10 @@ def _load_seed_overrides_from_json() -> dict[str, str | None]:
         out["username"] = str(raw["username"]).strip()
     elif "user_name" in raw:
         out["username"] = str(raw["user_name"]).strip()
-    if "tienda" in raw:
-        out["tienda"] = b01_or_none(raw["tienda"])
+    if "telemarketing" in raw:
+        out["telemarketing"] = b01_or_none(raw["telemarketing"])
+    elif "tienda" in raw:
+        out["telemarketing"] = b01_or_none(raw["tienda"])
     if "allow_no_stock" in raw:
         out["allow_no_stock"] = b01(raw["allow_no_stock"])
     if "enable_ai" in raw:
@@ -349,11 +356,24 @@ def _recover_identity_settings_if_using_fallback(con, active_db_path: str) -> bo
         recovered = recover_settings_from_readonly_db(
             con,
             source_db_path=primary,
-            keys=("country", "company_type", "store_id", "username", "tienda"),
+            keys=(
+                "country",
+                "company_type",
+                "store_id",
+                "username",
+                "telemarketing",
+                "tienda",
+            ),
             required_keys=("store_id", "username"),
         )
         if not recovered:
             return False
+
+        if get_setting(con, "telemarketing", None) is None:
+            legacy_indicator = get_setting(con, "tienda", None)
+            if legacy_indicator is not None:
+                set_setting(con, "telemarketing", legacy_indicator)
+        con.execute("DELETE FROM settings WHERE key = 'tienda'")
 
         country = str(get_setting(con, "country", DEFAULT_CONFIG_STR["country"]) or "").strip().upper()
         company = str(
@@ -396,6 +416,10 @@ def _load_db_config() -> Dict[str, Any]:
     with tx(con):
         _seed_settings_once(con)
         _recover_identity_settings_if_using_fallback(con, db_path)
+        if get_setting(con, "remote_configuration_pending_restart", "0") == "1":
+            # Si src.config se está importando, este proceso ya arrancó con la
+            # revisión remota persistida y el reinicio pendiente quedó aplicado.
+            set_setting(con, "remote_configuration_pending_restart", "0")
 
     # leer settings
     country = get_setting(con, "country", DEFAULT_CONFIG_STR["country"]).strip().upper()
@@ -403,7 +427,9 @@ def _load_db_config() -> Dict[str, Any]:
     company_type = get_setting(con, "company_type", DEFAULT_CONFIG_STR["company_type"]).strip().upper()
     store_id = get_setting(con, "store_id", DEFAULT_CONFIG_STR["store_id"]).strip()
     username = get_setting(con, "username", DEFAULT_CONFIG_STR["username"]).strip()
-    tienda = _parse_optional_bool_setting(get_setting(con, "tienda", DEFAULT_CONFIG_STR["tienda"]))
+    telemarketing = _parse_optional_bool_setting(
+        get_setting(con, "telemarketing", DEFAULT_CONFIG_STR["telemarketing"])
+    )
     id_user_api = get_setting(con, "id_user_api", DEFAULT_CONFIG_STR["id_user_api"]).strip()
     user_api = get_setting(con, "user_api", DEFAULT_CONFIG_STR["user_api"]).strip()
     password_api_hash = get_setting(con, "password_api_hash", DEFAULT_CONFIG_STR["password_api_hash"]).strip()
@@ -425,13 +451,14 @@ def _load_db_config() -> Dict[str, Any]:
 
     con.close()
 
+    country = normalize_country_name(country)
     cfg: Dict[str, Any] = {
-        "country": country if country in ("PARAGUAY", "PERU", "VENEZUELA") else "PARAGUAY",
+        "country": country if country in SUPPORTED_COUNTRIES else "PARAGUAY",
         "listing_type": listing_type if listing_type in ("PRODUCTOS", "PRESENTACIONES", "AMBOS") else "AMBOS",
         "company_type": company_type if company_type in ALLOWED_COMPANY_TYPES else DEFAULT_CONFIG_STR["company_type"],
         "store_id": store_id,
         "username": username,
-        "tienda": tienda,
+        "telemarketing": telemarketing,
         "id_user_api": id_user_api,
         "user_api": user_api,
         "password_api_hash": password_api_hash,
@@ -457,7 +484,8 @@ APP_LISTING_TYPE: str = APP_CONFIG["listing_type"]
 APP_COMPANY_TYPE: str = APP_CONFIG["company_type"]
 STORE_ID: str = APP_CONFIG["store_id"]
 APP_USERNAME: str = APP_CONFIG["username"]
-APP_TIENDA: bool | None = APP_CONFIG["tienda"]
+APP_TELEMARKETING: bool | None = APP_CONFIG["telemarketing"]
+APP_TIENDA: bool | None = APP_TELEMARKETING  # alias de importación legacy
 ALLOW_NO_STOCK: bool = bool(APP_CONFIG["allow_no_stock"])
 ENABLE_AI: bool = bool(APP_CONFIG["enable_ai"])
 ENABLE_RECOMMENDATIONS: bool = bool(APP_CONFIG["enable_recommendations"])
@@ -492,7 +520,10 @@ def _sync_optional_ai_storage(db_path: str | None = None) -> None:
 
         idx = LocalSearchIndex(dbp)
         if bool(APP_CONFIG.get("enable_ai", ENABLE_AI)):
-            idx.ensure_and_rebuild()
+            if str(APP_CONFIG.get("username") or "").strip():
+                idx.ensure_and_rebuild_clients()
+            else:
+                idx.ensure_and_rebuild()
         else:
             idx.drop_schema()
     except Exception:
@@ -592,9 +623,11 @@ def currency_for_country(country: str) -> str:
     """
     Devuelve moneda BASE (CANÓNICA ISO).
     """
-    c = (country or "").upper()
+    c = normalize_country_name(country)
     if c == "PERU":
         return "PEN"
+    if c == "BOLIVIA":
+        return "BOB"
     if c == "VENEZUELA":
         return "USD"
     return "PYG"
@@ -604,13 +637,15 @@ def secondary_currencies_for_country(country: str) -> List[str]:
     """
     Devuelve monedas secundarias (CANÓNICAS ISO).
     """
-    c = (country or "").upper()
+    c = normalize_country_name(country)
     if c == "PARAGUAY":
         return ["ARS", "BRL", "USD"]
     if c == "VENEZUELA":
         return ["VES"]
     if c == "PERU":
         return ["BOB", "USD"]
+    if c == "BOLIVIA":
+        return ["PEN", "USD"]
     return []
 
 
@@ -637,8 +672,7 @@ SECONDARY_CURRENCY: str = normalize_currency_code(secondary_currency_for_country
 
 
 def _country_suffix(country: str) -> str:
-    m = {"VENEZUELA": "VE", "PERU": "PE", "PARAGUAY": "PY"}
-    return m.get((country or "").upper(), "PY")
+    return country_code_for(country, default="PY")
 
 
 COUNTRY_CODE: str = _country_suffix(APP_COUNTRY)
@@ -732,8 +766,8 @@ CONFIG_PATH = ""
 __all__ = [
     "CONFIG_DIR", "CONFIG_PATH",
     "APP_CONFIG", "APP_COUNTRY", "APP_LISTING_TYPE", "APP_COMPANY_TYPE", "STORE_ID",
-    "APP_USERNAME", "APP_TIENDA",
-    "ALLOW_NO_STOCK", "ENABLE_AI", "ENABLE_RECOMMENDATIONS", "ALLOWED_COMPANY_TYPES",
+    "APP_USERNAME", "APP_TELEMARKETING", "APP_TIENDA",
+    "ALLOW_NO_STOCK", "ENABLE_AI", "ENABLE_RECOMMENDATIONS", "ALLOWED_COMPANY_TYPES", "SUPPORTED_COUNTRIES",
     "is_ai_enabled", "set_ai_enabled", "is_recommendations_enabled", "set_recommendations_enabled",
     "APP_CURRENCY", "SECONDARY_CURRENCY", "SECONDARY_CURRENCIES", "COUNTRY_CODE",
     "CATS",

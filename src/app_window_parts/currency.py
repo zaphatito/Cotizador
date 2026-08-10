@@ -3,13 +3,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 
-from ..config import (
-    APP_CURRENCY,
-    APP_COUNTRY,
-    get_currency_context,
-    set_currency_context,
-    get_secondary_currencies,
-)
 from ..logging_setup import get_logger
 from ..widgets import show_currency_dialog
 
@@ -25,6 +18,29 @@ class CurrencyMixin:
     Moneda + tasas 100% en SQLite (exchange_rates).
     Además: dispara rates_updated si existe self._quote_events.
     """
+
+    def _currency_context(self) -> tuple[str, str, float]:
+        return (
+            str(getattr(self, "current_currency", self.base_currency) or self.base_currency).upper(),
+            str(getattr(self, "secondary_currency", "") or "").upper(),
+            float(getattr(self, "currency_rate", 1.0) or 1.0),
+        )
+
+    def _set_currency_context(self, currency: str, rate: float) -> None:
+        selected = str(currency or self.base_currency).strip().upper()
+        self.current_currency = selected or self.base_currency
+        try:
+            parsed_rate = float(rate)
+        except (TypeError, ValueError):
+            parsed_rate = 1.0
+        self.currency_rate = (
+            1.0
+            if self.current_currency == self.base_currency
+            else (parsed_rate if parsed_rate > 0 else 1.0)
+        )
+
+    def _convert_from_base(self, amount: float) -> float:
+        return float(amount) * float(getattr(self, "currency_rate", 1.0) or 1.0)
 
     def _load_exchange_rate_file(self) -> dict[str, float]:
         try:
@@ -70,11 +86,11 @@ class CurrencyMixin:
         if not hasattr(self, "lbl_moneda"):
             return
 
-        cur, _sec_principal, rate_ctx = get_currency_context()
+        cur, _sec_principal, rate_ctx = self._currency_context()
         base = self.base_currency
         cur = (cur or "").upper()
 
-        if APP_COUNTRY == "PARAGUAY":
+        if getattr(self, "country_name", "") == "PARAGUAY":
             shown = cur if cur else base
             self.lbl_moneda.setText(shown)
             return
@@ -92,12 +108,12 @@ class CurrencyMixin:
             else:
                 txt = f"Moneda: {base} (tasas secundarias sin configurar)"
         else:
-            r = (getattr(self, "_rates", {}) or {}).get(cur)
+            try:
+                r = float(rate_ctx)
+            except Exception:
+                r = 0.0
             if not r or r <= 0:
-                try:
-                    r = float(rate_ctx)
-                except Exception:
-                    r = 0.0
+                r = (getattr(self, "_rates", {}) or {}).get(cur)
             if r and r > 0:
                 txt = f"Moneda: {cur} (1 {base} = {r:.4f} {cur})"
             else:
@@ -107,7 +123,7 @@ class CurrencyMixin:
 
     def abrir_dialogo_moneda_y_tasa(self):
         base = self.base_currency
-        cur, _sec_principal, rate_ctx = get_currency_context()
+        cur, _sec_principal, rate_ctx = self._currency_context()
         cur = (cur or "").upper()
 
         exchange_rate = rate_ctx if cur and cur != base else None
@@ -119,6 +135,8 @@ class CurrencyMixin:
             self.secondary_currency,
             exchange_rate,
             saved_rates=getattr(self, "_rates", None) or {},
+            current_currency=cur,
+            secondary_currencies=getattr(self, "secondary_currencies", None),
         )
         if not result:
             return
@@ -127,7 +145,7 @@ class CurrencyMixin:
     def _apply_currency_settings(self, settings: dict):
         base = self.base_currency
 
-        cur_old, _sec_principal, _r = get_currency_context()
+        cur_old, _sec_principal, _r = self._currency_context()
         old_currency = (cur_old or "").upper()
 
         selected = (settings.get("currency") or base).upper()
@@ -158,13 +176,13 @@ class CurrencyMixin:
 
         # aplicar contexto de moneda
         if is_base or selected == base:
-            set_currency_context(base, 1.0)
+            self._set_currency_context(base, 1.0)
         else:
             r = float(new_rates.get(selected, 0.0))
             if r <= 0:
                 # si no hay tasa válida, forzar 1.0 para no romper UI
                 r = 1.0
-            set_currency_context(selected, r)
+            self._set_currency_context(selected, r)
 
         self._update_currency_label()
 
@@ -182,7 +200,7 @@ class CurrencyMixin:
             except Exception:
                 pass
 
-        cur_new, _sec2, r_new = get_currency_context()
+        cur_new, _sec2, r_new = self._currency_context()
         log.info(
             "Cambio de moneda: %s → %s (rate=%s, tasas=%s)",
             old_currency,

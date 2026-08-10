@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
 from ..config import APP_COUNTRY, convert_from_base, id_label_for_country
 from ..pricing import cantidad_para_mostrar, factor_total_por_categoria, quantity_in_grams
 from ..product_rules import uses_gram_quantity
+from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
+from .bounded_table_columns import install_bounded_columns
 
 
 def _fmt_qty(x: float) -> str:
@@ -33,9 +35,9 @@ def _fmt_qty(x: float) -> str:
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
-def _esencia_a_gramos(it: dict, cant: float) -> float:
+def _esencia_a_gramos(it: dict, cant: float, *, country: str | None = None) -> float:
     """Convierte la cantidad interna del producto a gramos para el país activo."""
-    return quantity_in_grams(it, cant, country=APP_COUNTRY)
+    return quantity_in_grams(it, cant, country=country or APP_COUNTRY)
 
 
 def show_preview_dialog(
@@ -45,6 +47,13 @@ def show_preview_dialog(
     cedula: str,
     telefono: str,
     items: list[dict],
+    *,
+    country: str | None = None,
+    converter=None,
+    current_currency: str | None = None,
+    quote_context=None,
+    amounts_are_shown: bool = False,
+    shown_totals: dict | None = None,
 ) -> None:
     """Diálogo de previsualización de cotización (solo lectura)."""
     dlg = QDialog(parent)
@@ -55,7 +64,17 @@ def show_preview_dialog(
         dlg.setWindowIcon(app_icon)
 
     v = QVBoxLayout(dlg)
-    id_lbl = id_label_for_country(APP_COUNTRY)
+    scope = getattr(quote_context, "scope", None)
+    country_name = str(
+        country or getattr(scope, "country_code", "") or APP_COUNTRY
+    )
+    current_currency = str(
+        current_currency
+        or getattr(quote_context, "base_currency", "")
+        or ""
+    ).strip().upper() or None
+    convert = converter if callable(converter) else convert_from_base
+    id_lbl = id_label_for_country(country_name)
     v.addWidget(QLabel(f"<b>Nombre:</b> {cliente}"))
     v.addWidget(QLabel(f"<b>{id_lbl}:</b> {cedula}"))
     v.addWidget(QLabel(f"<b>Teléfono:</b> {telefono}"))
@@ -65,6 +84,7 @@ def show_preview_dialog(
         ["Código", "Producto", "Cantidad", "Precio", "Descuento", "Subtotal"]
     )
     tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    install_bounded_columns(tbl, fill_column=1)
     tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
     tbl.setSelectionMode(QAbstractItemView.NoSelection)
     tbl.setAlternatingRowColors(True)
@@ -89,7 +109,7 @@ def show_preview_dialog(
         if it.get("observacion"):
             prod += f" | {it['observacion']}"
 
-        qty_txt = cantidad_para_mostrar(it)
+        qty_txt = cantidad_para_mostrar(it, country=country_name)
 
         precio_base = float(nz(it.get("precio"), 0.0))
         total_line_base = float(nz(it.get("total"), 0.0))
@@ -99,17 +119,33 @@ def show_preview_dialog(
         d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
         d_pct = float(nz(it.get("descuento_pct"), 0.0))
 
-        subtotal_bruto_base += subtotal_line_base
-        descuento_total_base += d_monto_base
-        total_neto_base += total_line_base
+        if amounts_are_shown:
+            precio_display = precio_base
+            subtotal_display = float(
+                nz(it.get("subtotal"), precio_base * nz(it.get("cantidad"), 0.0))
+            )
+            descuento_display = float(nz(it.get("descuento"), 0.0))
+            total_display = total_line_base
+        else:
+            precio_display = float(convert(precio_base))
+            subtotal_display = float(convert(subtotal_line_base))
+            descuento_display = float(convert(d_monto_base))
+            total_display = float(convert(total_line_base))
 
-        precio_ui = fmt_money_ui(convert_from_base(precio_base))
-        subtotal_ui = fmt_money_ui(convert_from_base(total_line_base))
+        subtotal_bruto_base += subtotal_display
+        descuento_total_base += descuento_display
+        total_neto_base += total_display
+
+        precio_ui = fmt_money_ui(precio_display, currency=current_currency)
+        subtotal_ui = fmt_money_ui(total_display, currency=current_currency)
 
         if d_pct > 0:
             desc_txt = f"-{d_pct:.1f}%"
-        elif d_monto_base > 0:
-            desc_txt = "-" + fmt_money_ui(convert_from_base(d_monto_base))
+        elif descuento_display > 0:
+            desc_txt = "-" + fmt_money_ui(
+                descuento_display,
+                currency=current_currency,
+            )
         else:
             desc_txt = "—"
 
@@ -125,8 +161,8 @@ def show_preview_dialog(
             if cat_u == "BOTELLAS":
                 total_botellas += cant
 
-            if uses_gram_quantity(it, country=APP_COUNTRY):
-                total_esencias_g += _esencia_a_gramos(it, cant)
+            if uses_gram_quantity(it, country=country_name):
+                total_esencias_g += _esencia_a_gramos(it, cant, country=country_name)
         except Exception:
             pass
 
@@ -135,10 +171,10 @@ def show_preview_dialog(
             cat_u = (it.get("categoria") or "").upper()
             disp = float(nz(it.get("stock_disponible"), 0.0))
             cant = float(nz(it.get("cantidad"), 0.0))
-            mult = factor_total_por_categoria(cat_u, it)
-            if APP_COUNTRY == "VENEZUELA" and uses_gram_quantity(it, country=APP_COUNTRY):
+            mult = factor_total_por_categoria(cat_u, it, country=country_name)
+            if country_name == "VENEZUELA" and uses_gram_quantity(it, country=country_name):
                 mult = 50.0
-            if cant * mult > disp and disp >= 0.0:
+            if has_insufficient_stock(quantity=cant, available=disp, factor=mult):
                 qty_item = tbl.item(r, 2)
                 if qty_item:
                     qty_item.setForeground(QBrush(Qt.red))
@@ -153,18 +189,32 @@ def show_preview_dialog(
     if total_esencias_g > 0:
         v.addWidget(QLabel(f"<b>Total de Esencias:</b> {_fmt_qty(total_esencias_g)} g"))
 
+    totals = shown_totals if isinstance(shown_totals, dict) else {}
+    subtotal_bruto_display = float(
+        nz(totals.get("subtotal_bruto"), subtotal_bruto_base)
+    )
+    descuento_total_display = float(
+        nz(totals.get("descuento_total"), descuento_total_base)
+    )
+    total_neto_display = float(nz(totals.get("total_general"), total_neto_base))
+
     v.addWidget(
         QLabel(
-            f"<b>Subtotal sin descuento:</b> {fmt_money_ui(convert_from_base(subtotal_bruto_base))}"
+            f"<b>Subtotal sin descuento:</b> "
+            f"{fmt_money_ui(subtotal_bruto_display, currency=current_currency)}"
         )
     )
     v.addWidget(
         QLabel(
-            f"<b>Descuento total:</b> -{fmt_money_ui(convert_from_base(descuento_total_base))}"
+            f"<b>Descuento total:</b> "
+            f"-{fmt_money_ui(descuento_total_display, currency=current_currency)}"
         )
     )
     v.addWidget(
-        QLabel(f"<b>Total General:</b> {fmt_money_ui(convert_from_base(total_neto_base))}")
+        QLabel(
+            f"<b>Total General:</b> "
+            f"{fmt_money_ui(total_neto_display, currency=current_currency)}"
+        )
     )
 
     btn = QPushButton("Cerrar")

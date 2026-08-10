@@ -1,23 +1,15 @@
 from __future__ import annotations
 
-import unicodedata
 from typing import Any
 
 from .config import APP_COUNTRY, CATS
+from .country_rules import normalize_country_name, uses_peru_business_rules
 
 
 PY_UNIT_PRODUCT_CODES = frozenset({"FERO001", "FIJ002"})
 _PERU_EXTRA_GRAM_CATEGORIES = frozenset(
     {"FEROMONA", "FEROMONAS", "FIJADOR", "FIJADORES"}
 )
-_COUNTRY_ALIASES = {
-    "PE": "PERU",
-    "PERU": "PERU",
-    "PY": "PARAGUAY",
-    "PARAGUAY": "PARAGUAY",
-    "VE": "VENEZUELA",
-    "VENEZUELA": "VENEZUELA",
-}
 
 
 def _mapping_value(value: Any, *keys: str) -> Any:
@@ -33,20 +25,7 @@ def _mapping_value(value: Any, *keys: str) -> Any:
 
 def normalize_country(value: Any) -> str:
     """Return the canonical configured country name for known aliases."""
-    if isinstance(value, dict):
-        value = _mapping_value(value, "country", "country_code", "cod_pais", "pais")
-    normalized = str(value or "").strip()
-    try:
-        normalized = normalized.encode("cp1252").decode("utf-8")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        pass
-    normalized = normalized.upper()
-    normalized = "".join(
-        character
-        for character in unicodedata.normalize("NFKD", normalized)
-        if not unicodedata.combining(character)
-    )
-    return _COUNTRY_ALIASES.get(normalized, normalized)
+    return normalize_country_name(value)
 
 
 def normalize_product_category(value: Any) -> str:
@@ -78,7 +57,7 @@ def uses_gram_quantity(category_or_item: Any, *, country: str | None = None) -> 
         for configured_category in (CATS or [])
         if str(configured_category or "").strip()
     }
-    if current_country == "PERU":
+    if uses_peru_business_rules(current_country):
         gram_categories.update(_PERU_EXTRA_GRAM_CATEGORIES)
     if category not in gram_categories:
         return False

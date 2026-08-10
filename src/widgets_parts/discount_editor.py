@@ -23,12 +23,18 @@ def show_discount_editor(
     base_unit_price: float,
     quantity: float,
     current_pct: float = 0.0,
+    *,
+    converter=None,
+    current_currency: str | None = None,
 ) -> Optional[dict]:
     """
     Devuelve:
       {"pct": float, "amount_base": float, "amount_ui": float}
       o None si se cancela.
     """
+    convert = converter if callable(converter) else convert_from_base
+    currency = str(current_currency or "").strip().upper() or None
+
     dlg = QDialog(parent)
     dlg.setWindowTitle("Descuento del ítem")
     dlg.setMinimumWidth(380)
@@ -43,13 +49,13 @@ def show_discount_editor(
         quantity = 0.0
 
     total_base = max(base_unit_price * quantity, 0.0)
-    unit_ui = convert_from_base(base_unit_price)
-    total_ui = convert_from_base(total_base)
+    unit_ui = convert(base_unit_price)
+    total_ui = convert(total_base)
 
     info = QLabel(
-        f"<b>Precio base:</b> {fmt_money_ui(unit_ui)}   "
+        f"<b>Precio base:</b> {fmt_money_ui(unit_ui, currency=currency)}   "
         f"<b>Cantidad:</b> {quantity}   "
-        f"<b>Total base:</b> {fmt_money_ui(total_ui)}"
+        f"<b>Total base:</b> {fmt_money_ui(total_ui, currency=currency)}"
     )
     info.setWordWrap(True)
     v.addWidget(info)

@@ -8,7 +8,21 @@ from typing import Optional
 from sqlModels.db import connect, ensure_schema
 
 
-def resolve_client_from_history(db_path: str, query: str) -> Optional[tuple[str, str, str]]:
+def effective_catalog_scope(window):
+    """Return the immutable quote scope, or the scope selected by history AI."""
+    quote_context = getattr(window, "quote_context", None)
+    return (
+        getattr(quote_context, "scope", None)
+        or getattr(window, "_assistant_catalog_scope", None)
+    )
+
+
+def resolve_client_from_history(
+    db_path: str,
+    query: str,
+    *,
+    country_code: str = "",
+) -> Optional[tuple[str, str, str]]:
     """
     Devuelve (cliente, cedula, telefono) desde histórico quotes si encuentra match.
     """
@@ -20,6 +34,7 @@ def resolve_client_from_history(db_path: str, query: str) -> Optional[tuple[str,
     ensure_schema(con)
     try:
         like = f"%{q}%"
+        country = str(country_code or "").strip().upper()
         rows = con.execute(
             """
             SELECT
@@ -29,6 +44,7 @@ def resolve_client_from_history(db_path: str, query: str) -> Optional[tuple[str,
             FROM quotes q
             LEFT JOIN clients c ON c.id = q.id_cliente
             WHERE q.deleted_at IS NULL
+              AND (? = '' OR UPPER(TRIM(COALESCE(q.country_code, ''))) = ?)
               AND (
                 COALESCE(c.nombre, '') LIKE ?
                 OR COALESCE(c.documento, '') LIKE ?
@@ -37,7 +53,7 @@ def resolve_client_from_history(db_path: str, query: str) -> Optional[tuple[str,
             ORDER BY q.created_at DESC
             LIMIT 20
             """,
-            (like, like, like),
+            (country, country, like, like, like),
         ).fetchall()
         if not rows:
             return None
@@ -72,10 +88,30 @@ def resolve_product_candidates(window, query: str, limit: int = 6, allow_weak: b
     # Fuente A: ventana cotizador
     prod = getattr(window, "productos", None) or []
     pres = getattr(window, "presentaciones", None) or []
+    cm = getattr(window, "_catalog_manager", None) or getattr(window, "catalog_manager", None)
+    server_mode = bool(cm is not None and getattr(cm, "server_mode", False))
+    if server_mode:
+        scope = effective_catalog_scope(window)
+        if scope is None:
+            from ...widgets_parts.catalog_scope_dialog import select_catalog_scope
+
+            scope = select_catalog_scope(
+                window,
+                cm,
+                preferred=getattr(window, "_assistant_catalog_scope", None),
+            )
+        if scope is None:
+            return []
+        window._assistant_catalog_scope = scope
+        try:
+            dfp, dfpr = cm.catalog_for_scope(scope)
+            prod = dfp.to_dict("records") if dfp is not None else []
+            pres = dfpr.to_dict("records") if dfpr is not None else []
+        except Exception:
+            return []
 
     # Fuente B: histórico (catalog_manager)
-    if (not prod or not pres):
-        cm = getattr(window, "catalog_manager", None)
+    if (not prod or not pres) and not server_mode:
         if cm is not None:
             try:
                 dfp = getattr(cm, "df_productos", None)

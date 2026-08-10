@@ -1,7 +1,11 @@
 # sqlModels/schema.py
 from __future__ import annotations
 
-SCHEMA_VERSION = 36
+from .catalog_cache_repo import CATALOG_CACHE_DDL
+from .offline_catalogs_repo import OFFLINE_CATALOG_DDL
+
+
+SCHEMA_VERSION = 42
 
 DDL = [
     # =========================
@@ -45,6 +49,19 @@ DDL = [
         updated_at TEXT NOT NULL,
         PRIMARY KEY (base_currency, currency)
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS exchange_rates_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        base_currency TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        rate REAL NOT NULL,
+        recorded_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_exchange_rates_history_pair_time
+    ON exchange_rates_history(base_currency, currency, recorded_at)
     """,
 
     # =========================
@@ -207,6 +224,16 @@ DDL = [
     """,
 
     # =========================
+    # Catalogos manuales offline (snapshots independientes por tienda)
+    # =========================
+    *OFFLINE_CATALOG_DDL,
+
+    # =========================
+    # Catalogo remoto por usuario/cotizador, scope y tienda
+    # =========================
+    *CATALOG_CACHE_DDL,
+
+    # =========================
     # Clients (maestro de clientes)
     # =========================
     """
@@ -228,8 +255,8 @@ DDL = [
     )
     """,
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_tipo_doc_norm
-    ON clients(tipo_documento, documento_norm)
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_country_tipo_doc_norm
+    ON clients(country_code, tipo_documento, documento_norm)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_clients_nombre
@@ -270,7 +297,12 @@ DDL = [
         id INTEGER PRIMARY KEY AUTOINCREMENT,
 
         country_code TEXT NOT NULL,
+        company_type TEXT NOT NULL DEFAULT '',
+        base_currency TEXT NOT NULL DEFAULT '',
+        cotizador_username TEXT NOT NULL DEFAULT '',
+        id_cotizador TEXT NOT NULL DEFAULT '',
         quote_no TEXT NOT NULL,
+        quote_no_status TEXT NOT NULL DEFAULT 'confirmed',
         created_at TEXT NOT NULL,
         id_cliente INTEGER,
 
@@ -299,9 +331,12 @@ DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_quotes_created ON quotes(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_quote_no_status ON quotes(quote_no_status)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_deleted ON quotes(deleted_at)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_estado ON quotes(estado)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_id_cliente ON quotes(id_cliente)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_scope ON quotes(country_code, company_type)",
+    "CREATE INDEX IF NOT EXISTS idx_quotes_cotizador_identity ON quotes(cotizador_username, id_cotizador)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_api_sent_at ON quotes(api_sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_quotes_api_error_at ON quotes(api_error_at)",
 
@@ -364,6 +399,7 @@ DDL = [
         observacion TEXT,
 
         cantidad REAL NOT NULL DEFAULT 0,
+        factor_total REAL NOT NULL DEFAULT 1,
 
         -- Base
         precio_base REAL NOT NULL DEFAULT 0,

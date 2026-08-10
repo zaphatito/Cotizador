@@ -43,7 +43,14 @@ def _resolve_current_price_id(item: dict) -> int:
     return int(default_price_id_for_product(prod))
 
 
-def show_price_picker(parent, app_icon: QIcon, item: dict) -> Optional[dict]:
+def show_price_picker(
+    parent,
+    app_icon: QIcon,
+    item: dict,
+    *,
+    converter=None,
+    current_currency: str | None = None,
+) -> Optional[dict]:
     """
     Devuelve:
       {"mode":"tier", "tier":"unitario|minimo|oferta", "price": float, "id_precioventa": int}
@@ -52,6 +59,9 @@ def show_price_picker(parent, app_icon: QIcon, item: dict) -> Optional[dict]:
 
     El price siempre esta en moneda base.
     """
+    convert = converter if callable(converter) else convert_from_base
+    currency = str(current_currency or "").strip().upper() or None
+
     dlg = QDialog(parent)
     dlg.setWindowTitle("Seleccionar precio")
     dlg.setMinimumWidth(460)
@@ -87,7 +97,11 @@ def show_price_picker(parent, app_icon: QIcon, item: dict) -> Optional[dict]:
     )
 
     def _format_tier_value(val_base: float) -> str:
-        return fmt_money_ui(convert_from_base(val_base)) if val_base > 0 else "-"
+        return (
+            fmt_money_ui(convert(val_base), currency=currency)
+            if val_base > 0
+            else "-"
+        )
 
     try:
         win_col = dlg.palette().color(QPalette.Window)
@@ -258,7 +272,10 @@ def show_price_picker(parent, app_icon: QIcon, item: dict) -> Optional[dict]:
     row_input_layout.addWidget(sp, 1)
 
     def custom_text():
-        return f"Personalizado\n{fmt_money_ui(convert_from_base(float(sp.value())))}"
+        return (
+            "Personalizado\n"
+            f"{fmt_money_ui(convert(float(sp.value())), currency=currency)}"
+        )
 
     btn_c.setText(custom_text())
     custom_layout.addWidget(btn_c)

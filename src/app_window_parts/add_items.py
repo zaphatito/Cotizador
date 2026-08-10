@@ -7,7 +7,6 @@ from PySide6.QtCore import QTimer, Qt
 from ..config import (
     listing_allows_products,
     listing_allows_presentations,
-    ALLOW_NO_STOCK,
     APP_COUNTRY,
     CATS,
 )
@@ -18,8 +17,10 @@ from ..pricing import (
     default_price_id_for_product,
 )
 from ..product_rules import uses_gram_quantity
+from ..country_rules import uses_peru_business_rules
 from ..presentations import map_pc_to_bottle_code
 from ..logging_setup import get_logger
+from ..stock_policy import stock_enforcement_enabled
 from ..widgets import CustomProductDialog
 
 log = get_logger(__name__)
@@ -218,7 +219,10 @@ class AddItemsMixin:
         unit_price = float(nz(data["precio"], 0.0))  # siempre en moneda base
         qty = float(nz(data["cantidad"], 1))
 
-        factor = factor_total_por_categoria("SERVICIO")
+        factor = factor_total_por_categoria(
+            "SERVICIO",
+            country=getattr(self, "country_name", APP_COUNTRY),
+        )
         subtotal_base = round(unit_price * qty * factor, 2)
 
         item = {
@@ -348,18 +352,21 @@ class AddItemsMixin:
                     )
                 return False
 
-            if float(nz(prod.get("cantidad_disponible"), 0.0)) <= 0 and not ALLOW_NO_STOCK:
-                if not silent:
-                    QMessageBox.warning(
-                        self, "Sin stock", "❌ Este producto no tiene stock disponible."
-                    )
-                return False
+            product_stock = float(nz(prod.get("cantidad_disponible"), 0.0))
+            if product_stock <= 0:
+                if stock_enforcement_enabled(getattr(self, "quote_context", None)):
+                    if not silent:
+                        QMessageBox.warning(
+                            self, "Sin stock", "❌ Este producto no tiene stock disponible."
+                        )
+                    return False
 
             cat = (prod.get("categoria") or "").upper()
 
             qty_default = (
                 0.001
-                if APP_COUNTRY == "PERU" and uses_gram_quantity(prod, country=APP_COUNTRY)
+                if uses_peru_business_rules(getattr(self, "country_name", APP_COUNTRY))
+                and uses_gram_quantity(prod, country=getattr(self, "country_name", APP_COUNTRY))
                 else 1.0
             )
             unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
@@ -370,7 +377,11 @@ class AddItemsMixin:
             elif default_pid == 3:
                 default_tier = "oferta"
 
-            factor = factor_total_por_categoria(cat, prod)
+            factor = factor_total_por_categoria(
+                cat,
+                prod,
+                country=getattr(self, "country_name", APP_COUNTRY),
+            )
             subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
 
             item = {
@@ -425,7 +436,7 @@ class AddItemsMixin:
                 if (
                     bot is not None
                     and float(nz(bot.get("cantidad_disponible"), 0.0)) <= 0
-                    and not ALLOW_NO_STOCK
+                    and stock_enforcement_enabled(getattr(self, "quote_context", None))
                 ):
                     if not silent:
                         QMessageBox.warning(
@@ -489,7 +500,10 @@ class AddItemsMixin:
             except Exception:
                 q = 1.0
 
-            if APP_COUNTRY == "PERU" and uses_gram_quantity(target, country=APP_COUNTRY):
+            if uses_peru_business_rules(getattr(self, "country_name", APP_COUNTRY)) and uses_gram_quantity(
+                target,
+                country=getattr(self, "country_name", APP_COUNTRY),
+            ):
                 q = round(max(0.001, q), 3)
             else:
                 q = int(round(q))

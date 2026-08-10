@@ -4,6 +4,7 @@ from .product_rules import (
     normalize_country,
     uses_gram_quantity,
 )
+from .country_rules import uses_peru_business_rules
 from .utils import nz, format_grams
 
 
@@ -23,7 +24,7 @@ def quantity_in_grams(
         else:
             qty = 0
     quantity = nz(qty, 0.0)
-    if current_country == "PERU":
+    if uses_peru_business_rules(current_country):
         return quantity * 1000.0
     if current_country in {"PARAGUAY", "VENEZUELA"}:
         return quantity * 50.0
@@ -33,12 +34,13 @@ def quantity_in_grams(
 # =====================================================
 # Cantidad mostrada en el PDF / tabla
 # =====================================================
-def cantidad_para_mostrar(it: dict) -> str:
+def cantidad_para_mostrar(it: dict, *, country: str | None = None) -> str:
     cat = (it.get("categoria") or "").upper()
     qty = it.get("cantidad", 0)
+    current_country = normalize_country(APP_COUNTRY if country is None else country)
 
-    if uses_gram_quantity(it, country=APP_COUNTRY):
-        return format_grams(quantity_in_grams(it, country=APP_COUNTRY))
+    if uses_gram_quantity(it, country=current_country):
+        return format_grams(quantity_in_grams(it, country=current_country))
 
     if cat == "BOTELLAS":
         try:
@@ -55,7 +57,12 @@ def cantidad_para_mostrar(it: dict) -> str:
 # =====================================================
 # Factor para total por categoria / pais
 # =====================================================
-def factor_total_por_categoria(cat: str, prod_or_item: dict | None = None) -> float:
+def factor_total_por_categoria(
+    cat: str,
+    prod_or_item: dict | None = None,
+    *,
+    country: str | None = None,
+) -> float:
     """
     Factor que SOLO afecta el calculo de subtotal/total (no el precio unitario mostrado).
 
@@ -66,8 +73,8 @@ def factor_total_por_categoria(cat: str, prod_or_item: dict | None = None) -> fl
     """
     rule_item = dict(prod_or_item or {})
     rule_item["categoria"] = cat
-    current_country = normalize_country(APP_COUNTRY)
-    if uses_gram_quantity(rule_item, country=current_country) and current_country != "PERU":
+    current_country = normalize_country(APP_COUNTRY if country is None else country)
+    if uses_gram_quantity(rule_item, country=current_country) and not uses_peru_business_rules(current_country):
         return 50.0
     return 1.0
 

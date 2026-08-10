@@ -8,6 +8,7 @@ from .quotes_repo import (
     document_type_rule,
     document_type_rules_for_country,
     infer_tipo_documento_from_doc,
+    normalize_document_identity_key,
     validate_document_for_type,
 )
 
@@ -82,10 +83,11 @@ def ensure_clients_table(con: sqlite3.Connection) -> None:
         )
     except Exception:
         pass
+    con.execute("DROP INDEX IF EXISTS idx_clients_tipo_doc_norm")
     con.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_tipo_doc_norm
-        ON clients(tipo_documento, documento_norm)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_country_tipo_doc_norm
+        ON clients(country_code, tipo_documento, documento_norm)
         """
     )
     con.execute(
@@ -112,6 +114,8 @@ def _country_code_norm(country_code: Any) -> str:
     c = str(country_code or "").strip().upper()
     if c in ("PE", "PERU"):
         return "PE"
+    if c in ("BO", "BOLIVIA"):
+        return "BO"
     if c in ("VE", "VENEZUELA"):
         return "VE"
     if c in ("PY", "PARAGUAY"):
@@ -154,14 +158,26 @@ def _normalize_doc_key(value: Any) -> str:
 
 _DEFAULT_DOC_TYPE_BY_COUNTRY: dict[str, str] = {
     "PE": "DNI",
+    "BO": "CI",
     "VE": "V",
     "PY": "CI",
 }
+
+_KNOWN_COUNTRY_CODES = frozenset(("PE", "BO", "VE", "PY"))
 
 _GENERIC_CLIENTS: tuple[dict[str, str], ...] = (
     {
         "country_code": "PE",
         "tipo_documento": "DNI",
+        "documento": "00000000",
+        "nombre": "CLIENTE GENERICO",
+        "telefono": "0",
+        "direccion": "-",
+        "email": "-",
+    },
+    {
+        "country_code": "BO",
+        "tipo_documento": "CI",
         "documento": "00000000",
         "nombre": "CLIENTE GENERICO",
         "telefono": "0",
@@ -219,7 +235,7 @@ def is_generic_client_row(row: dict[str, Any] | None) -> bool:
 
 def _known_country_code(country_code: Any) -> str:
     cc = _country_code_norm(country_code)
-    if cc in _DEFAULT_DOC_TYPE_BY_COUNTRY:
+    if cc in _KNOWN_COUNTRY_CODES:
         return cc
     return "PE"
 
@@ -256,6 +272,7 @@ def ensure_generic_clients(con: sqlite3.Connection) -> None:
     """
     Garantiza clientes genéricos por país:
     - PE: DNI 00000000
+    - BO: CI 00000000
     - PY: CI 00000000
     - VE: V 0
     """
@@ -288,8 +305,7 @@ def ensure_generic_clients(con: sqlite3.Connection) -> None:
                 updated_at,
                 deleted_at
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, '', datetime('now'), datetime('now'), NULL)
-            ON CONFLICT(tipo_documento, documento_norm) DO UPDATE SET
-                country_code = excluded.country_code,
+            ON CONFLICT(country_code, tipo_documento, documento_norm) DO UPDATE SET
                 documento = excluded.documento,
                 nombre = excluded.nombre,
                 telefono = excluded.telefono,
@@ -335,29 +351,31 @@ def _document_is_valid(country_code: Any, doc_type: Any, documento: Any) -> bool
     return bool(_normalize_doc_key(doc))
 
 
-def _current_used_doc_keys(con: sqlite3.Connection) -> set[tuple[str, str]]:
+def _current_used_doc_keys(con: sqlite3.Connection) -> set[tuple[str, str, str]]:
     ensure_clients_table(con)
     rows = con.execute(
         """
         SELECT
+            COALESCE(country_code, '') AS country_code,
             COALESCE(tipo_documento, '') AS tipo_documento,
             COALESCE(documento_norm, '') AS documento_norm
         FROM clients
         """
     ).fetchall()
-    out: set[tuple[str, str]] = set()
+    out: set[tuple[str, str, str]] = set()
     for r in rows:
+        cc = _country_code_norm(r["country_code"])
         t = str(r["tipo_documento"] or "").strip().upper()
         d = str(r["documento_norm"] or "").strip().upper()
-        if t and d:
-            out.add((t, d))
+        if cc and t and d:
+            out.add((cc, t, d))
     return out
 
 
 def _next_synthetic_document(
     *,
     country_code: Any,
-    used_doc_keys: set[tuple[str, str]],
+    used_doc_keys: set[tuple[str, str, str]],
     seq_state: dict[str, int],
 ) -> tuple[str, str, str]:
     cc = _known_country_code(country_code)
@@ -377,7 +395,7 @@ def _next_synthetic_document(
         doc_norm = _normalize_doc_key(doc)
         if not doc_norm:
             continue
-        key = (doc_type, doc_norm)
+        key = (cc, doc_type, doc_norm)
         if key in used_doc_keys:
             continue
         if not _document_is_valid(cc, doc_type, doc):
@@ -405,13 +423,12 @@ def normalize_client_payload(
     address = _normalize_client_extra(direccion)
     email_norm = _normalize_client_extra(email)
 
-    doc_store = _normalize_doc_store(documento)
-    doc_key = _normalize_doc_key(doc_store)
-
+    raw_doc = re.sub(r"\s+", "", str(documento or "").strip().upper())
+    validation_doc = raw_doc if cc == "BO" else _normalize_doc_store(raw_doc)
     tipo_in = str(tipo_documento or "").strip().upper()
     tipo_norm = infer_tipo_documento_from_doc(
         cc,
-        doc_store,
+        validation_doc,
         explicit_tipo=tipo_in,
     )
     if not tipo_norm:
@@ -420,9 +437,15 @@ def normalize_client_payload(
     if require_valid_document:
         if not tipo_norm:
             raise ValueError("Selecciona un tipo de documento valido.")
-        ok, msg = validate_document_for_type(cc, tipo_norm, doc_store)
+        ok, msg = validate_document_for_type(cc, tipo_norm, validation_doc)
         if not ok:
             raise ValueError(msg or "Documento invalido.")
+
+    # En Bolivia el complemento SEGIP forma parte de la presentación del
+    # documento. Se conserva el guion para historial/PDF; la clave única sigue
+    # compacta y sin separadores mediante documento_norm.
+    doc_store = raw_doc if cc == "BO" else validation_doc
+    doc_key = normalize_document_identity_key(cc, tipo_norm, doc_store)
 
     return {
         "country_code": cc,
@@ -439,11 +462,12 @@ def normalize_client_payload(
 def _get_client_id_by_key(
     con: sqlite3.Connection,
     *,
+    country_code: str,
     tipo_documento: str,
     documento_norm: str,
     include_deleted: bool = True,
 ) -> int | None:
-    where = ["tipo_documento = ?", "documento_norm = ?"]
+    where = ["country_code = ?", "tipo_documento = ?", "documento_norm = ?"]
     if (not include_deleted) and _has_column(con, "clients", "deleted_at"):
         where.append("deleted_at IS NULL")
     row = con.execute(
@@ -454,7 +478,11 @@ def _get_client_id_by_key(
         ORDER BY id ASC
         LIMIT 1
         """,
-        (str(tipo_documento or ""), str(documento_norm or "")),
+        (
+            _country_code_norm(country_code),
+            str(tipo_documento or ""),
+            str(documento_norm or ""),
+        ),
     ).fetchone()
     if not row:
         return None
@@ -521,6 +549,7 @@ def upsert_client(
         ensure_generic_clients(con)
         return _get_client_id_by_key(
             con,
+            country_code=str(payload.get("country_code") or ""),
             tipo_documento=str(payload.get("tipo_documento") or ""),
             documento_norm=str(payload.get("documento_norm") or ""),
             include_deleted=True,
@@ -542,8 +571,7 @@ def upsert_client(
             created_at,
             updated_at
         ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-        ON CONFLICT(tipo_documento, documento_norm) DO UPDATE SET
-            country_code = excluded.country_code,
+        ON CONFLICT(country_code, tipo_documento, documento_norm) DO UPDATE SET
             documento = excluded.documento,
             nombre = CASE
                 WHEN TRIM(COALESCE(excluded.nombre, '')) <> '' THEN excluded.nombre
@@ -587,6 +615,7 @@ def upsert_client(
     )
     return _get_client_id_by_key(
         con,
+        country_code=str(payload.get("country_code") or ""),
         tipo_documento=payload["tipo_documento"],
         documento_norm=payload["documento_norm"],
         include_deleted=True,
@@ -634,6 +663,7 @@ def save_client(
         ensure_generic_clients(con)
         generic_id = _get_client_id_by_key(
             con,
+            country_code=str(payload.get("country_code") or ""),
             tipo_documento=str(payload.get("tipo_documento") or ""),
             documento_norm=str(payload.get("documento_norm") or ""),
             include_deleted=True,
@@ -650,11 +680,11 @@ def save_client(
         """
         SELECT id, deleted_at
         FROM clients
-        WHERE tipo_documento = ? AND documento_norm = ?
+        WHERE country_code = ? AND tipo_documento = ? AND documento_norm = ?
         ORDER BY id ASC
         LIMIT 1
         """,
-        (tipo, doc_norm),
+        (str(payload["country_code"]), tipo, doc_norm),
     ).fetchone()
     existing = int(existing_row["id"]) if existing_row else None
     existing_deleted = bool(existing_row and str(existing_row["deleted_at"] or "").strip())
@@ -1097,7 +1127,7 @@ def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
         if deleted_at is None:
             active_identities.add(ident)
 
-    used_doc_keys: set[tuple[str, str]] = set()
+    used_doc_keys: set[tuple[str, str, str]] = set()
     seq_state: dict[str, int] = {}
     final_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
 
@@ -1111,7 +1141,7 @@ def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
         tipo = str(rec.get("tipo_documento") or "").strip().upper()
         doc = str(rec.get("documento") or "").strip().upper()
         doc_norm = str(rec.get("documento_norm") or "").strip().upper()
-        doc_key = (tipo, doc_norm) if tipo and doc_norm else ("", "")
+        doc_key = (cc, tipo, doc_norm) if cc and tipo and doc_norm else ("", "", "")
 
         if bool(rec.get("doc_valid")) and tipo and doc_norm and doc_key not in used_doc_keys:
             used_doc_keys.add(doc_key)

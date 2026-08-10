@@ -51,7 +51,7 @@ def _qty_text_keep(s: Any) -> str:
 
 def _fmt_qty(v: float, *, prefer_3dec_under_1: bool = True) -> str:
     """
-    Para PERÚ (kilos decimales): si es <1, devuelve 3 decimales (0.050, 0.100).
+    Para Perú/Bolivia (kilos decimales): si es <1, devuelve 3 decimales (0.050, 0.100).
     Para >=1, recorta ceros.
     """
     if prefer_3dec_under_1 and abs(v) < 1:
@@ -64,7 +64,7 @@ def _fmt_qty(v: float, *, prefer_3dec_under_1: bool = True) -> str:
 def _qty_from_unit(country: str, num: float, unit: str) -> str:
     """
     Convierte entradas tipo "3kg" / "100g" a qty según país (CATS):
-      - PERU: qty en kilos (100g => 0.100, 50g => 0.050, 3kg => 3)
+      - PERU / BOLIVIA: qty en kilos (100g => 0.100, 50g => 0.050, 3kg => 3)
       - PARAGUAY / VENEZUELA: múltiplos de 50g (50g => 1, 100g => 2, 3kg => 60)
     OJO: acá asumimos que cuando el usuario usa g/kg es porque está hablando de CATS.
     """
@@ -82,7 +82,7 @@ def _qty_from_unit(country: str, num: float, unit: str) -> str:
             return str(int(round(units)))
         return _fmt_qty(units, prefer_3dec_under_1=False)
 
-    # default: PERU / resto => kilos
+    # default: PERU / BOLIVIA / resto => kilos
     kg = grams / 1000.0
     return _fmt_qty(kg, prefer_3dec_under_1=True)
 
@@ -107,7 +107,11 @@ def extract_currency(text: str, allowed_currencies: List[str] | None = None) -> 
         return "USD"
     if "gs" in t or "guarani" in t or "guaraní" in t or "₲" in t:
         return "PYG"
-    if "ves" in t or "bolivar" in t or "bolívar" in t or re.search(r"\bbs\b", t):
+    if "bob" in t or "boliviano" in t or "bolivianos" in t:
+        return "BOB"
+    if re.search(r"\bbs\.?\b", t) and "BOB" in allowed and "VES" not in allowed:
+        return "BOB"
+    if "ves" in t or "bolivar" in t or "bolívar" in t or re.search(r"\bbs\.?\b", t):
         return "VES"
 
     return ""
@@ -192,7 +196,7 @@ def extract_payment_method(text: str, *, country: str) -> str:
 # ------------------------------------------------------------
 # DOCUMENTO(S)
 # ------------------------------------------------------------
-_DOC_TYPE_RE = r"(dni\s*/\s*ruc|dni|ruc|cedula|c[eé]dula|rif|pasaporte|passport|doc(?:umento)?\s*\d*|doc\d+|nit|ci)"
+_DOC_TYPE_RE = r"(dni\s*/\s*ruc|dni|ruc|cedula|c[eé]dula|cie|rif|pasaporte|passport|pas|otro\s+documento|od|doc(?:umento)?\s*\d*|doc\d+|nit|ci)"
 _DOC_PAIR_RE = re.compile(
     rf"\b(?P<typ>{_DOC_TYPE_RE})\b\s*[:=]?\s*(?P<num>[0-9A-Za-z][0-9A-Za-z\-.\/]*)",
     re.I,
@@ -261,11 +265,11 @@ def extract_client_phone(text: str) -> str:
 # CLIENTE (nombre)
 # ------------------------------------------------------------
 _CLIENT_RE_1 = re.compile(
-    r"(?:para\s+(?:el\s+)?cliente|cliente)\s+(.+?)(?=\s+(?:con|dni|ruc|doc|tlf|tel(?:efono)?|t[eé]lefono|pago|en)\b|,|;|$)",
+    r"(?:para\s+(?:el\s+)?cliente|cliente)\s+(.+?)(?=\s+(?:con|dni|ruc|cie|nit|ci|pasaporte|otro\s+documento|od|doc|tlf|tel(?:efono)?|t[eé]lefono|pago|en)\b|,|;|$)",
     re.I,
 )
 _CLIENT_RE_2 = re.compile(
-    r"\bpara\s+([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 .'\-]+?)(?=\s+(?:con|dni|ruc|doc|tlf|tel(?:efono)?|t[eé]lefono|pago|en)\b|,|;|$)",
+    r"\bpara\s+([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 .'\-]+?)(?=\s+(?:con|dni|ruc|cie|nit|ci|pasaporte|otro\s+documento|od|doc|tlf|tel(?:efono)?|t[eé]lefono|pago|en)\b|,|;|$)",
     re.I,
 )
 

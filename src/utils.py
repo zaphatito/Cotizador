@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, ROUND_HALF_UP
+
 from .config import APP_CURRENCY, get_currency_context
 from .currency import normalize_currency_code, symbol_ui, symbol_pdf
 
@@ -49,24 +51,46 @@ def _current_currency_code() -> str:
     return normalize_currency_code(APP_CURRENCY or "")
 
 
-def fmt_money_ui(n: float) -> str:
+def _money_currency_code(currency: str | None = None) -> str:
+    explicit = normalize_currency_code(currency or "")
+    return explicit or _current_currency_code()
+
+
+def fmt_money_ui(n: float, currency: str | None = None) -> str:
     """
     Formato para la UI usando la moneda actual (canónica).
     """
     n = nz(n, 0.0)
-    cur = _current_currency_code()
+    cur = _money_currency_code(currency)
     sym = symbol_ui(cur)
     return f"{sym} {n:0.2f}"
 
 
-def fmt_money_pdf(n: float) -> str:
+def fmt_money_pdf(n: float, currency: str | None = None) -> str:
     """
     Formato para PDF usando la moneda actual (canónica).
     """
     n = nz(n, 0.0)
-    cur = _current_currency_code()
+    cur = _money_currency_code(currency)
     sym = symbol_pdf(cur)
     return f"{sym} {n:0.2f}"
+
+
+def fmt_money_pdf_whole(
+    n: float,
+    currency: str | None = None,
+    *,
+    thousands_separator: str = ".",
+) -> str:
+    """Formatea importes enteros para PDF con separación de miles."""
+    n = nz(n, 0.0)
+    cur = _money_currency_code(currency)
+    sym = symbol_pdf(cur)
+    rounded = Decimal(str(n)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    number = f"{rounded:,.0f}"
+    if thousands_separator != ",":
+        number = number.replace(",", thousands_separator)
+    return f"{sym} {number}"
 
 
 def format_grams(g: float) -> str:

@@ -126,30 +126,86 @@ def _select_row_by_quote_no(tv: QTableView, quote_no_digits: str) -> bool:
     return False
 
 
-def open_quote_or_pdf_via_ui(window: QWidget, quote_no_digits: str, target: str) -> Tuple[bool, str]:
+def _select_row_by_quote_identity(
+    tv: QTableView,
+    quote_reference: object,
+    *,
+    quote_id: object = None,
+) -> bool:
+    model = tv.model()
+    if model is None:
+        return False
+
+    rows = int(model.rowCount())
+    if quote_id not in (None, ""):
+        try:
+            wanted_id = int(quote_id)
+        except (TypeError, ValueError):
+            return False
+        get_id_at = getattr(model, "get_id_at", None)
+        for row_index in range(rows):
+            try:
+                row_id = get_id_at(row_index) if callable(get_id_at) else None
+                if row_id is None and isinstance(getattr(model, "rows", None), list):
+                    row_id = (model.rows[row_index] or {}).get("id")
+                if int(row_id or 0) != wanted_id:
+                    continue
+            except (TypeError, ValueError, IndexError):
+                continue
+            index = model.index(row_index, 0)
+            tv.selectRow(row_index)
+            tv.scrollTo(index, QTableView.PositionAtCenter)
+            return True
+        return False
+
+    raw = str(quote_reference or "").strip().lstrip("#").upper()
+    model_rows = getattr(model, "rows", None)
+    if raw and not raw.lstrip("#").isdigit() and isinstance(model_rows, list):
+        for row_index, row in enumerate(model_rows):
+            if str((row or {}).get("quote_no") or "").strip().upper() != raw:
+                continue
+            index = model.index(row_index, 0)
+            tv.selectRow(row_index)
+            tv.scrollTo(index, QTableView.PositionAtCenter)
+            return True
+        return False
+
+    return _select_row_by_quote_no(tv, raw)
+
+
+def open_quote_or_pdf_via_ui(
+    window: QWidget,
+    quote_reference: object,
+    target: str,
+    *,
+    quote_id: object = None,
+) -> Tuple[bool, str]:
     """
     target: "quote" | "pdf"
     """
-    q = norm_quote_digits(quote_no_digits)
-    if not q:
+    raw = str(quote_reference or "").strip().lstrip("#").upper()
+    if not raw and quote_id in (None, ""):
         return False, "No entendí el número."
 
     tv = _find_best_history_table(window)
     if tv is None:
         return False, "No encontré la tabla del histórico."
 
-    if not _select_row_by_quote_no(tv, q):
-        return False, f"No encontré la cotización #{pretty_quote_no(q)} en el histórico."
+    if not _select_row_by_quote_identity(tv, raw, quote_id=quote_id):
+        label = raw or f"ID {quote_id}"
+        return False, f"No encontré la cotización {label} en el histórico."
+
+    label = raw or f"ID {quote_id}"
 
     if target == "pdf":
         btn = _find_button(window, "abrir pdf")
         if btn is None:
             return False, "No encontré el botón 'Abrir PDF'."
         btn.click()
-        return True, f"Abrí el PDF de la cotización #{pretty_quote_no(q)}."
+        return True, f"Abrí el PDF de la cotización {label}."
 
     btn = _find_button(window, "abrir cotización") or _find_button(window, "abrir cotizacion")
     if btn is None:
         return False, "No encontré el botón 'Abrir cotización'."
     btn.click()
-    return True, f"Abrí la cotización #{pretty_quote_no(q)}."
+    return True, f"Abrí la cotización {label}."
