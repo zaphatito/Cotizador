@@ -21,7 +21,7 @@ from sqlModels.quote_statuses_repo import get_quote_statuses_cached
 from sqlModels.settings_repo import get_setting, set_setting
 from sqlModels.quotes_repo import (
     list_quotes, get_quote_header, get_quote_items, soft_delete_quote,
-    update_quote_payment, update_quote_status,
+    update_quote_payment, update_quote_chatbot, update_quote_status,
     status_label,
 )
 from sqlModels.rates_repo import load_rates
@@ -2098,6 +2098,7 @@ class QuoteHistoryWindow(QMainWindow):
         act_dup = QAction("🧾 Abrir Cotización", self)
         act_pdf = QAction("📄 Abrir PDF", self)
         act_state = QAction("🔄 Cambiar estado…", self)
+        act_edit_quote_type = QAction("🤖 Editar tipo de cotización…", self)
         act_labels = QAction("🏷️ Etiquetas", self)
         act_ticket = QAction("🖨️ Reimprimir ticket", self)
         act_regen = QAction("♻️ Regenerar PDF", self)
@@ -2111,6 +2112,7 @@ class QuoteHistoryWindow(QMainWindow):
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
         act_state.setEnabled(has_sel)
+        act_edit_quote_type.setEnabled(has_sel)
         act_labels.setEnabled(has_sel)
         act_ticket.setEnabled(has_sel)
         act_regen.setEnabled(has_sel)
@@ -2121,6 +2123,7 @@ class QuoteHistoryWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(act_pdf)
         menu.addAction(act_state)
+        menu.addAction(act_edit_quote_type)
         menu.addAction(act_labels)
 
         if act_edit_pay is not None:
@@ -2142,6 +2145,8 @@ class QuoteHistoryWindow(QMainWindow):
             fn = self._open_pdf
         elif picked is act_state:
             fn = self._change_status
+        elif picked is act_edit_quote_type:
+            fn = self._edit_quote_type
         elif picked is act_labels:
             fn = self._open_labels_dialog
         elif act_edit_pay is not None and picked is act_edit_pay:
@@ -2270,6 +2275,66 @@ class QuoteHistoryWindow(QMainWindow):
         except Exception as e:
             log.exception("Error actualizando pago")
             QMessageBox.critical(self, "Error", f"No se pudo actualizar el pago:\n{e}")
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+    def _edit_quote_type(self):
+        qid = self._selected_quote_id()
+        if not qid:
+            QMessageBox.information(self, "Atención", "Selecciona una cotización.")
+            return
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            header = get_quote_header(con, qid)
+            current_chatbot = bool(int(header.get("chatbot") or 0))
+        except Exception as e:
+            log.exception("Error leyendo tipo de cotización")
+            QMessageBox.critical(self, "Error", f"No se pudo leer la cotización:\n{e}")
+            return
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        options = ["Cliente orgánico", "Cliente captado por chatbot"]
+        selected, ok = QInputDialog.getItem(
+            self,
+            "Editar tipo de cotización",
+            "Tipo de cotización:",
+            options,
+            1 if current_chatbot else 0,
+            False,
+        )
+        if not ok:
+            return
+
+        new_chatbot = selected == options[1]
+        if new_chatbot == current_chatbot:
+            return
+
+        con = None
+        try:
+            con = connect(self._db_path)
+            with tx(con):
+                update_quote_chatbot(con, qid, new_chatbot)
+            self._reload_current_page()
+            self._select_row_by_quote_id(qid)
+            self._wake_background_api_sync()
+        except Exception as e:
+            log.exception("Error actualizando tipo de cotización")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"No se pudo actualizar el tipo de cotización:\n{e}",
+            )
         finally:
             if con is not None:
                 try:
@@ -2507,6 +2572,7 @@ class QuoteHistoryWindow(QMainWindow):
                 "telefono": header.get("telefono", ""),
                 "direccion": header.get("direccion", ""),
                 "email": header.get("email", ""),
+                "chatbot": bool(header.get("chatbot", False)),
                 "items_base": items_base,
                 "items_shown": items_shown,
                 "base_currency": header.get("base_currency", ""),

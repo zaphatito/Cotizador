@@ -5,7 +5,7 @@ from .catalog_cache_repo import CATALOG_CACHE_DDL
 from .offline_catalogs_repo import OFFLINE_CATALOG_DDL
 
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 DDL = [
     # =========================
@@ -308,6 +308,7 @@ DDL = [
 
         metodo_pago TEXT NOT NULL DEFAULT '',
         estado TEXT NOT NULL DEFAULT '',
+        chatbot INTEGER NOT NULL DEFAULT 0,
 
         currency_shown TEXT NOT NULL,
         tasa_shown REAL,

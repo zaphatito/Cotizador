@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QButtonGroup,
     QComboBox,
+    QCheckBox,
 )
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QDesktopServices, QRegularExpressionValidator
 from PySide6.QtCore import Qt, QUrl, QModelIndex, QTimer, QEvent, QRegularExpression
@@ -1704,6 +1705,12 @@ class UiMixin:
         quick.setSpacing(4)
         quick.addLayout(rate_row)
         quick.addLayout(actions_row)
+        self.chk_chatbot = QCheckBox("Cliente captado por chatbot")
+        self.chk_chatbot.setChecked(False)
+        self.chk_chatbot.setToolTip(
+            "Marcado: cliente captado por chatbot. Desmarcado: cliente orgánico."
+        )
+        quick.addWidget(self.chk_chatbot)
         grp_quick.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         top_panel = QHBoxLayout()

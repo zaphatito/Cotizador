@@ -1,29 +1,95 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.19
-Fecha: 2026-07-22
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+Versión: 2.0.20
+Fecha: 2026-08-10
 
 Resumen
-- Se corrigió el inicio ocasional sin código de tienda ni usuario, que podía producir códigos de cotización con el identificador 00.
+- Se incorporó la clasificación de clientes captados por chatbot frente a clientes orgánicos, guardada por cotización y sincronizada con EFAPI.
+- Se rediseñó el manejo de catálogos e inventario para trabajar con varios países, empresas y tiendas, con actualización periódica del stock desde el servidor.
+- Se agregó un modo completamente offline, catálogos locales independientes y correlativos provisionales que se regularizan cuando vuelve la conexión.
+- Se añadió soporte funcional para Bolivia, junto con sus reglas de documentos, moneda, precios, plantillas, PDF y ticket.
 
-Cambios y mejoras
-- [Mejora] Un bloqueo temporal de SQLite ya no hace que la aplicación cambie silenciosamente a otra base de datos.
+Clasificación chatbot
+- [Nuevo] La pantalla de creación incluye el check «Cliente captado por chatbot» en el área de formas de pago; desmarcado identifica un cliente orgánico.
+- [Nuevo] Cada cotización conserva el valor true/false en el histórico local y lo envía en todos los intentos y reintentos hacia EFAPI.
+- [Nuevo] El menú contextual del histórico permite editar el «Tipo de cotización» entre cliente orgánico y cliente captado por chatbot.
+- [Mejora] Al cambiar el tipo desde el histórico se limpia la marca de envío anterior y se solicita una nueva sincronización con la API.
+- [Mejora] Abrir o duplicar una cotización histórica conserva su clasificación chatbot.
+- [Compatibilidad] Las cotizaciones anteriores se migran como clientes orgánicos y no requieren edición manual.
+
+Configuración inicial y modos de trabajo
+- [Nuevo] Se agregó un asistente de configuración inicial para identidad, preferencias, países, empresas, tiendas e inventario.
+- [Nuevo] El asistente puede preparar una configuración de servidor con clave de idempotencia y snapshots completos de catálogo y stock.
+- [Nuevo] También puede configurar el equipo en modo offline dejando vacíos, como par, el usuario y el código de cotizador.
+- [Mejora] La identidad de servidor ahora se valida como un par indivisible: usuario y código de cotizador deben estar ambos presentes o ambos ausentes.
+- [Mejora] La configuración inicial pendiente y su respuesta se aplican de forma transaccional para evitar estados locales parciales.
+- [Mejora] Los ajustes administrados por el servidor se distinguen de los ajustes locales del equipo, como impresoras, tema, rutas y logs.
+- [Mejora] Los cambios remotos de configuración se validan por revisión, se guardan de forma atómica y solicitan reinicio cuando afectan consumidores ya cargados.
+
+Identidad, base local y códigos
+- [Fix] Un bloqueo temporal de SQLite ya no hace que la aplicación cambie silenciosamente a otra base de datos.
 - [Mejora] Si debe usarse la base de respaldo, la identidad del cotizador se recupera desde la base principal en modo de solo lectura.
 - [Mejora] El código completo reservado por el servidor se conserva al guardar, reimprimir o regenerar una cotización.
-
-Correcciones
 - [Fix] Se impide generar una cotización cuando falta el código de tienda o el nombre de usuario.
 - [Fix] Se rechazan códigos reservados para una tienda diferente, incluido el identificador 00 incorrecto.
 
-Notas importantes
-- La actualización no reemplaza ni elimina la base de datos local existente.
-- Las cotizaciones antiguas ya guardadas con un código incorrecto no se modifican automáticamente.
+Catálogos, tiendas e inventario
+- [Nuevo] Se agregó un caché SQLite por usuario/cotizador, país, empresa y tienda para catálogos y existencias remotas.
+- [Nuevo] La sincronización consulta revisiones conocidas, descarga solo estados nuevos y conserva el último catálogo válido cuando la red o el servidor fallan.
+- [Nuevo] Una misma identidad puede recibir y utilizar varios ámbitos país/empresa y varias tiendas sin mezclar su inventario.
+- [Nuevo] Al crear una cotización en modo servidor se puede elegir el ámbito autorizado que se utilizará.
+- [Nuevo] Se añadió una matriz de stock por tienda para consultar existencias de productos y presentaciones.
+- [Mejora] Productos, presentaciones, búsqueda, autocompletado y recomendaciones se actualizan con el catálogo vigente sin reiniciar la ventana de cotización.
+- [Mejora] La aplicación respeta la preferencia de listar productos, presentaciones o ambos.
+- [Mejora] La política «Permitir cotizar sin stock» ahora controla la validación final; cuando se permite, el usuario recibe una confirmación explícita.
+- [Fix] Una actualización de otra identidad, ámbito o catálogo local ya no reemplaza los datos de una cotización que está abierta.
+- [Fix] Un error de sincronización no borra catálogos, asignaciones ni stocks que ya funcionaban.
 
+Modo offline y catálogos manuales
+- [Nuevo] El modo offline omite login, verificación de acceso, sincronización remota y envíos automáticos, manteniendo clientes, histórico, PDF y tickets locales.
+- [Nuevo] Se pueden crear y mantener varios catálogos manuales independientes, importar su Excel, elegir cuál está activo y seleccionar el catálogo al abrir una cotización.
+- [Mejora] El catálogo Excel existente se registra automáticamente como primer catálogo offline, sin perder sus productos ni presentaciones.
+- [Mejora] El inicio reconoce bases recientes sin metadatos y aplica únicamente las migraciones necesarias.
 
+Cotizaciones, correlativos e histórico
+- [Nuevo] Cada cotización guarda su contexto completo: país, empresa, moneda base, usuario y código de cotizador.
+- [Nuevo] Sin conexión se asigna un correlativo provisional visible en el histórico; al recuperar la conexión se reserva el correlativo central y se actualizan histórico, PDF y ticket.
+- [Mejora] El envío de presupuestos usa el contexto histórico de la cotización y no la configuración de otra ventana o ámbito.
+- [Mejora] Reabrir, duplicar, regenerar, reimprimir o crear etiquetas utiliza el país, empresa, tienda, moneda y plantilla originales.
+- [Mejora] El histórico conserva precios, cantidades, factor de unidad/peso, moneda mostrada, tasa y totales originales para evitar recálculos involuntarios.
+- [Mejora] Los métodos de pago de Paraguay y de los países con reglas de Perú/Bolivia se guardan y restauran correctamente.
+- [Mejora] El histórico puede mostrar cotizaciones de varios países y adapta el encabezado del documento y la columna de pago al contexto.
+- [Fix] No se permite abrir una cotización con el caché de otra identidad ni con un país/empresa que ya no esté autorizado.
+- [Fix] La regeneración de archivos no cambia silenciosamente el código completo ni el contexto comercial de la cotización.
 
-Compatibilidad
-- No se requieren cambios de esquema para esta versión.
-- La base de datos local y la configuración del usuario se conservan.
+Países, clientes, precios y salidas
+- [Nuevo] Se incorporaron Bolivia, la moneda BOB, tipos de documento SIAT y plantillas específicas de cotización e imagen.
+- [Mejora] Las reglas por país se centralizaron para normalizar nombres, códigos, documentos, monedas y comportamiento de pago.
+- [Mejora] Clientes locales y remotos conservan tipo de documento, dirección y correo, con validaciones adaptadas al país.
+- [Mejora] Productos por peso conservan su factor histórico y las cantidades correctas para Perú, Bolivia y las excepciones de Paraguay.
+- [Mejora] PDF, ticket, etiquetas y vistas previas reciben el contexto de país/empresa/tienda y muestran los importes históricos correctos.
+- [Mejora] Las tablas principales, listados, editores y selectores ajustan sus columnas a anchos útiles para evitar desbordes y espacios vacíos excesivos.
+
+API, sincronización y asistente
+- [Nuevo] Se agregaron clientes para configuración inicial y para sincronización de catálogo/stock con estado conocido y revisiones.
+- [Mejora] La cola de presupuestos admite cotizaciones provisionales, reintentos, actualización de código y persistencia detallada del último error.
+- [Mejora] Los envíos de presupuestos, etiquetas y consultas de clientes respetan la identidad y el ámbito de la cotización.
+- [Mejora] El asistente de IA, la búsqueda y las recomendaciones trabajan con el catálogo y el contexto activos, y mejoran la apertura de cotizaciones o PDF desde el histórico.
+- [Fix] Las acciones automáticas ya no cruzan catálogos, monedas ni identidades al cambiar de ámbito.
+
+Base de datos local
+- El esquema SQLite se actualiza automáticamente de la versión 42 a la 43 para agregar el indicador chatbot.
+- Esta versión también incluye las migraciones 37 a 42 del cambio anterior: caché remoto, correlativos provisionales, contexto histórico, factor por renglón, renombre de telemarketing y catálogos offline.
+- Las migraciones son incrementales y conservan la base, la configuración, los clientes, el histórico y los catálogos existentes.
+
+Compatibilidad y despliegue
+- EFAPI debe actualizarse junto con esta versión y aplicar `database/1.5.11.sql` antes de recibir cotizaciones con el campo chatbot.
+- El campo chatbot es independiente de telemarketing: telemarketing identifica el tipo de instalación; chatbot identifica el origen de cada cliente/cotización.
+- Las versiones actuales de LCDP en las ramas prod, kardex y caja pueden continuar enviando ventas sin el campo nuevo; EFAPI acepta ese contrato anterior.
+- Cuando una venta antigua de LCDP está enlazada a una cotización, EFAPI hereda la clasificación chatbot del presupuesto central.
+- La interfaz de LCDP queda preparada en la rama kardex y pendiente de activación/despliegue; no forma parte de la actualización del Cotizador de esta entrega.
+- Las funciones de servidor requieren los endpoints compatibles; si no están disponibles, el modo offline y el último caché válido continúan operativos.
 
 Soporte
-- Si notas algún comportamiento inesperado después de actualizar, reinicia la aplicación y vuelve a intentar.
+- Si una instalación existente tarda en mostrar los nuevos ámbitos o stocks, espera la siguiente sincronización y reinicia la aplicación cuando se solicite.
+- Si notas un comportamiento inesperado después de actualizar, reinicia la aplicación y vuelve a intentar.
 - Si el problema persiste, llama al soporte técnico.

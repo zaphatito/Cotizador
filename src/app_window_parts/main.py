@@ -543,6 +543,8 @@ class SistemaCotizaciones(
             self.entry_direccion.setText(payload.get("direccion", "") or "")
         if getattr(self, "entry_email", None) is not None:
             self.entry_email.setText(payload.get("email", "") or "")
+        if getattr(self, "chk_chatbot", None) is not None:
+            self.chk_chatbot.setChecked(bool(payload.get("chatbot", False)))
 
         prod_map = {str(p.get("id", "")).strip(): p for p in (self.productos or [])}
         pres_map = {}

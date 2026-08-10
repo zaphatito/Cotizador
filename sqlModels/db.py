@@ -127,9 +127,12 @@ def _looks_like_head_schema_without_meta(con: sqlite3.Connection) -> bool:
     Detecta una DB nueva creada con el DDL actual (sin meta.schema_version).
     En ese caso evitamos ejecutar migraciones antiguas.
     """
-    return _looks_like_recent_schema_without_meta(
-        con,
-        require_history_factor=True,
+    return (
+        _column_exists(con, "quotes", "chatbot")
+        and _looks_like_recent_schema_without_meta(
+            con,
+            require_history_factor=True,
+        )
     )
 
 

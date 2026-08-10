@@ -856,6 +856,7 @@ def insert_quote(
     email: str = "-",
     tipo_documento: str = "",
     metodo_pago: str = "",
+    chatbot: bool = False,
     currency_shown: str,
 
     tasa_shown: float | None,
@@ -887,6 +888,7 @@ def insert_quote(
 
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
+    has_chatbot = _has_column(con, "quotes", "chatbot")
     has_quote_no_status = _has_column(con, "quotes", "quote_no_status")
     has_company_type = _has_column(con, "quotes", "company_type")
     has_base_currency = _has_column(con, "quotes", "base_currency")
@@ -952,6 +954,10 @@ def insert_quote(
     if has_estado:
         cols.append("estado")
         vals.append("")
+
+    if has_chatbot:
+        cols.append("chatbot")
+        vals.append(1 if bool(chatbot) else 0)
 
     cols.extend(
         [
@@ -1091,6 +1097,32 @@ def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: st
 
     sets = ["metodo_pago = ?"]
     params: list[Any] = [str(metodo_pago or "")]
+
+    if _has_column(con, "quotes", "api_sent_at"):
+        sets.append("api_sent_at = ''")
+    if _has_column(con, "quotes", "api_error_at"):
+        sets.append("api_error_at = ''")
+    if _has_column(con, "quotes", "api_error_message"):
+        sets.append("api_error_message = ''")
+
+    con.execute(
+
+        f"UPDATE quotes SET {', '.join(sets)} WHERE id = ?",
+
+        tuple(params + [int(quote_id)]),
+
+    )
+
+
+
+def update_quote_chatbot(con: sqlite3.Connection, quote_id: int, chatbot: bool) -> None:
+
+    if not _has_column(con, "quotes", "chatbot"):
+
+        raise RuntimeError("La columna 'chatbot' no existe en la tabla 'quotes'.")
+
+    sets = ["chatbot = ?"]
+    params: list[Any] = [1 if bool(chatbot) else 0]
 
     if _has_column(con, "quotes", "api_sent_at"):
         sets.append("api_sent_at = ''")

@@ -2350,6 +2350,26 @@ def mig_42(con: sqlite3.Connection) -> None:
     bootstrap_current_catalog(con)
 
 
+def mig_43(con: sqlite3.Connection) -> None:
+    """v43: clasifica cada cotizacion como chatbot u organica."""
+    if not _table_exists(con, "quotes"):
+        return
+
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "chatbot",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    con.execute(
+        """
+        UPDATE quotes
+        SET chatbot = 0
+        WHERE chatbot IS NULL OR chatbot NOT IN (0, 1)
+        """
+    )
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2393,4 +2413,5 @@ MIGRATIONS: dict[int, callable] = {
     40: mig_40,
     41: mig_41,
     42: mig_42,
+    43: mig_43,
 }
