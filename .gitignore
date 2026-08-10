@@ -33,3 +33,6 @@ vendor/ollama/
 AGENTS.md
 .agents/*
 skills-lock.json
+
+# Pruebas locales (no versionar)
+/tests/
