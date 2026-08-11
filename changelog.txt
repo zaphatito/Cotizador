@@ -1,6 +1,6 @@
-SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
 Versión: 2.0.20
-Fecha: 2026-08-10
+Fecha: 2026-08-11
 
 Resumen
 - Se incorporó la clasificación de origen Web frente a Orgánico, guardada por cotización y sincronizada con EFAPI.
