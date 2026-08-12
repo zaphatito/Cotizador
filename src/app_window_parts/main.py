@@ -27,7 +27,10 @@ from ..config import (
     is_recommendations_enabled,
 )
 from ..country_rules import normalize_country_name
-from ..catalog_refresh import refreshed_product_for_item
+from ..catalog_refresh import (
+    historical_product_for_item,
+    refreshed_product_for_item,
+)
 from ..logging_setup import get_logger
 from ..db_path import resolve_db_path
 from ..utils import nz
@@ -39,7 +42,6 @@ from .add_items import AddItemsMixin
 from .presentations import PresentationsMixin
 from .table_actions import TableActionsMixin
 from .pdf_actions import PdfActionsMixin
-from .history_snapshot import history_base_snapshot
 
 log = get_logger(__name__)
 
@@ -556,29 +558,6 @@ class SistemaCotizaciones(
             if k2:
                 pres_map[k2] = p
 
-        def _build_fallback_prod_for_item(it_row: dict) -> dict:
-            """
-            Si un item historico ya no matchea catalogo vigente, construir un _prod
-            minimo para evitar que futuras recalculaciones dejen el precio en 0.
-            """
-            cat_u = str(it_row.get("categoria") or "").strip().upper()
-            base_price = float(nz(it_row.get("precio"), 0.0))
-            try:
-                pid = int(nz(it_row.get("id_precioventa"), 1) or 1)
-            except Exception:
-                pid = 1
-            if pid not in (1, 2, 3):
-                pid = 1
-            if base_price <= 0:
-                return {}
-            return {
-                "categoria": cat_u,
-                "p_max": float(base_price),
-                "p_min": float(base_price),
-                "p_oferta": float(base_price),
-                "precio_venta": int(pid),
-            }
-
         def _build_presentation_combo_prod(codigo_combo: str, it_row: dict) -> dict:
             """
             Reconstruye _prod para codigos combinados de presentacion (ej: DD0040100)
@@ -609,7 +588,7 @@ class SistemaCotizaciones(
                 p_min = p_oferta if p_oferta > 0 else p_max
 
             if p_max <= 0 and p_oferta <= 0 and p_min <= 0:
-                return _build_fallback_prod_for_item(it_row)
+                return historical_product_for_item(None, it_row)
 
             return {
                 "categoria": "PRESENTACION",
@@ -641,33 +620,7 @@ class SistemaCotizaciones(
                             return None
             return None
 
-        def _with_snapshot_prices(prod: dict, it_row: dict) -> dict:
-            """Mantiene los precios históricos aunque el catálogo cambie después."""
-            out = dict(prod or {})
-            if "precio" not in it_row:
-                return out
-            try:
-                snapshot_price = float(nz(it_row.get("precio"), 0.0))
-            except Exception:
-                return out
-            try:
-                snapshot_price_id = int(nz(it_row.get("id_precioventa"), 1) or 1)
-            except Exception:
-                snapshot_price_id = 1
-            if snapshot_price_id not in (1, 2, 3):
-                snapshot_price_id = 1
-            out.update(
-                {
-                    "p_max": snapshot_price,
-                    "p_min": snapshot_price,
-                    "p_oferta": snapshot_price,
-                    "precio_venta": snapshot_price_id,
-                }
-            )
-            return out
-
-        shown_items = getattr(self, "_history_shown_items_snapshot", None) or []
-        for item_index, it in enumerate(payload.get("items_base") or []):
+        for it in payload.get("items_base") or []:
             codigo = str(it.get("codigo") or "").strip()
             cat_u_in = str(it.get("categoria") or "").strip().upper()
 
@@ -676,18 +629,10 @@ class SistemaCotizaciones(
                 prod = pres_map.get(codigo.upper())
             if prod is None and cat_u_in == "PRESENTACION":
                 prod = _build_presentation_combo_prod(codigo, it)
-            if prod is None:
-                prod = _build_fallback_prod_for_item(it)
-            prod = _with_snapshot_prices(prod or {}, it)
+            prod = historical_product_for_item(prod, it)
 
             item = dict(it)
             item["_prod"] = prod or {}
-            if item_index < len(shown_items) and isinstance(shown_items[item_index], dict):
-                item["_history_shown_snapshot"] = deepcopy(shown_items[item_index])
-                item["_history_display_snapshot"] = deepcopy(
-                    getattr(self, "_history_display_snapshot", None) or {}
-                )
-
             # La categoria del renglon sigue siendo la guardada en el historico.
 
             # ✅ refrescar categoría actual (si existe)
@@ -709,9 +654,10 @@ class SistemaCotizaciones(
             item.setdefault("descuento_pct", 0.0)
             item.setdefault("descuento_monto", 0.0)
 
-            # Al reabrir desde histórico, conservamos el snapshot guardado.
+            # Abrir una cotización crea una nueva edición con precios vigentes.
+            # La regeneración del PDF lee por separado items_shown desde SQLite.
+            self.model._recalc_price_for_qty(item)
             self.model.add_item(item, preserve_snapshot=True)
-            item["_history_base_snapshot"] = history_base_snapshot(item)
 
     @staticmethod
     def _parse_int(value, default: int = 0) -> int:

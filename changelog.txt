@@ -3,6 +3,7 @@ Versión: 2.0.24
 Fecha: 2026-08-12
 
 Resumen
+- Se corrigieron los precios al abrir una cotización histórica para editarla: ahora usa los niveles vigentes del catálogo sin alterar la regeneración histórica del PDF.
 - Se corrigió el envío de cotizaciones cuyo contexto de empresa llega con el alias `LCDP`, normalizándolo al nombre aceptado por EFAPI.
 - Al instalar esta versión, cada Cotizador vuelve a intentar una sola vez las cotizaciones creadas y fallidas durante los tres días anteriores.
 - Se corrigió la duplicación de cotizaciones históricas creadas antes del contexto multidominio para usar de forma segura el único ámbito vigente del mismo país.
@@ -67,11 +68,13 @@ Modo offline y catálogos manuales
 - [Mejora] El inicio reconoce bases recientes sin metadatos y aplica únicamente las migraciones necesarias.
 
 Cotizaciones, correlativos e histórico
+- [Fix] Al abrir una cotización para editarla se conservan `p_max`, `p_min` y `p_oferta` vigentes; el precio seleccionado anteriormente ya no se copia sobre los tres niveles.
+- [Compatibilidad] Regenerar el PDF o reimprimir continúa usando los precios y totales históricos guardados en SQLite.
 - [Nuevo] Cada cotización guarda su contexto completo: país, empresa, moneda base, usuario y código de cotizador.
 - [Nuevo] Sin conexión se asigna un correlativo provisional visible en el histórico; al recuperar la conexión se reserva el correlativo central y se actualizan histórico, PDF y ticket.
 - [Mejora] El envío de presupuestos usa el contexto histórico de la cotización y no la configuración de otra ventana o ámbito.
 - [Mejora] Reabrir, duplicar, regenerar, reimprimir o crear etiquetas utiliza el país, empresa, tienda, moneda y plantilla originales.
-- [Mejora] El histórico conserva precios, cantidades, factor de unidad/peso, moneda mostrada, tasa y totales originales para evitar recálculos involuntarios.
+- [Mejora] El histórico conserva precios, cantidades, factor de unidad/peso, moneda mostrada, tasa y totales originales para regenerar sus salidas sin recálculos involuntarios.
 - [Mejora] Los métodos de pago de Paraguay y de los países con reglas de Perú/Bolivia se guardan y restauran correctamente.
 - [Mejora] El histórico puede mostrar cotizaciones de varios países y adapta el encabezado del documento y la columna de pago al contexto.
 - [Fix] No se permite abrir una cotización con el caché de otra identidad ni con un país/empresa que ya no esté autorizado.
