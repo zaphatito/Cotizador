@@ -57,7 +57,11 @@ from ..config import (
 )
 from ..catalog_server_sync import CatalogStockSyncService
 from ..catalog_context import CatalogScope, QuoteContext
-from ..quote_context_service import build_quote_context
+from ..quote_context_service import (
+    build_quote_context,
+    resolve_historical_quote_owner,
+    resolve_historical_quote_scope,
+)
 from ..country_rules import country_code_for, normalize_country_name, uses_peru_business_rules
 from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits
 from ..server_identity import (
@@ -2514,14 +2518,12 @@ class QuoteHistoryWindow(QMainWindow):
             df_productos = self.catalog_manager.df_productos
             df_presentaciones = self.catalog_manager.df_presentaciones
             if bool(getattr(self.catalog_manager, "server_mode", False)):
-                historical_scope = CatalogScope(
-                    country_code=country_code_for(
-                        header.get("country_code"),
-                        default=COUNTRY_CODE,
-                    ),
-                    company_type=str(header.get("company_type") or "").strip(),
+                historical_scope, used_legacy_scope = resolve_historical_quote_scope(
+                    header,
+                    tuple(self.catalog_manager.available_scopes or ()),
+                    default_country_code=COUNTRY_CODE,
                 )
-                if historical_scope not in tuple(self.catalog_manager.available_scopes or ()):
+                if historical_scope is None:
                     QMessageBox.warning(
                         self,
                         "Catálogo histórico no autorizado",
@@ -2529,19 +2531,21 @@ class QuoteHistoryWindow(QMainWindow):
                         "a este usuario/cotizador.",
                     )
                     return
+                if used_legacy_scope:
+                    log.info(
+                        "Cotización legacy abierta con el único scope autorizado "
+                        "del país: %s",
+                        historical_scope.group_key,
+                    )
 
                 current_username = str(self.catalog_manager.username or "").strip()
                 current_id = str(self.catalog_manager.id_cotizador or "").strip()
-                historical_username = str(header.get("cotizador_username") or "").strip()
-                historical_id = str(header.get("id_cotizador") or "").strip()
-                different_owner = (
-                    historical_username
-                    and historical_username.casefold() != current_username.casefold()
-                ) or (
-                    historical_id
-                    and historical_id.casefold() != current_id.casefold()
+                historical_owner = resolve_historical_quote_owner(
+                    header,
+                    current_username=current_username,
+                    current_id_cotizador=current_id,
                 )
-                if different_owner:
+                if historical_owner is None:
                     QMessageBox.warning(
                         self,
                         "Caché de otro cotizador",
@@ -2549,9 +2553,10 @@ class QuoteHistoryWindow(QMainWindow):
                         "identidad de usuario/cotizador.",
                     )
                     return
+                historical_username, historical_id = historical_owner
 
-                # Duplicar/reabrir conserva el país+empresa histórico. El scope
-                # no se vuelve a elegir mientras se reconstruye esa cotización.
+                # El scope exacto se conserva; una fila legacy solo puede usar
+                # el único scope autorizado del mismo país.
                 scope = historical_scope
                 df_productos, df_presentaciones = self.catalog_manager.catalog_for_scope(scope)
                 ok, reason = validate_products_catalog_df(df_productos)

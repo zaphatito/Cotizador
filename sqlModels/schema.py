@@ -5,7 +5,7 @@ from .catalog_cache_repo import CATALOG_CACHE_DDL
 from .offline_catalogs_repo import OFFLINE_CATALOG_DDL
 
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 DDL = [
     # =========================
@@ -301,6 +301,7 @@ DDL = [
         base_currency TEXT NOT NULL DEFAULT '',
         cotizador_username TEXT NOT NULL DEFAULT '',
         id_cotizador TEXT NOT NULL DEFAULT '',
+        quote_context_version INTEGER NOT NULL DEFAULT 0,
         quote_no TEXT NOT NULL,
         quote_no_status TEXT NOT NULL DEFAULT 'confirmed',
         created_at TEXT NOT NULL,

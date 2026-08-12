@@ -894,6 +894,11 @@ def insert_quote(
     has_base_currency = _has_column(con, "quotes", "base_currency")
     has_cotizador_username = _has_column(con, "quotes", "cotizador_username")
     has_id_cotizador = _has_column(con, "quotes", "id_cotizador")
+    has_quote_context_version = _has_column(
+        con,
+        "quotes",
+        "quote_context_version",
+    )
     has_id_cliente = _has_column(con, "quotes", "id_cliente")
     has_price_id = _has_column(con, "quote_items", "id_precioventa")
     has_tipo_prod = _has_column(con, "quote_items", "tipo_prod")
@@ -931,6 +936,7 @@ def insert_quote(
         (has_base_currency, "base_currency", base_currency_resolved),
         (has_cotizador_username, "cotizador_username", cotizador_username_resolved),
         (has_id_cotizador, "id_cotizador", id_cotizador_resolved),
+        (has_quote_context_version, "quote_context_version", 1),
     ):
         if has_column:
             cols.append(column)

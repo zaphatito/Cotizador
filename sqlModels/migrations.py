@@ -2370,6 +2370,26 @@ def mig_43(con: sqlite3.Connection) -> None:
     )
 
 
+def mig_44(con: sqlite3.Connection) -> None:
+    """v44: distingue contexto histórico inferido de contexto explícito."""
+    if not _table_exists(con, "quotes"):
+        return
+
+    _add_column_if_missing(
+        con,
+        "quotes",
+        "quote_context_version",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    con.execute(
+        """
+        UPDATE quotes
+        SET quote_context_version = 0
+        WHERE quote_context_version IS NULL OR quote_context_version NOT IN (0, 1)
+        """
+    )
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2414,4 +2434,5 @@ MIGRATIONS: dict[int, callable] = {
     41: mig_41,
     42: mig_42,
     43: mig_43,
+    44: mig_44,
 }
