@@ -73,10 +73,20 @@ _VERIFICATION_STALE_AFTER = datetime.timedelta(days=3)
 _QUOTE_NO_CONFIRMED = "confirmed"
 _QUOTE_NO_PROVISIONAL = "provisional"
 _QUOTE_NO_RESERVED = "reserved"
+_API_COMPANY_ALIASES = {
+    "LCDP": "LA CASA DEL PERFUME",
+}
 
 
 class PresupuestoApiError(RuntimeError):
     pass
+
+
+def _normalize_company_type_for_api(value: Any) -> str:
+    company = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    if not company:
+        return "LA CASA DEL PERFUME"
+    return _API_COMPANY_ALIASES.get(company, company)
 
 
 def _ensure_schema_once(con) -> None:
@@ -936,7 +946,7 @@ def build_presupuesto_payload(
             "pago": (str(metodo_pago or "").strip() or None),
             "estado": (str(estado or "").strip() or None),
             "cod_pais": str(cod_pais or ""),
-            "empresa": str(empresa or ""),
+            "empresa": _normalize_company_type_for_api(empresa),
             "telemarketing": bool(telemarketing),
             "chatbot": bool(chatbot),
             "cantidad_items": int(len(presupuesto_items)),

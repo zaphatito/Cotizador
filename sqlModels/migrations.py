@@ -2390,6 +2390,39 @@ def mig_44(con: sqlite3.Connection) -> None:
     )
 
 
+def mig_45(con: sqlite3.Connection) -> None:
+    """v45: habilita una vez el reenvio de fallos de las ultimas 72 horas."""
+    if not _table_exists(con, "quotes"):
+        return
+    if not (
+        _column_exists(con, "quotes", "api_sent_at")
+        and _column_exists(con, "quotes", "api_error_at")
+        and _column_exists(con, "quotes", "created_at")
+    ):
+        return
+
+    con.execute(
+        """
+        UPDATE quotes
+        SET api_sent_at = NULL,
+            api_error_at = NULL
+        WHERE deleted_at IS NULL
+          AND TRIM(COALESCE(api_error_at, '')) <> ''
+          AND datetime(created_at) IS NOT NULL
+          AND datetime(created_at) >= datetime('now', 'localtime', '-3 days')
+          AND datetime(created_at) <= datetime('now', 'localtime')
+          AND datetime(api_error_at) IS NOT NULL
+          AND datetime(api_error_at) >= datetime('now', 'localtime', '-3 days')
+          AND datetime(api_error_at) <= datetime('now', 'localtime')
+          AND EXISTS (
+              SELECT 1
+              FROM quote_items qi
+              WHERE qi.quote_id = quotes.id
+          )
+        """
+    )
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2435,4 +2468,5 @@ MIGRATIONS: dict[int, callable] = {
     42: mig_42,
     43: mig_43,
     44: mig_44,
+    45: mig_45,
 }
