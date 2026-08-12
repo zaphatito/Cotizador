@@ -1,13 +1,18 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.22
+Versión: 2.0.23
 Fecha: 2026-08-12
 
 Resumen
-- Se restablece como versión 2.0.22 el conjunto funcional de 2.0.20, posterior al hotfix temporal 2.0.21.
+- Se corrigió la duplicación de cotizaciones históricas creadas antes del contexto multidominio para usar de forma segura el único ámbito vigente del mismo país.
 - Se incorporó la clasificación de origen Web frente a Orgánico, guardada por cotización y sincronizada con EFAPI.
 - Se rediseñó el manejo de catálogos e inventario para trabajar con varios países, empresas y tiendas, con actualización periódica del stock desde el servidor.
 - Se agregó un modo completamente offline, catálogos locales independientes y correlativos provisionales que se regularizan cuando vuelve la conexión.
 - Se añadió soporte funcional para Bolivia, junto con sus reglas de documentos, moneda, precios, plantillas, PDF y ticket.
+
+Cotizaciones históricas
+- [Fix] Las cotizaciones legacy ya no quedan bloqueadas al duplicarlas por una empresa o identidad que fue inferida al migrar el histórico.
+- [Compatibilidad] Cuando existe un único ámbito autorizado del mismo país, la cotización legacy utiliza ese catálogo sin mezclar países ni empresas.
+- [Seguridad] Si hay varios ámbitos posibles no se elige uno de forma ambigua; las cotizaciones nuevas mantienen la validación estricta de país, empresa y usuario/cotizador.
 
 Origen Web / Orgánico
 - [Nuevo] La pantalla de creación incluye un selector exclusivo «Web / Orgánico» con el mismo estilo visual del selector de pago de Paraguay.
@@ -80,11 +85,13 @@ API, sincronización y asistente
 - [Fix] Las acciones automáticas ya no cruzan catálogos, monedas ni identidades al cambiar de ámbito.
 
 Base de datos local
-- El esquema SQLite se actualiza automáticamente de la versión 42 a la 43 para agregar el origen Web/Orgánico mediante el indicador chatbot.
-- Esta versión también incluye las migraciones 37 a 42 del cambio anterior: caché remoto, correlativos provisionales, contexto histórico, factor por renglón, renombre de telemarketing y catálogos offline.
+- El esquema SQLite se actualiza automáticamente de la versión 43 a la 44 para distinguir el contexto histórico inferido del contexto explícito de las cotizaciones nuevas.
+- Las cotizaciones existentes se conservan como legacy y las nuevas quedan marcadas con contexto explícito; no se eliminan ni recalculan datos del histórico.
+- Esta versión también incluye las migraciones 37 a 43: caché remoto, correlativos provisionales, contexto histórico, factor por renglón, renombre de telemarketing, catálogos offline y origen Web/Orgánico.
 - Las migraciones son incrementales y conservan la base, la configuración, los clientes, el histórico y los catálogos existentes.
 
 Compatibilidad y despliegue
+- La corrección de cotizaciones históricas se aplica localmente y no requiere un endpoint ni una migración adicional en EFAPI.
 - EFAPI debe actualizarse junto con esta versión y aplicar `database/1.5.11.sql` antes de recibir cotizaciones con el campo chatbot.
 - El campo chatbot es independiente de telemarketing: telemarketing identifica el tipo de instalación; chatbot usa `true` para Web y `false` para Orgánico en cada cotización.
 - Las versiones actuales de LCDP en las ramas prod, kardex y caja pueden continuar enviando ventas sin el campo nuevo; EFAPI acepta ese contrato anterior.
