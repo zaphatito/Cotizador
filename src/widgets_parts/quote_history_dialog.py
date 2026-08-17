@@ -75,9 +75,10 @@ from ..ui_theme import (
 from ..label_printing_service import (
     ZEBRA_PORT_DEFAULT,
     ZplEtiqueta,
-    discover_zebra_printers,
     generar_zpl_lote,
+    imprimir_zpl_usb,
     imprimir_zpl_red,
+    resolve_label_printer,
     resolve_logo_path_for_company,
 )
 
@@ -352,6 +353,8 @@ class HistoryConfigDialog(QDialog):
         self.ed_username.setPlaceholderText("Nombre de usuario")
         self.chk_telemarketing = QCheckBox("Este equipo es telemarketing")
         self.chk_telemarketing.setToolTip("Marcado: sí. Desmarcado: no.")
+        self.ed_label_printer_name = QLineEdit()
+        self.ed_label_printer_name.setPlaceholderText("Opcional: nombre instalado en Windows")
         self.ed_label_printer_ip = QLineEdit()
         self.ed_label_printer_ip.setPlaceholderText("Ej: 192.168.1.50")
         self.ed_label_printer_port = QLineEdit()
@@ -365,8 +368,9 @@ class HistoryConfigDialog(QDialog):
         form.addRow("Empresa predeterminada:", self.cmb_company_type)
         form.addRow("Nombre de usuario:", self.ed_username)
         form.addRow("Telemarketing:", self.chk_telemarketing)
-        form.addRow("IP impresora etiquetas:", self.ed_label_printer_ip)
-        form.addRow("Puerto impresora etiquetas:", self.ed_label_printer_port)
+        form.addRow("Nombre Zebra USB (opcional):", self.ed_label_printer_name)
+        form.addRow("IP Zebra ZD230 (red):", self.ed_label_printer_ip)
+        form.addRow("Puerto Zebra ZD230:", self.ed_label_printer_port)
 
         row_actions = QHBoxLayout()
         self.btn_detect_label_printer = QPushButton("Detectar impresora")
@@ -535,6 +539,7 @@ class HistoryConfigDialog(QDialog):
         company_type = str(APP_CONFIG.get("company_type", ALLOWED_COMPANY_TYPES[0])).strip().upper()
         username = str(APP_CONFIG.get("username", "")).strip()
         telemarketing = self._parse_optional_bool(APP_CONFIG.get("telemarketing"))
+        label_printer_name = ""
         label_printer_ip = "192.168.1.50"
         label_printer_port = "9100"
 
@@ -555,6 +560,7 @@ class HistoryConfigDialog(QDialog):
             telemarketing = self._parse_optional_bool(
                 get_setting(con, "telemarketing", telemarketing_default)
             )
+            label_printer_name = get_setting(con, "label_printer_name", label_printer_name).strip()
             label_printer_ip = get_setting(con, "label_printer_ip", label_printer_ip).strip() or "192.168.1.50"
             label_printer_port = get_setting(con, "label_printer_port", label_printer_port).strip() or "9100"
         except Exception:
@@ -575,6 +581,7 @@ class HistoryConfigDialog(QDialog):
         self.chk_telemarketing.setCheckState(
             self._optional_bool_to_check_state(telemarketing)
         )
+        self.ed_label_printer_name.setText(label_printer_name)
         self.ed_label_printer_ip.setText(label_printer_ip)
         self.ed_label_printer_port.setText(label_printer_port)
 
@@ -660,6 +667,7 @@ class HistoryConfigDialog(QDialog):
         store_id = str(self.ed_store_id.text() or "").strip().upper()
         company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
         username = str(self.ed_username.text() or "").strip()
+        label_printer_name = str(self.ed_label_printer_name.text() or "").strip()
         telemarketing = self._check_state_to_optional_bool(
             self.chk_telemarketing.checkState()
         )
@@ -714,6 +722,7 @@ class HistoryConfigDialog(QDialog):
                     "telemarketing",
                     "1" if telemarketing else "0",
                 )
+                set_setting(con, "label_printer_name", label_printer_name)
                 set_setting(con, "label_printer_ip", label_printer_ip)
                 set_setting(con, "label_printer_port", str(port_num))
                 api_vals = build_api_settings(
@@ -767,6 +776,7 @@ class HistoryConfigDialog(QDialog):
         )
 
     def _save_local_device_values(self) -> None:
+        label_printer_name = str(self.ed_label_printer_name.text() or "").strip()
         label_printer_ip = str(self.ed_label_printer_ip.text() or "").strip()
         label_printer_port = str(self.ed_label_printer_port.text() or "").strip()
         if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", label_printer_ip):
@@ -784,6 +794,7 @@ class HistoryConfigDialog(QDialog):
         try:
             con = connect(resolve_db_path())
             with tx(con):
+                set_setting(con, "label_printer_name", label_printer_name)
                 set_setting(con, "label_printer_ip", label_printer_ip)
                 set_setting(con, "label_printer_port", str(port_num))
         except Exception as exc:
@@ -802,6 +813,7 @@ class HistoryConfigDialog(QDialog):
         )
 
     def _detect_label_printer(self) -> None:
+        ip = str(self.ed_label_printer_ip.text() or "").strip() or "192.168.1.50"
         port_txt = str(self.ed_label_printer_port.text() or "").strip() or str(ZEBRA_PORT_DEFAULT)
         if not re.fullmatch(r"\d{1,5}", port_txt):
             QMessageBox.warning(self, "Validación", "Puerto de impresora inválido.")
@@ -813,17 +825,12 @@ class HistoryConfigDialog(QDialog):
 
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            printers = discover_zebra_printers(port=port, timeout=0.45, max_workers=96, stop_after_first=True)
+            connection, printer = resolve_label_printer(
+                ip,
+                port,
+                preferred_usb_name=str(self.ed_label_printer_name.text() or "").strip(),
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"No se pudo detectar la impresora:\n{e}")
-            return
-        finally:
-            try:
-                QApplication.restoreOverrideCursor()
-            except Exception:
-                pass
-
-        if not printers:
             QMessageBox.warning(
                 self,
                 "Impresora no encontrada",
@@ -831,23 +838,34 @@ class HistoryConfigDialog(QDialog):
                 "Verifica que este conectada a la misma red y que el puerto sea 9100.",
             )
             return
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
 
-        printer = printers[0]
-        self.ed_label_printer_ip.setText(printer.ip)
-        self.ed_label_printer_port.setText(str(printer.port))
-        detail = f"IP: {printer.ip}:{printer.port}\nContador: {printer.counter}"
-        if printer.product_name:
-            detail += f"\nModelo: {printer.product_name}"
+        if connection == "usb":
+            self.ed_label_printer_name.setText(printer.name)
+            detail = f"Nombre Windows: {printer.name}"
+            title = "Impresora USB detectada"
+        else:
+            self.ed_label_printer_ip.setText(printer.ip)
+            self.ed_label_printer_port.setText(str(printer.port))
+            detail = f"IP: {printer.ip}:{printer.port}\nContador: {printer.counter}"
+            if printer.product_name:
+                detail += f"\nModelo: {printer.product_name}"
+            title = "Impresora de red detectada"
         QMessageBox.information(
             self,
-            "Impresora detectada",
+            title,
             f"Se detecto la impresora de etiquetas.\n\n{detail}\n\nGuarda los valores para dejarla fija.",
         )
 
     def _test_label_printer(self) -> None:
-        ip = str(self.ed_label_printer_ip.text() or "").strip()
-        port_txt = str(self.ed_label_printer_port.text() or "").strip()
+        printer_name = str(self.ed_label_printer_name.text() or "").strip()
         company_type = str(self.cmb_company_type.currentText() or "").strip().upper()
+        ip = str(self.ed_label_printer_ip.text() or "").strip() or "192.168.1.50"
+        port_txt = str(self.ed_label_printer_port.text() or "").strip() or str(ZEBRA_PORT_DEFAULT)
 
         if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", ip):
             QMessageBox.warning(self, "Validación", "IP de impresora inválida.")
@@ -861,6 +879,11 @@ class HistoryConfigDialog(QDialog):
             return
 
         try:
+            connection, printer = resolve_label_printer(
+                ip,
+                port,
+                preferred_usb_name=printer_name,
+            )
             logo = resolve_logo_path_for_company(company_type)
             zpl = generar_zpl_lote(
                 [
@@ -873,14 +896,26 @@ class HistoryConfigDialog(QDialog):
                 ],
                 logo_path=logo,
             )
-            imprimir_zpl_red(zpl, ip=ip, port=port)
+            if connection == "usb":
+                printer_name = printer.name
+                self.ed_label_printer_name.setText(printer_name)
+                imprimir_zpl_usb(zpl, printer_name=printer_name)
+                message = f"Etiqueta de prueba enviada al spooler de Windows: {printer_name}."
+            else:
+                imprimir_zpl_red(zpl, ip=printer.ip, port=printer.port)
+                message = f"Etiqueta de prueba enviada a {printer.ip}:{printer.port}."
             QMessageBox.information(
                 self,
                 "Prueba enviada",
-                f"Etiqueta de prueba enviada a {ip}:{port}.",
+                message,
             )
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"No se pudo enviar la prueba:\n{e}")
+            QMessageBox.warning(
+                self,
+                "Impresora no encontrada",
+                "No se detecto una Zebra respondiendo en la red local.\n"
+                "Verifica que este conectada a la misma red y que el puerto sea 9100.",
+            )
 
 
 class QuotesTableModel(QAbstractTableModel):

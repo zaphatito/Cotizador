@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,6 +72,159 @@ class ZebraPrinterDiscovery:
     counter: int
     product_name: str = ""
     status: str = ""
+
+
+@dataclass(frozen=True)
+class WindowsPrinterDiscovery:
+    name: str
+    server_name: str = ""
+
+
+class _PrinterInfo4W(ctypes.Structure):
+    _fields_ = [
+        ("pPrinterName", ctypes.c_wchar_p),
+        ("pServerName", ctypes.c_wchar_p),
+        ("Attributes", ctypes.c_uint32),
+    ]
+
+
+class _DocInfo1W(ctypes.Structure):
+    _fields_ = [
+        ("pDocName", ctypes.c_wchar_p),
+        ("pOutputFile", ctypes.c_wchar_p),
+        ("pDatatype", ctypes.c_wchar_p),
+    ]
+
+
+def _load_windows_spooler():
+    if os.name != "nt":
+        raise RuntimeError("La impresion USB solo esta disponible en Windows.")
+    return ctypes.WinDLL("winspool.drv", use_last_error=True)
+
+
+def list_windows_printers() -> list[WindowsPrinterDiscovery]:
+    spooler = _load_windows_spooler()
+    enum_printers = spooler.EnumPrintersW
+    enum_printers.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    enum_printers.restype = ctypes.c_int
+
+    flags = 0x00000002 | 0x00000004  # PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS
+    needed = ctypes.c_uint32(0)
+    returned = ctypes.c_uint32(0)
+    enum_printers(flags, None, 4, None, 0, ctypes.byref(needed), ctypes.byref(returned))
+    if not needed.value:
+        return []
+
+    buffer = (ctypes.c_ubyte * needed.value)()
+    if not enum_printers(
+        flags,
+        None,
+        4,
+        buffer,
+        needed.value,
+        ctypes.byref(needed),
+        ctypes.byref(returned),
+    ):
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "No se pudieron enumerar las impresoras de Windows.")
+
+    records = ctypes.cast(
+        buffer,
+        ctypes.POINTER(_PrinterInfo4W * returned.value),
+    ).contents
+    printers: list[WindowsPrinterDiscovery] = []
+    seen: set[str] = set()
+    for record in records:
+        name = str(record.pPrinterName or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        printers.append(
+            WindowsPrinterDiscovery(
+                name=name,
+                server_name=str(record.pServerName or "").strip(),
+            )
+        )
+    return sorted(printers, key=lambda item: item.name.casefold())
+
+
+def imprimir_zpl_usb(zpl: str, printer_name: str, *, document_name: str = "Cotizador etiquetas") -> None:
+    name = str(printer_name or "").strip()
+    if not name:
+        raise ValueError("Debe indicar el nombre de la impresora Zebra instalada en Windows.")
+
+    spooler = _load_windows_spooler()
+    handle = ctypes.c_void_p()
+    spooler.OpenPrinterW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    spooler.OpenPrinterW.restype = ctypes.c_int
+    if not spooler.OpenPrinterW(name, ctypes.byref(handle), None):
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, f"No se pudo abrir la impresora Windows: {name}")
+
+    started_doc = False
+    started_page = False
+    try:
+        spooler.StartDocPrinterW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+        spooler.StartDocPrinterW.restype = ctypes.c_uint32
+        spooler.EndDocPrinter.argtypes = [ctypes.c_void_p]
+        spooler.EndDocPrinter.restype = ctypes.c_int
+        spooler.StartPagePrinter.argtypes = [ctypes.c_void_p]
+        spooler.StartPagePrinter.restype = ctypes.c_int
+        spooler.EndPagePrinter.argtypes = [ctypes.c_void_p]
+        spooler.EndPagePrinter.restype = ctypes.c_int
+        spooler.WritePrinter.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        spooler.WritePrinter.restype = ctypes.c_int
+        spooler.ClosePrinter.argtypes = [ctypes.c_void_p]
+        spooler.ClosePrinter.restype = ctypes.c_int
+
+        doc_info = _DocInfo1W(
+            str(document_name or "Cotizador etiquetas"),
+            None,
+            "RAW",
+        )
+        if not spooler.StartDocPrinterW(handle, 1, ctypes.byref(doc_info)):
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "No se pudo iniciar el trabajo de impresion USB.")
+        started_doc = True
+
+        if not spooler.StartPagePrinter(handle):
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "No se pudo iniciar la pagina de impresion USB.")
+        started_page = True
+
+        payload = (zpl or "").encode("utf-8")
+        data = ctypes.create_string_buffer(payload)
+        written = ctypes.c_uint32(0)
+        if not spooler.WritePrinter(handle, data, len(payload), ctypes.byref(written)):
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "No se pudo enviar ZPL al spooler de Windows.")
+        if written.value != len(payload):
+            raise RuntimeError(
+                f"El spooler de Windows acepto {written.value} de {len(payload)} bytes de ZPL."
+            )
+    finally:
+        if started_page:
+            spooler.EndPagePrinter(handle)
+        if started_doc:
+            spooler.EndDocPrinter(handle)
+        spooler.ClosePrinter(handle)
 
 
 def _clean_zpl_text(texto: str) -> str:
@@ -425,6 +580,54 @@ def resolve_zebra_printer(
     if found:
         return found[0]
     raise RuntimeError("No se detecto una impresora Zebra en la red local.")
+
+
+def resolve_zebra_usb_printer(preferred_name: str = "") -> WindowsPrinterDiscovery:
+    printers = list_windows_printers()
+    preferred = str(preferred_name or "").strip().casefold()
+    if preferred:
+        exact = [printer for printer in printers if printer.name.casefold() == preferred]
+        if exact:
+            return exact[0]
+
+    candidates = [
+        printer
+        for printer in printers
+        if any(
+            marker in printer.name.casefold()
+            for marker in ("zebra", "zd220", "zdesigner")
+        )
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        names = ", ".join(printer.name for printer in candidates)
+        raise RuntimeError(
+            "Se encontraron varias impresoras Zebra en Windows. "
+            f"Configura el nombre USB en el sistema: {names}"
+        )
+    raise RuntimeError("No se encontro una impresora Zebra ZD220 instalada en Windows.")
+
+
+def resolve_label_printer(
+    network_ip: str,
+    network_port: int,
+    *,
+    preferred_usb_name: str = "",
+) -> tuple[str, ZebraPrinterDiscovery | WindowsPrinterDiscovery]:
+    network_error = ""
+    try:
+        return "network", resolve_zebra_printer(network_ip, network_port)
+    except Exception as exc:
+        network_error = str(exc)
+
+    try:
+        return "usb", resolve_zebra_usb_printer(preferred_usb_name)
+    except Exception as exc:
+        raise RuntimeError(
+            "No se encontro una impresora de etiquetas disponible. "
+            f"Red: {network_error}. USB: {exc}"
+        ) from exc
 
 
 def wait_for_label_print_confirmation(

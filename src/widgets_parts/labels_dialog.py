@@ -40,7 +40,8 @@ from ..label_printing_service import (
     generar_zpl_lote,
     imprimir_zpl_red,
     labels_prefix,
-    resolve_zebra_printer,
+    imprimir_zpl_usb,
+    resolve_label_printer,
     resolve_logo_path_for_company,
     wait_for_label_print_confirmation,
 )
@@ -385,6 +386,35 @@ class LabelsDialog(QDialog):
         except Exception as exc:
             log.warning("No se pudo confirmar/registrar impresion de etiquetas quote=%s: %s", self._quote_code, exc)
 
+    def _record_usb_print(
+        self,
+        *,
+        labels: list[ZplEtiqueta],
+        printer_name: str,
+        requested_labels: int,
+    ) -> None:
+        try:
+            printer_label = " ".join(str(printer_name or "").strip().split())
+            send_kwargs = {
+                "quote_code": self._quote_code,
+                "labels": labels_prefix(labels, requested_labels),
+                "requested_labels": int(requested_labels),
+                "printed_labels": int(requested_labels),
+                "printer_status": f"USB spooler aceptado: {printer_label}"[:120],
+            }
+            if self._quote_context is not None:
+                send_kwargs["context"] = self._quote_context
+            sync_result = record_and_send_label_print_log(**send_kwargs)
+            if str(sync_result.get("status") or "").strip().upper() != "SENT":
+                self._wake_background_api_sync()
+        except Exception as exc:
+            log.warning(
+                "No se pudo registrar impresion USB quote=%s impresora=%s: %s",
+                self._quote_code,
+                str(printer_name or "").strip(),
+                exc,
+            )
+
     def _on_print_clicked(self) -> None:
         try:
             labels: list[ZplEtiqueta] = []
@@ -406,6 +436,7 @@ class LabelsDialog(QDialog):
             con = None
             try:
                 con = connect(resolve_db_path())
+                printer_name = str(get_setting(con, "label_printer_name", "") or "").strip()
                 ip = str(get_setting(con, "label_printer_ip", ZEBRA_IP_DEFAULT) or ZEBRA_IP_DEFAULT).strip()
                 port_raw = get_setting(con, "label_printer_port", str(ZEBRA_PORT_DEFAULT))
                 port = int(str(port_raw or ZEBRA_PORT_DEFAULT).strip())
@@ -419,8 +450,13 @@ class LabelsDialog(QDialog):
             logo_path = resolve_logo_path_for_company(self._company_type)
             zpl = generar_zpl_lote(labels, logo_path=logo_path)
             requested_labels = count_requested_labels(labels)
+
             try:
-                discovery = resolve_zebra_printer(ip, port)
+                connection, printer = resolve_label_printer(
+                    ip,
+                    port,
+                    preferred_usb_name=printer_name,
+                )
             except Exception as exc:
                 QMessageBox.warning(
                     self,
@@ -430,6 +466,29 @@ class LabelsDialog(QDialog):
                     f"Detalle: {exc}",
                 )
                 return
+
+            if connection == "usb":
+                printer_name = printer.name
+                imprimir_zpl_usb(zpl, printer_name=printer_name)
+                threading.Thread(
+                    target=self._record_usb_print,
+                    kwargs={
+                        "labels": list(labels),
+                        "printer_name": printer_name,
+                        "requested_labels": int(requested_labels),
+                    },
+                    name="label-usb-print-log",
+                    daemon=True,
+                ).start()
+                QMessageBox.information(
+                    self,
+                    "Etiquetas",
+                    f"Impresion enviada al spooler de Windows: {printer_name}.\n"
+                    "El registro se enviara en segundo plano.",
+                )
+                return
+
+            discovery = printer
 
             if discovery.ip != ip:
                 ip = discovery.ip
