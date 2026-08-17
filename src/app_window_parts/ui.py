@@ -265,7 +265,7 @@ class UiMixin:
         addr = str(payload.get("direccion") or "-").strip() or "-"
         mail = str(payload.get("email") or "-").strip() or "-"
         doc_type = str(payload.get("tipo_documento") or "").strip().upper()
-        if not doc_type and getattr(self, "country_code", COUNTRY_CODE) == "BO":
+        if not doc_type and getattr(self, "country_code", COUNTRY_CODE) in ("BO", "BOL"):
             doc_type = self._resolve_doc_type_for_form(doc, "")
         if not doc_type and "-" in doc:
             pref, body = doc.split("-", 1)

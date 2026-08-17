@@ -8,6 +8,24 @@ from .config import currency_for_country
 from .country_rules import country_code_for
 
 
+def _rules_country_code(value: Any, *, default: str = "PY") -> str:
+    """Devuelve el código interno de reglas sin mutar el scope del API."""
+    raw = str(value or "").strip().upper()
+    if raw == "BOL":
+        return "BO"
+    return country_code_for(raw, default=default)
+
+
+def _company_identity(value: Any) -> str:
+    company = str(value or "").strip().upper()
+    return {
+        "LCDP": "LCDP",
+        "LA CASA DEL PERFUME": "LCDP",
+        "EF": "EF PERFUMES",
+        "EF PERFUMES": "EF PERFUMES",
+    }.get(company, company)
+
+
 def is_legacy_quote_context(header: Mapping[str, Any]) -> bool:
     try:
         return int(header.get("quote_context_version") or 0) < 1
@@ -17,7 +35,7 @@ def is_legacy_quote_context(header: Mapping[str, Any]) -> bool:
 
 def build_quote_context(catalog_manager: Any, scope: CatalogScope) -> QuoteContext:
     record = dict(catalog_manager.scope_record(scope) or {})
-    country_code = country_code_for(scope.country_code)
+    country_code = _rules_country_code(scope.country_code)
     country_currency = str(currency_for_country(country_code) or "").strip().upper()
     manifest_currency = str(
         record.get("base_currency") or record.get("currency") or ""
@@ -30,9 +48,10 @@ def build_quote_context(catalog_manager: Any, scope: CatalogScope) -> QuoteConte
         if country_code == "BO"
         else (manifest_currency or country_currency)
     )
-    return QuoteContext.from_values(
-        country_code=country_code,
-        company_type=scope.company_type,
+    # El scope debe conservar exactamente los identificadores autorizados por
+    # el API (por ejemplo BOL/LCDP). Solo la moneda usa el código interno BO.
+    return QuoteContext(
+        scope=scope,
         username=str(getattr(catalog_manager, "username", "") or ""),
         id_cotizador=str(getattr(catalog_manager, "id_cotizador", "") or ""),
         base_currency=base_currency,
@@ -55,18 +74,24 @@ def resolve_historical_quote_scope(
     scopes = tuple(
         scope for scope in available_scopes if isinstance(scope, CatalogScope)
     )
-    country_code = country_code_for(
+    country_code = _rules_country_code(
         header.get("country_code"),
         default=default_country_code,
     )
     company_type = str(header.get("company_type") or "").strip()
 
     if company_type:
-        historical_scope = CatalogScope(
-            country_code=country_code,
-            company_type=company_type,
+        historical_scope = next(
+            (
+                scope
+                for scope in scopes
+                if _rules_country_code(scope.country_code) == country_code
+                and _company_identity(scope.company_type)
+                == _company_identity(company_type)
+            ),
+            None,
         )
-        if historical_scope in scopes:
+        if historical_scope is not None:
             return historical_scope, False
 
     if not is_legacy_quote_context(header):
@@ -75,7 +100,7 @@ def resolve_historical_quote_scope(
     country_scopes = tuple(
         scope
         for scope in scopes
-        if country_code_for(scope.country_code) == country_code
+        if _rules_country_code(scope.country_code) == country_code
     )
     if len(country_scopes) == 1:
         return country_scopes[0], True

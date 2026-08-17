@@ -114,7 +114,7 @@ def _country_code_norm(country_code: Any) -> str:
     c = str(country_code or "").strip().upper()
     if c in ("PE", "PERU"):
         return "PE"
-    if c in ("BO", "BOLIVIA"):
+    if c in ("BO", "BOL", "BOLIVIA"):
         return "BO"
     if c in ("VE", "VENEZUELA"):
         return "VE"

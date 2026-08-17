@@ -512,6 +512,11 @@ def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str,
 
 
 def _country_code_from_country(country: str) -> str:
+    raw = str(country or "").strip().upper()
+    if raw in ("BO", "BOL", "BOLIVIA"):
+        # El contrato de EFAPI usa BOL; BO queda reservado para reglas
+        # internas de compatibilidad del cotizador.
+        return "BOL"
     return country_code_for(country, default="PY")
 
 

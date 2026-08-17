@@ -19,6 +19,9 @@ _COUNTRY_ALIASES: dict[str, str] = {
     "VE": "VENEZUELA",
     "VENEZUELA": "VENEZUELA",
     "BO": "BOLIVIA",
+    # El API/catálogo remoto usa BOL como código válido. Se conserva BO como
+    # alias interno compatible con las reglas históricas del cotizador.
+    "BOL": "BOLIVIA",
     "BOLIVIA": "BOLIVIA",
 }
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 import re
 
-_NEW_CODE_RE = re.compile(r"^\s*([A-Za-z]{2})-([A-Za-z0-9]+)-(\d+)\s*$")
-_LEGACY_CODE_RE = re.compile(r"^\s*([A-Za-z]{2})-(\d+)\s*$")
+_NEW_CODE_RE = re.compile(r"^\s*([A-Za-z]{2,3})-([A-Za-z0-9]+)-(\d+)\s*$")
+_LEGACY_CODE_RE = re.compile(r"^\s*([A-Za-z]{2,3})-(\d+)\s*$")
 _ONLY_DIGITS_RE = re.compile(r"\d+")
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -16,6 +16,8 @@ def normalize_country_code(country_code: str | None, *, default: str = "PY") -> 
     s = _NON_ALNUM_RE.sub("", s)
     if not s:
         return default
+    if s in ("BOL", "BOLIVIA"):
+        return "BOL"
     if len(s) >= 2:
         return s[:2]
     return default

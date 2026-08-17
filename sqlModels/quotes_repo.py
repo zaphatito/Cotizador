@@ -130,7 +130,7 @@ _DOC_TYPES_BY_COUNTRY_CODE, _DOC_BODY_BY_COUNTRY_AND_TYPE, _DOC_VALIDATION_PAD_B
 
 def _country_code_norm(country_code: Any) -> str:
     c = str(country_code or "").strip().upper()
-    if c in ("BO", "BOLIVIA"):
+    if c in ("BO", "BOL", "BOLIVIA"):
         return "BO"
     if c in ("PE", "PERU"):
         return "PE"

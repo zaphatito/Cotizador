@@ -32,13 +32,15 @@ def _norm_country(value: str | None) -> str:
         return "PERU"
     if v in ("VE", "VENEZUELA"):
         return "VENEZUELA"
-    if v in ("BO", "BOLIVIA"):
+    if v in ("BO", "BOL", "BOLIVIA"):
         return "BOLIVIA"
     return _DEFAULT_COUNTRY
 
 
 def _norm_company(value: str | None) -> str:
     v = str(value or "").strip().upper()
+    if v in ("LCDP", "LA CASA DEL PERFUME"):
+        return "LA CASA DEL PERFUME"
     if v == "EF PERFUMES":
         return "EF PERFUMES"
     return _DEFAULT_COMPANY

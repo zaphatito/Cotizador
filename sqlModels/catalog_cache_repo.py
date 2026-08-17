@@ -193,6 +193,7 @@ CATALOG_CACHE_DDL: tuple[str, ...] = (
 
 _BASE_CURRENCY_BY_COUNTRY = {
     "BO": "BOB",
+    "BOL": "BOB",
     "PE": "PEN",
     "PY": "PYG",
     "VE": "USD",
@@ -834,7 +835,7 @@ def _normalize_group(raw: Any) -> dict[str, Any]:
     # La moneda base de Bolivia es BOB. Algunos manifiestos antiguos enviaban
     # PYG para este grupo, lo que hacía que el cotizador mostrara guaraníes aun
     # cuando el país seleccionado era Bolivia.
-    if country_code == "BO":
+    if country_code in ("BO", "BOL"):
         base_currency = country_currency
     else:
         base_currency = manifest_currency or country_currency

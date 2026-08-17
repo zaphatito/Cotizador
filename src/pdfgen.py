@@ -258,17 +258,18 @@ def _country() -> str:
         return "PY"
 
 def _template_path_for_country(cc: str) -> str | None:
+    asset_code = "BO" if str(cc or "").strip().upper() == "BOL" else cc
     return (
-        resolve_country_asset(f"TEMPLATE_{cc}.jpg", cc)
-        or resolve_country_asset(f"TEMPLATE_{cc}.png", cc)
-        or resolve_country_asset(f"TEMPLATE_{cc}.jpeg", cc)
-        or resolve_template_path(cc)
+        resolve_country_asset(f"TEMPLATE_{asset_code}.jpg", asset_code)
+        or resolve_country_asset(f"TEMPLATE_{asset_code}.png", asset_code)
+        or resolve_country_asset(f"TEMPLATE_{asset_code}.jpeg", asset_code)
+        or resolve_template_path(asset_code)
     )
 
 
 def _pdf_profile_for_country(cc: str) -> dict:
     country_code = str(cc or "").strip().upper()
-    if country_code == "BO":
+    if country_code in {"BO", "BOL"}:
         return PDF_PROFILE_BO
     if country_code in {"PE", "PY"}:
         return PDF_PROFILE_ALT
@@ -276,7 +277,7 @@ def _pdf_profile_for_country(cc: str) -> dict:
 
 
 def _document_label_for_pdf(cc: str, datos: dict) -> str:
-    if str(cc or "").strip().upper() == "BO":
+    if str(cc or "").strip().upper() in {"BO", "BOL"}:
         doc_type = str(datos.get("tipo_documento") or "").strip().upper()
         return {
             "CI": "CI",
