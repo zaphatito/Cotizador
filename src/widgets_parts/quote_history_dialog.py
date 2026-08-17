@@ -1056,7 +1056,7 @@ class QuotesTableModel(QAbstractTableModel):
         quote_no_status = str(row.get("quote_no_status") or "confirmed").strip().lower()
         row["_cache_quote_no_is_provisional"] = quote_no_status in ("provisional", "reserved")
         row["_cache_quote_no_txt"] = (
-            f"{qn_text} (offline)"
+            f"{qn_text} (Enviando)"
             if row["_cache_quote_no_is_provisional"]
             else qn_text
         )
