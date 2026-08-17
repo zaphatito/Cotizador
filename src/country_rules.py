@@ -19,8 +19,8 @@ _COUNTRY_ALIASES: dict[str, str] = {
     "VE": "VENEZUELA",
     "VENEZUELA": "VENEZUELA",
     "BO": "BOLIVIA",
-    # El API/catálogo remoto usa BOL como código válido. Se conserva BO como
-    # alias interno compatible con las reglas históricas del cotizador.
+    # BOL es la referencia local histórica del cotizador; BO es el código
+    # que usa el API para identificar el país.
     "BOL": "BOLIVIA",
     "BOLIVIA": "BOLIVIA",
 }
@@ -76,6 +76,13 @@ def country_code_for(value: Any, *, default: str = "PY") -> str:
     if raw in _COUNTRY_CODES.values():
         return raw
     return str(default or "PY").strip().upper() or "PY"
+
+
+def local_country_code_for(value: Any, *, default: str = "PY") -> str:
+    """Devuelve el código usado por las referencias locales del cotizador."""
+    if normalize_country_name(value) == "BOLIVIA":
+        return "BOL"
+    return country_code_for(value, default=default)
 
 
 def uses_peru_business_rules(value: Any) -> bool:

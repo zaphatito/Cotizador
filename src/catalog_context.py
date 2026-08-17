@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .country_rules import local_country_code_for
+
 
 def _required_upper(value: Any, *, field: str) -> str:
     normalized = str(value or "").strip().upper()
@@ -28,7 +30,7 @@ class CatalogScope:
 
     @property
     def label(self) -> str:
-        return f"{self.country_code} - {self.company_type}"
+        return f"{local_country_code_for(self.country_code)} - {self.company_type}"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "CatalogScope":

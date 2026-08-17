@@ -1525,15 +1525,25 @@ def reserve_next_quote_code(
         raise PresupuestoApiError("El API no devolvio un correlativo de cotizacion valido.")
 
     quote_no = str(int(quote_digits)).zfill(7)
+    raw_response_code = str(quote_code_raw or "").strip().upper()
+    response_code_match = re.match(
+        r"^([A-Z]{2,3})-([A-Z0-9]+)-\d+$", raw_response_code
+    )
+    if response_code_match:
+        response_country = str(response_code_match.group(1) or "").upper()
+        response_store = str(response_code_match.group(2) or "").upper()
+        allowed_countries = {str(cod_pais or "").upper()}
+        if str(cod_pais or "").upper() == "BO":
+            allowed_countries.add("BOL")
+        if response_country not in allowed_countries or response_store != id_cotizador:
+            raise PresupuestoApiError("El código devuelto por el API no corresponde a la tienda configurada.")
+
     quote_code = format_quote_code(
         country_code=cod_pais,
         store_id=id_cotizador,
         quote_no=quote_code_raw or quote_no,
         width=7,
     )
-    expected_prefix = f"{cod_pais}-{id_cotizador}-"
-    if not quote_code.upper().startswith(expected_prefix):
-        raise PresupuestoApiError("El código devuelto por el API no corresponde a la tienda configurada.")
     if int(extract_quote_digits(quote_code) or 0) != int(quote_no):
         raise PresupuestoApiError("El código y el correlativo devueltos por el API no coinciden.")
 
@@ -2344,8 +2354,11 @@ def send_quote_from_history_once(
 
         raw_quote_code = str(header.get("quote_no") or "").strip()
         store_id_for_code = str(quote_context.id_cotizador or "").strip().upper()
-        api_quote_code = _normalize_quote_code_for_api(raw_quote_code, store_id=store_id_for_code)
-        if not api_quote_code:
+        validated_quote_code = _normalize_quote_code_for_api(
+            raw_quote_code,
+            store_id=store_id_for_code,
+        )
+        if not validated_quote_code:
             return {
                 "quote_id": qid,
                 "status": "SKIPPED_INVALID_CODE",
@@ -2372,7 +2385,9 @@ def send_quote_from_history_once(
 
     try:
         result = login_and_send_presupuesto(
-            quote_code=api_quote_code,
+            # El API recibe BO en cod_pais, pero debe conservar BOL-... en
+            # codigo cuando esa es la referencia local de la cotizacion.
+            quote_code=raw_quote_code,
             fecha_emision_ts=fecha_emision_ts,
             cliente=str(header.get("cliente") or ""),
             cedula=str(header.get("cedula") or ""),
