@@ -552,9 +552,8 @@ def _require_functional_username(
 def _country_code_from_country(country: str) -> str:
     raw = str(country or "").strip().upper()
     if raw in ("BO", "BOL", "BOLIVIA"):
-        # El contrato de EFAPI usa BOL; BO queda reservado para reglas
-        # internas de compatibilidad del cotizador.
-        return "BOL"
+        # El API de EFAPI identifica Bolivia como BO (id_pais=4).
+        return "BO"
     return country_code_for(country, default="PY")
 
 
