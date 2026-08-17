@@ -44,7 +44,7 @@ from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import is_py_unit_product
 from ..quote_code import extract_quote_digits, format_quote_code
-from ..server_identity import has_complete_server_identity
+from ..server_identity import has_complete_server_identity, validate_functional_identity
 from ..utils import nz
 from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
@@ -497,7 +497,9 @@ def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str,
         telemarketing = False
     else:
         user_id, api_username, country, company_type, store_id = identity  # type: ignore[misc]
-        app_username = str(api_username or "")
+        # Una identidad legacy sin campo separado para el usuario funcional no
+        # debe reutilizar la credencial técnica del API como ``user``.
+        app_username = ""
         telemarketing = False
 
     return (
@@ -509,6 +511,42 @@ def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str,
         str(store_id or ""),
         bool(telemarketing),
     )
+
+
+def _require_functional_username(
+    app_username: Any,
+    api_username: Any = "",
+    id_cotizador: Any = None,
+) -> str:
+    """Devuelve el usuario del cotizador, nunca la credencial técnica del API."""
+
+    functional = str(app_username or "").strip()
+    technical = str(api_username or "").strip()
+    try:
+        if not functional and technical:
+            raise ValueError(
+                "Falta el usuario funcional; no se usará la credencial técnica del API."
+            )
+        if id_cotizador is not None:
+            validate_functional_identity(
+                functional,
+                id_cotizador,
+                api_username=technical,
+            )
+        elif not functional:
+            raise ValueError(
+                "El usuario funcional y el ID del cotizador son obligatorios para sincronizar."
+            )
+        elif (
+            (technical and functional.casefold() == technical.casefold())
+            or re.fullmatch(r"cotizador-[a-z]{2}-\d+", functional, re.IGNORECASE)
+        ):
+            raise ValueError(
+                "La configuración usa la cuenta técnica del API como usuario funcional."
+            )
+    except ValueError as exc:
+        raise PresupuestoApiError(str(exc)) from exc
+    return functional
 
 
 def _country_code_from_country(country: str) -> str:
@@ -736,8 +774,12 @@ def _build_cotizador_verification_payload(
 ) -> dict[str, Any]:
     pid = _load_or_create_cotizador_pid()
     cod_pais = _country_code_from_country(country)
-    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
     id_cotizador = _extract_id_cotizador("", store_id)
+    user_for_payload = _require_functional_username(
+        app_username,
+        api_username,
+        id_cotizador,
+    )
     hostname = str(socket.gethostname() or "").strip()
     usuario_sistema = str(getpass.getuser() or "").strip()
     sistema_operativo = str(platform.platform() or "").strip()
@@ -934,7 +976,11 @@ def build_presupuesto_payload(
     adjuntos: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     presupuesto_items = _build_presupuesto_items(items_base, cod_pais=cod_pais)
-    user_for_payload = str(app_username or "").strip() or str(user_api or "").strip()
+    user_for_payload = _require_functional_username(
+        app_username,
+        user_api,
+        id_cotizador,
+    )
     fecha_emision_num = _normalize_issue_timestamp(fecha_emision_ts)
     return {
         "presupuesto": {
@@ -1048,7 +1094,12 @@ def build_label_print_log_payload(
         _load_api_identity() if context is None else _load_api_identity(context)
     )
     cod_pais = _country_code_from_country(country)
-    user_for_payload = str(app_username or "").strip() or str(api_username or "").strip()
+    id_cotizador = _extract_id_cotizador(quote_code, store_id)
+    user_for_payload = _require_functional_username(
+        app_username,
+        api_username,
+        id_cotizador,
+    )
     items = _normalize_label_print_items(labels)
     requested_total = int(requested_labels) if requested_labels is not None else sum(int(x.get("cantidad") or 0) for x in items)
     printed_total = int(printed_labels) if printed_labels is not None else int(requested_total)
@@ -1060,7 +1111,7 @@ def build_label_print_log_payload(
         key_parts = [
             str(cod_pais or "").strip().upper(),
             str(quote_code or "").strip().upper(),
-            str(_extract_id_cotizador(quote_code, store_id) or "").strip(),
+            str(id_cotizador or "").strip(),
             printer_ip_norm,
             str(printer_port_norm or ""),
             str(int(printer_counter_before)),
@@ -1073,7 +1124,7 @@ def build_label_print_log_payload(
         "codigo": str(quote_code or "").strip().upper(),
         "quote_code": str(quote_code or "").strip().upper(),
         "printed_at": str(printed_at or _now_iso_local()).strip(),
-        "id_cotizador": _extract_id_cotizador(quote_code, store_id),
+        "id_cotizador": id_cotizador,
         "user": user_for_payload,
         "api_username": str(api_username or "").strip(),
         "id_user_api": int(user_id),
@@ -1417,8 +1468,12 @@ def reserve_next_quote_code(
         _load_api_identity() if context is None else _load_api_identity(context)
     )
     cod_pais = _country_code_from_country(country)
-    user_for_payload = str(app_username or "").strip()
     store_id = str(store_id or "").strip().upper()
+    user_for_payload = _require_functional_username(
+        app_username,
+        api_username,
+        store_id,
+    )
     if not store_id or not user_for_payload:
         raise PresupuestoApiError(
             "Falta configurar el código de tienda y el nombre de usuario antes de generar cotizaciones."
@@ -1611,6 +1666,11 @@ def fetch_country_clients_page(
         raise PresupuestoApiError(
             "La consulta de clientes del servidor está deshabilitada en modo offline."
         )
+    user_for_payload = _require_functional_username(
+        app_username,
+        api_username,
+        store_id,
+    )
     requested_country = _country_code_from_country(str(country_code or country))
     scope = getattr(context, "scope", None)
     raw_context_country = str(getattr(scope, "country_code", "") or "").strip()
@@ -1647,7 +1707,7 @@ def fetch_country_clients_page(
             API_CASE_GET_COUNTRY_CLIENTS,
             json_data={
                 "cod_pais": str(cod_pais or ""),
-                "user": str(app_username or "").strip(),
+                "user": user_for_payload,
                 "id_cotizador": str(store_id or "").strip(),
                 "search_text": str(search_text or "").strip(),
                 "limit": max(1, min(500, int(limit))),

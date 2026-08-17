@@ -7,6 +7,7 @@ import uuid
 from sqlModels.api_identity import resolve_api_identity
 
 from ..country_rules import country_code_for
+from ..server_identity import validate_functional_identity
 
 from .cases import API_CASE_VERIFY_COTIZADOR
 from .controller import post
@@ -68,6 +69,12 @@ def _build_legacy_verification_request(
     country = country_code_for(
         default_scope.get("country_code") or default_scope.get("country")
     )
+    _api_user_id, api_username = resolve_api_identity(country, company)
+    if username.casefold() == str(api_username or "").strip().casefold():
+        raise ValueError(
+            "La configuración inicial usa la cuenta técnica del API como "
+            "usuario funcional del cotizador. Corrija el campo Usuario."
+        )
     telemarketing = identity.get("telemarketing")
 
     request = {
@@ -142,6 +149,10 @@ def build_bootstrap_request(
         raise ValueError("identity.username es obligatorio.")
     if not str(identity.get("id_cotizador") or "").strip():
         raise ValueError("identity.id_cotizador es obligatorio.")
+    validate_functional_identity(
+        identity.get("username"),
+        identity.get("id_cotizador"),
+    )
     if not isinstance(payload.get("assignments"), list) or not payload["assignments"]:
         raise ValueError("assignments debe contener al menos un país/empresa/tienda.")
     return {**payload, "pid": clean_pid}
@@ -164,10 +175,15 @@ def bootstrap_initial_configuration(
 
     # Preflight puro: una identidad offline/incompleta falla antes de importar
     # autenticación, generar PID o ejecutar cualquier operación de red.
-    validated_payload = build_bootstrap_request(
-        setup_payload,
-        pid="preflight-local-only",
-    )
+    try:
+        validated_payload = build_bootstrap_request(
+            setup_payload,
+            pid="preflight-local-only",
+        )
+    except ValueError as exc:
+        if "cuenta técnica" not in str(exc).casefold():
+            raise
+        raise InitialConfigurationApiError(str(exc)) from exc
     default_scope = _mapping(
         validated_payload.get("default_scope"),
         label="default_scope",

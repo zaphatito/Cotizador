@@ -16,6 +16,7 @@ from .remote_configuration import (
     apply_remote_configuration,
     extract_remote_configuration,
 )
+from .server_identity import validate_functional_identity
 
 log = get_logger(__name__)
 _DETACHED_THREADS: dict[QThread, QObject] = {}
@@ -62,10 +63,10 @@ def sync_catalog_stock_once(
 ) -> CatalogSyncOutcome:
     """Ejecuta un ciclo de red sin mantener una conexion SQLite abierta."""
 
-    clean_username = str(username or "").strip()
-    clean_cotizador = str(id_cotizador or "").strip()
-    if not clean_username or not clean_cotizador:
-        raise ValueError("Se requieren username e id_cotizador para sincronizar el catalogo.")
+    clean_username, clean_cotizador = validate_functional_identity(
+        username,
+        id_cotizador,
+    )
 
     from sqlModels import catalog_cache_repo
 

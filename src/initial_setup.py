@@ -19,6 +19,7 @@ from .dataio import _leer_inventario_xlsx
 from .presentations import cargar_presentaciones, cargar_presentaciones_prod
 from .server_identity import (
     has_complete_server_identity,
+    validate_functional_identity,
     validate_server_identity_pair,
 )
 
@@ -129,6 +130,8 @@ def normalize_seed_config(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "El ID del cotizador debe tener 1-64 letras, números, punto, guion o guion bajo."
         )
+    if server_mode:
+        validate_functional_identity(username, id_cotizador)
 
     listing_type = _text(raw.get("listing_type") or "AMBOS").upper()
     if listing_type not in _LISTING_TYPES:
