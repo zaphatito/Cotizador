@@ -1,4 +1,4 @@
-; ---------------------------------------------
+﻿; ---------------------------------------------
 ; Instalador para Sistema de Cotizaciones
 ; ---------------------------------------------
 #define MyAppName    "Sistema de Cotizaciones"
@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.0.28"
+#define MyAppVersion "2.0.29"
 
 ; === Manifiesto publico para el updater (GitHub Releases) ===
 #define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
@@ -36,7 +36,7 @@ OutputDir={#ProjectRoot}\Output
 Compression=lzma
 SolidCompression=yes
 
-; Instalación NUEVA: mostrar todas las páginas
+; InstalaciÃ³n NUEVA: mostrar todas las pÃ¡ginas
 DisableWelcomePage=no
 DisableDirPage=yes
 DisableProgramGroupPage=no
@@ -63,7 +63,7 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "{userdocs}\Cotizaciones\data";           Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\cotizaciones";   Flags: uninsneveruninstall
 Name: "{userdocs}\Cotizaciones\logs";           Flags: uninsneveruninstall
-; Backups de configuración (para upgrades)
+; Backups de configuraciÃ³n (para upgrades)
 Name: "{localappdata}\Cotizaciones\config_backups"; Flags: uninsneveruninstall
 
 ; DB vive en {app}\sqlModels
@@ -85,7 +85,7 @@ Name: "{group}\Carpeta de Logs"; Filename: "{cmd}"; Parameters: "/c start """" "
 Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
 
 [Run]
-; Solo ejecutar al finalizar si es instalación NUEVA (no reinstalación silenciosa)
+; Solo ejecutar al finalizar si es instalaciÃ³n NUEVA (no reinstalaciÃ³n silenciosa)
 Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstallAndConfigured
 
 [Code]
@@ -358,12 +358,12 @@ var Exe, Params: string; RC: Integer;
 begin
   if not GetUninstallCmd(Exe, Params) then
   begin
-    MsgBox('No se encontró el desinstalador previo.', mbError, MB_OK);
+    MsgBox('No se encontrÃ³ el desinstalador previo.', mbError, MB_OK);
     Exit;
   end;
 
-  { Lanzar desinstalación NORMAL (no silent) para que el usuario vea progreso.
-    (Tu uninstaller ya no mostrará opciones porque lo vamos a simplificar.) }
+  { Lanzar desinstalaciÃ³n NORMAL (no silent) para que el usuario vea progreso.
+    (Tu uninstaller ya no mostrarÃ¡ opciones porque lo vamos a simplificar.) }
   Exec(Exe, Params, '', SW_SHOW, ewWaitUntilTerminated, RC);
 end;
 
@@ -390,10 +390,10 @@ begin
   lbl.AutoSize := False;
   lbl.WordWrap := True;
   lbl.Caption :=
-    'Ya existe una instalación de "' + '{#MyAppName}' + '".' + #13#10 +
-    '¿Qué deseas hacer?' + #13#10#13#10 +
-    '• Reparar/Actualizar: reinstala archivos sin tocar "' + '{userdocs}\Cotizaciones' + '".' + #13#10 +
-    '• Desinstalar: elimina la app y la configuración (mantiene "' + '{userdocs}\Cotizaciones' + '").';
+    'Ya existe una instalaciÃ³n de "' + '{#MyAppName}' + '".' + #13#10 +
+    'Â¿QuÃ© deseas hacer?' + #13#10#13#10 +
+    'â€¢ Reparar/Actualizar: reinstala archivos sin tocar "' + '{userdocs}\Cotizaciones' + '".' + #13#10 +
+    'â€¢ Desinstalar: elimina la app y la configuraciÃ³n (mantiene "' + '{userdocs}\Cotizaciones' + '").';
 
   btnRepair := TNewButton.Create(F);
   btnRepair.Parent := F;
@@ -601,8 +601,8 @@ begin
 
   PaisPage := CreateCustomPage(
     wpSelectDir,
-    'País por defecto',
-    'Elija el país predeterminado. Luego podrá asignar múltiples países, empresas y tiendas.'
+    'PaÃ­s por defecto',
+    'Elija el paÃ­s predeterminado. Luego podrÃ¡ asignar mÃºltiples paÃ­ses, empresas y tiendas.'
   );
   cbPais := TNewComboBox.Create(PaisPage.Surface);
   cbPais.Parent := PaisPage.Surface;
@@ -611,7 +611,7 @@ begin
   cbPais.Width := PaisPage.SurfaceWidth;
   cbPais.Style := csDropDownList;
   cbPais.Items.Add('Paraguay');
-  cbPais.Items.Add('Perú');
+  cbPais.Items.Add('PerÃº');
   cbPais.Items.Add('Venezuela');
   cbPais.Items.Add('Bolivia');
   cbPais.ItemIndex := 0;
@@ -619,7 +619,7 @@ begin
   ListadoPage := CreateCustomPage(
     PaisPage.ID,
     'Tipo de listado',
-    'Elija qué tipo de ítems mostrará el listado/autocompletar.'
+    'Elija quÃ© tipo de Ã­tems mostrarÃ¡ el listado/autocompletar.'
   );
   cbListado := TNewComboBox.Create(ListadoPage.Surface);
   cbListado.Parent := ListadoPage.Surface;
@@ -643,7 +643,7 @@ begin
   EmpresaPage := CreateCustomPage(
     ListadoPage.ID,
     'Tipo de empresa',
-    'Elija la empresa predeterminada. Luego podrá agregar todas las empresas autorizadas.'
+    'Elija la empresa predeterminada. Luego podrÃ¡ agregar todas las empresas autorizadas.'
   );
   cbEmpresa := TNewComboBox.Create(EmpresaPage.Surface);
   cbEmpresa.Parent := EmpresaPage.Surface;
@@ -658,7 +658,7 @@ begin
   TiendaUsuarioPage := CreateCustomPage(
     EmpresaPage.ID,
     'Cotizador y usuario',
-    'Ingrese ambos datos para usar el servidor, o deje ambos vacíos para trabajar offline sin enviar datos.'
+    'Ingrese ambos datos para usar el servidor, o deje ambos vacÃ­os para trabajar offline sin enviar datos.'
   );
   lblStoreId := TNewStaticText.Create(TiendaUsuarioPage.Surface);
   lblStoreId.Parent := TiendaUsuarioPage.Surface;
@@ -888,6 +888,7 @@ begin
 
   end;
 end;
+
 
 
 
