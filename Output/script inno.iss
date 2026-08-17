@@ -1,4 +1,4 @@
-﻿; ---------------------------------------------
+; ---------------------------------------------
 ; Instalador para Sistema de Cotizaciones
 ; ---------------------------------------------
 #define MyAppName    "Sistema de Cotizaciones"
@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.0.25"
+#define MyAppVersion "2.0.26"
 
 ; === Manifiesto publico para el updater (GitHub Releases) ===
 #define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
@@ -888,6 +888,7 @@ begin
 
   end;
 end;
+
 
 
 

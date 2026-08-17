@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.25
-Fecha: 2026-08-12
+Versión: 2.0.26
+Fecha: 2026-08-17
 
 Resumen
 - Se corrigieron los precios al abrir una cotización histórica para editarla: ahora usa los niveles vigentes del catálogo sin alterar la regeneración histórica del PDF.
