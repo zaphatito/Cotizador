@@ -20,6 +20,7 @@ CURRENCIES: dict[str, CurrencySpec] = {
     "ARS": CurrencySpec("ARS", "AR$", "AR$"),
     "PYG": CurrencySpec("PYG", "₲", "Gs."),
     "VES": CurrencySpec("VES", "Bs.", "Bs."),
+    # El símbolo oficial del boliviano es Bs (sin punto).
     "BOB": CurrencySpec("BOB", "Bs", "Bs"),
     "BRL": CurrencySpec("BRL", "R$", "R$"),
 }

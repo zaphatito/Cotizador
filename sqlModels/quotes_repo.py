@@ -43,10 +43,9 @@ TIPO_PROD_PRES = "pres"
 _DOC_RULES_BY_COUNTRY_CODE: dict[str, list[dict[str, Any]]] = {
     "BO": [
         {"id": 1, "nombre": "CI", "descripcion": "CEDULA DE IDENTIDAD", "regex_validation": r"^[0-9]{5,12}(?:-[0-9A-Z]{1,5})?$", "validation_pad": 0},
-        {"id": 2, "nombre": "CIE", "descripcion": "CEDULA DE IDENTIDAD DE EXTRANJERO", "regex_validation": r"^(?:E-)?[0-9]{5,12}(?:-[0-9A-Z]{1,5})?$", "validation_pad": 0},
-        {"id": 3, "nombre": "PAS", "descripcion": "PASAPORTE", "regex_validation": r"^[0-9A-Z][0-9A-Z./-]{0,19}$", "validation_pad": 0},
-        {"id": 4, "nombre": "OD", "descripcion": "OTRO DOCUMENTO DE IDENTIDAD", "regex_validation": r"^[ -~]{1,20}$", "validation_pad": 0},
-        {"id": 5, "nombre": "NIT", "descripcion": "NUMERO DE IDENTIFICACION TRIBUTARIA", "regex_validation": r"^[0-9]{5,13}$", "validation_pad": 0},
+        {"id": 2, "nombre": "NIT", "descripcion": "NUMERO DE IDENTIFICACION TRIBUTARIA", "regex_validation": r"^[0-9]{5,13}$", "validation_pad": 0},
+        {"id": 3, "nombre": "CEX", "descripcion": "CEDULA DE IDENTIDAD DE EXTRANJERO", "regex_validation": r"^(?:E-)?[0-9]{5,12}(?:-[0-9A-Z]{1,5})?$", "validation_pad": 0},
+        {"id": 4, "nombre": "P", "descripcion": "PASAPORTE", "regex_validation": r"^[0-9A-Z][0-9A-Z./-]{0,19}$", "validation_pad": 0},
     ],
     "VE": [
         {"id": 1, "nombre": "V", "descripcion": "CEDULA DE IDENTIDAD", "regex_validation": r"^[0-9]+$", "validation_pad": 0},
@@ -70,12 +69,13 @@ _DOC_RULES_BY_COUNTRY_CODE: dict[str, list[dict[str, Any]]] = {
 
 _DOC_TYPE_ALIASES: dict[str, dict[str, str]] = {
     "BO": {
-        "CE": "CIE",
-        "CEX": "CIE",
-        "P": "PAS",
-        "PASAPORTE": "PAS",
-        "OTRO": "OD",
-        "ODI": "OD",
+        "CE": "CEX",
+        "CIE": "CEX",
+        "PAS": "P",
+        "PASAPORTE": "P",
+        "OTRO": "CEX",
+        "OD": "CEX",
+        "ODI": "CEX",
         "RUC": "NIT",
         "CEDULA": "CI",
     },
@@ -238,10 +238,10 @@ def normalize_document_identity_key(
         return ""
 
     if cc == "BO":
-        # En CIE, E- identifica el formato del documento extranjero; el tipo ya
-        # conserva esa información. Para PAS/OD, en cambio, una letra inicial
+        # En CEX, E- identifica el formato del documento extranjero; el tipo ya
+        # conserva esa información. Para P, en cambio, una letra inicial
         # sí forma parte del número y nunca debe eliminarse.
-        if doc_type == "CIE" and s.startswith("E-"):
+        if doc_type == "CEX" and s.startswith("E-"):
             s = s[2:]
     else:
         # Compatibilidad con documentos legacy guardados como <TIPO>-<NUMERO>.
@@ -502,10 +502,10 @@ def infer_tipo_documento_from_doc(
         return ""
     compact = re.sub(r"\s+", "", raw)
 
-    # En Bolivia, E- es parte del formato oficial de la CIE, no un alias de
+    # En Bolivia, E- es parte del formato oficial de CEX, no un alias de
     # tipo documental que deba descartarse como los prefijos legacy.
-    if cod == "BO" and compact.startswith("E-") and _doc_body_matches(cod, "CIE", compact):
-        return "CIE"
+    if cod == "BO" and compact.startswith("E-") and _doc_body_matches(cod, "CEX", compact):
+        return "CEX"
 
     # Legacy con prefijo: <TIPO>-<NUMERO>
     m = re.match(r"^([A-Z]+)-(.+)$", compact)

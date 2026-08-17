@@ -67,7 +67,7 @@ _DOC_REGEX_BY_COUNTRY: dict[str, str] = {
     "PERU": doc_regex_for_country("PE"),
     # PY: CI/RUC/P
     "PARAGUAY": doc_regex_for_country("PY"),
-    # BO: CI/CIE/PAS/OD/NIT (tipos de documento SIAT)
+    # BO: CI/NIT/CEX/P
     "BOLIVIA": doc_regex_for_country("BO"),
 }
 
@@ -82,7 +82,7 @@ _DOC_HINT_BY_COUNTRY: dict[str, str] = {
     "VENEZUELA": "V/E/J/P/G",
     "PERU": "DNI/CE/RUC/P",
     "PARAGUAY": "CI/RUC/P",
-    "BOLIVIA": "CI/CIE/PAS/OD/NIT",
+    "BOLIVIA": "CI/NIT/CEX/P",
 }
 
 _PHONE_HINT_BY_COUNTRY: dict[str, str] = {

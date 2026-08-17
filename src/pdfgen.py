@@ -280,10 +280,13 @@ def _document_label_for_pdf(cc: str, datos: dict) -> str:
         doc_type = str(datos.get("tipo_documento") or "").strip().upper()
         return {
             "CI": "CI",
-            "CIE": "CIE",
+            "CEX": "CEX",
+            "P": "Pasaporte",
+            "NIT": "NIT",
+            # Compatibilidad con cotizaciones antiguas.
+            "CIE": "CEX",
             "PAS": "Pasaporte",
             "OD": "Otro doc.",
-            "NIT": "NIT",
         }.get(doc_type, "Documento")
     return id_label_for_country(normalize_country_name(cc, default=APP_COUNTRY))
 
