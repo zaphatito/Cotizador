@@ -24,7 +24,23 @@ deben configurarse ambos.
 
 ## 1. Registro inicial idempotente
 
-Endpoint nuevo:
+### Compatibilidad con el API actual
+
+El cotizador no depende de un endpoint nuevo para registrar una instalación.
+Durante la instalación valida y conserva localmente la configuración completa,
+pero registra la identidad en el endpoint existente:
+
+`POST /service/db/verifyCotizador`
+
+La solicitud enviada al API se limita a `pid`, `id_cotizador`, `user`, país,
+empresa, telemarketing y metadatos de firma compatibles con el contrato
+legacy. Esto permite volver a ingresar usuarios sin modificar `efapi`.
+
+El contrato de bootstrap completo descrito debajo queda como referencia para
+una futura implementación del servidor; la versión actual del cotizador no
+invoca esa ruta.
+
+Contrato futuro del endpoint nuevo:
 
 `POST /service/db/bootstrapCotizadorConfiguration`
 

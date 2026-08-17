@@ -6,7 +6,9 @@ import uuid
 
 from sqlModels.api_identity import resolve_api_identity
 
-from .cases import API_CASE_BOOTSTRAP_COTIZADOR_CONFIGURATION
+from ..country_rules import country_code_for
+
+from .cases import API_CASE_VERIFY_COTIZADOR
 from .controller import post
 
 
@@ -47,6 +49,75 @@ def _extract_response(value: Any) -> dict[str, Any]:
     return payload
 
 
+def _build_legacy_verification_request(
+    setup_payload: Mapping[str, Any],
+    *,
+    pid: str,
+) -> dict[str, Any]:
+    """Adapta la instalación al endpoint de registro que ya existe en EFAPI."""
+
+    payload = _mapping(setup_payload, label="La configuración inicial")
+    identity = _mapping(payload.get("identity"), label="identity")
+    default_scope = _mapping(
+        payload.get("default_scope"),
+        label="default_scope",
+    )
+    username = str(identity.get("username") or "").strip()
+    id_cotizador = str(identity.get("id_cotizador") or "").strip()
+    company = str(default_scope.get("company_type") or "").strip()
+    country = country_code_for(
+        default_scope.get("country_code") or default_scope.get("country")
+    )
+    telemarketing = identity.get("telemarketing")
+
+    request = {
+        "pid": str(pid or "").strip(),
+        "id_cotizador": id_cotizador,
+        "user": username,
+        "cod_pais": country,
+        "empresa": company,
+        "datos_firma": {
+            "source": "initial_setup_legacy_compatibility",
+            "schema_version": payload.get("schema_version"),
+            "idempotency_key": payload.get("idempotency_key"),
+            "default_scope": dict(default_scope),
+        },
+    }
+    if telemarketing is not None:
+        request["telemarketing"] = bool(telemarketing)
+    return request
+
+
+def _extract_allowed(value: Any) -> bool | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload = dict(value)
+    allowed = payload.get("allowed")
+    if isinstance(allowed, bool):
+        return allowed
+    for key in ("data", "result", "payload"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            found = _extract_allowed(nested)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_message(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    payload = dict(value)
+    message = str(payload.get("message") or "").strip()
+    if message:
+        return message
+    for key in ("data", "result", "payload"):
+        nested_message = _extract_message(payload.get(key))
+        if nested_message:
+            return nested_message
+    return ""
+
+
 def build_bootstrap_request(
     setup_payload: Mapping[str, Any],
     *,
@@ -84,6 +155,13 @@ def bootstrap_initial_configuration(
     login_fn: Callable[..., tuple[str, Any]] | None = None,
     pid_fn: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
+    """Registra una instalación usando el endpoint legacy aún disponible.
+
+    El payload completo de instalación se valida localmente, pero EFAPI recibe
+    únicamente la identidad y metadatos compatibles con ``verifyCotizador``.
+    Así se conserva el alta de usuarios sin depender de un endpoint nuevo.
+    """
+
     # Preflight puro: una identidad offline/incompleta falla antes de importar
     # autenticación, generar PID o ejecutar cualquier operación de red.
     validated_payload = build_bootstrap_request(
@@ -113,25 +191,42 @@ def bootstrap_initial_configuration(
             validated_payload,
             pid=pid_fn(),
         )
+        legacy_request = _build_legacy_verification_request(
+            request_payload,
+            pid=str(request_payload["pid"]),
+        )
         token, _login_response = login_fn(
             user_id=int(user_id),
             api_username=str(api_username),
             login_password=login_password,
         )
         response = post_fn(
-            API_CASE_BOOTSTRAP_COTIZADOR_CONFIGURATION,
-            json_data=request_payload,
+            API_CASE_VERIFY_COTIZADOR,
+            json_data=legacy_request,
             headers=_auth_headers(token),
-            expected_status=(200, 201),
-            timeout=120,
+            expected_status=(200, 201, 202),
+            timeout=12,
             raise_for_status=True,
         )
     except Exception as exc:
         raise InitialConfigurationApiError(str(exc)) from exc
 
-    result = _extract_response(getattr(response, "data", None))
-    result.setdefault("http_status", int(getattr(response, "status_code", 0) or 0))
-    return result
+    response_payload = getattr(response, "data", None)
+    allowed = _extract_allowed(response_payload)
+    if allowed is not True:
+        message = _extract_message(response_payload)
+        raise InitialConfigurationApiError(
+            message or "El API no autorizó el usuario del cotizador."
+        )
+
+    return {
+        "success": True,
+        "idempotency_key": str(request_payload["idempotency_key"]),
+        "message": _extract_message(response_payload)
+        or "Usuario del cotizador registrado correctamente.",
+        "legacy_verification": _extract_response(response_payload),
+        "http_status": int(getattr(response, "status_code", 0) or 0),
+    }
 
 
 __all__ = [
