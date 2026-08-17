@@ -17,13 +17,21 @@ def is_legacy_quote_context(header: Mapping[str, Any]) -> bool:
 
 def build_quote_context(catalog_manager: Any, scope: CatalogScope) -> QuoteContext:
     record = dict(catalog_manager.scope_record(scope) or {})
-    base_currency = str(
-        record.get("base_currency")
-        or record.get("currency")
-        or currency_for_country(scope.country_code)
+    country_code = country_code_for(scope.country_code)
+    country_currency = str(currency_for_country(country_code) or "").strip().upper()
+    manifest_currency = str(
+        record.get("base_currency") or record.get("currency") or ""
     ).strip().upper()
+
+    # El país manda para Bolivia: evita que una configuración de catálogo
+    # histórica con PYG contamine la ventana de cotización y sus conversiones.
+    base_currency = (
+        country_currency
+        if country_code == "BO"
+        else (manifest_currency or country_currency)
+    )
     return QuoteContext.from_values(
-        country_code=scope.country_code,
+        country_code=country_code,
         company_type=scope.company_type,
         username=str(getattr(catalog_manager, "username", "") or ""),
         id_cotizador=str(getattr(catalog_manager, "id_cotizador", "") or ""),

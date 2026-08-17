@@ -822,6 +822,23 @@ def _normalize_group(raw: Any) -> dict[str, Any]:
             else f"{country_code}:{company_type}"
         )
 
+    manifest_currency = _code(
+        _first(
+            raw,
+            "base_currency",
+            default=_first(country_raw, "base_currency", "currency"),
+        )
+    )
+    country_currency = _BASE_CURRENCY_BY_COUNTRY.get(country_code, "")
+
+    # La moneda base de Bolivia es BOB. Algunos manifiestos antiguos enviaban
+    # PYG para este grupo, lo que hacía que el cotizador mostrara guaraníes aun
+    # cuando el país seleccionado era Bolivia.
+    if country_code == "BO":
+        base_currency = country_currency
+    else:
+        base_currency = manifest_currency or country_currency
+
     stores_raw = _first(raw, "stores", "shops", "tiendas")
     if not isinstance(stores_raw, list):
         raise ValueError(f"stores debe ser una lista en el grupo {group_key}.")
@@ -837,14 +854,7 @@ def _normalize_group(raw: Any) -> dict[str, Any]:
         "country_name": country_name,
         "company_id": company_id,
         "company_type": company_type,
-        "base_currency": _code(
-            _first(
-                raw,
-                "base_currency",
-                default=_first(country_raw, "base_currency", "currency"),
-            )
-        )
-        or _BASE_CURRENCY_BY_COUNTRY.get(country_code, ""),
+        "base_currency": base_currency,
         "catalog": _normalize_catalog(raw.get("catalog")),
         "stores": stores,
     }
