@@ -2385,9 +2385,9 @@ def send_quote_from_history_once(
 
     try:
         result = login_and_send_presupuesto(
-            # El API recibe BO en cod_pais, pero debe conservar BOL-... en
-            # codigo cuando esa es la referencia local de la cotizacion.
-            quote_code=raw_quote_code,
+            # El cotizador conserva el codigo completo localmente (PE-001-...),
+            # pero EFAPI busca el serienumero sin el prefijo de pais (001-...).
+            quote_code=validated_quote_code,
             fecha_emision_ts=fecha_emision_ts,
             cliente=str(header.get("cliente") or ""),
             cedula=str(header.get("cedula") or ""),
