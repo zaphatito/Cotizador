@@ -325,7 +325,7 @@ def _country_code_norm(value: Any) -> str:
         return "PY"
     if v in ("VE", "VENEZUELA"):
         return "VE"
-    if v in ("BO", "BOLIVIA"):
+    if v in ("BO", "BOL", "BOLIVIA"):
         return "BO"
     return v
 
