@@ -147,6 +147,7 @@ class TableActionsMixin:
             self.base_currency,
             converter=self._convert_from_base,
             current_currency=current_currency,
+            country=getattr(self, "country_code", ""),
         )
         if not payload:
             return
@@ -214,6 +215,9 @@ class TableActionsMixin:
             precio_unitario_por_categoria,
             default_price_id_for_product,
             factor_total_por_categoria,
+            discount_from_amount,
+            discount_percentage_decimals,
+            round_discount_percentage,
         )
 
         cat = (item.get("categoria") or "").upper()
@@ -265,13 +269,25 @@ class TableActionsMixin:
 
         d_pct = float(nz(item.get("descuento_pct"), 0.0))
         d_monto = float(nz(item.get("descuento_monto"), 0.0))
+        discount_country = getattr(self, "country_code", "") or getattr(self, "country_name", "")
+        integer_discount = discount_percentage_decimals(discount_country) == 0
+        discount_mode = str(item.get("descuento_mode") or "").strip().lower()
 
-        if d_pct > 0 and subtotal > 0:
+        if integer_discount and discount_mode == "amount" and d_monto > 0 and subtotal > 0:
+            d_pct, d_monto = discount_from_amount(subtotal, d_monto, discount_country)
+            item["descuento_mode"] = "percent"
+        elif d_pct > 0 and subtotal > 0:
+            if integer_discount:
+                d_pct = round_discount_percentage(d_pct, discount_country)
             d_monto = round(subtotal * d_pct / 100.0, 2)
+        elif integer_discount and d_monto > 0 and subtotal > 0:
+            d_pct, d_monto = discount_from_amount(subtotal, d_monto, discount_country)
+            item["descuento_mode"] = "percent"
 
         if d_monto > subtotal:
             d_monto = subtotal
 
+        item["descuento_pct"] = d_pct
         item["descuento_monto"] = d_monto
 
         total = round(subtotal - d_monto, 2)

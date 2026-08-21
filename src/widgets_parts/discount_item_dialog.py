@@ -18,6 +18,11 @@ from PySide6.QtWidgets import (
 
 from ..config import convert_from_base, get_currency_context
 from ..currency import normalize_currency_code
+from ..pricing import (
+    discount_from_amount,
+    discount_percentage_decimals,
+    round_discount_percentage,
+)
 from ..utils import fmt_money_ui, nz
 
 MAX_DISCOUNT_PCT = 99.0
@@ -93,10 +98,13 @@ def show_discount_dialog_for_item(
     *,
     converter=None,
     current_currency: str | None = None,
+    country: str | None = None,
 ) -> Optional[dict]:
     it = item
     convert = converter if callable(converter) else convert_from_base
     explicit_currency = normalize_currency_code(current_currency or "")
+    discount_decimals = discount_percentage_decimals(country)
+    integer_discount = discount_decimals == 0
 
     try:
         precio_base = float(nz(it.get("precio"), 0.0))
@@ -108,6 +116,12 @@ def show_discount_dialog_for_item(
 
     d_pct = float(nz(it.get("descuento_pct"), 0.0))
     d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
+    if integer_discount:
+        if d_monto_base > 0:
+            d_pct, d_monto_base = discount_from_amount(subtotal_base, d_monto_base, country)
+        else:
+            d_pct = round_discount_percentage(d_pct, country)
+            d_monto_base = subtotal_base * d_pct / 100.0
 
     precio_ui = convert(precio_base)
     subtotal_ui = convert(subtotal_base)
@@ -148,8 +162,8 @@ def show_discount_dialog_for_item(
     form = QFormLayout(grp)
 
     sp_pct = QDoubleSpinBox()
-    sp_pct.setDecimals(4)
-    sp_pct.setSingleStep(0.0001)
+    sp_pct.setDecimals(discount_decimals)
+    sp_pct.setSingleStep(1.0 if integer_discount else 0.0001)
     sp_pct.setMinimum(0.0)
     sp_pct.setMaximum(SOFT_MAX_PCT)      # ✅ soft max (deja teclear 190/888)
     sp_pct.setKeyboardTracking(True)
@@ -180,6 +194,9 @@ def show_discount_dialog_for_item(
     def _preview(pct_raw: float, amt_raw: float):
         pct = _clamp(pct_raw, 0.0, MAX_DISCOUNT_PCT)
         amt = _clamp(amt_raw, 0.0, max_amt_ui)
+        if integer_discount:
+            pct = round_discount_percentage(pct, country)
+            amt = _clamp(float(subtotal_ui) * pct / 100.0, 0.0, max_amt_ui)
         total_ui = float(subtotal_ui) - amt
         if pct <= 0 and amt <= 0:
             lbl_preview.setText("Sin descuento aplicado.")
@@ -200,8 +217,12 @@ def show_discount_dialog_for_item(
             amt_calc = (float(subtotal_ui) * pct_raw / 100.0) if float(subtotal_ui) > 0 else 0.0
             _preview(pct_raw, amt_calc)
         elif last_edit["who"] == "amt":
-            pct_calc = (amt_raw / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
-            _preview(pct_calc, amt_raw)
+            if integer_discount:
+                pct_calc, amt_calc = discount_from_amount(subtotal_ui, amt_raw, country)
+                _preview(pct_calc, amt_calc)
+            else:
+                pct_calc = (amt_raw / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
+                _preview(pct_calc, amt_raw)
         else:
             _preview(float(sp_pct.value()), float(sp_amt.value()))
 
@@ -255,6 +276,8 @@ def show_discount_dialog_for_item(
         try:
             sp_pct.interpretText()
             pct = _clamp(float(sp_pct.value()), 0.0, MAX_DISCOUNT_PCT)
+            if integer_discount:
+                pct = round_discount_percentage(pct, country)
             amt = round(float(subtotal_ui) * pct / 100.0, 2) if float(subtotal_ui) > 0 else 0.0
             amt = _clamp(amt, 0.0, max_amt_ui)
             sp_pct.setValue(pct)
@@ -271,7 +294,10 @@ def show_discount_dialog_for_item(
         try:
             sp_amt.interpretText()
             amt = _clamp(float(sp_amt.value()), 0.0, max_amt_ui)
-            pct = (amt / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
+            if integer_discount:
+                pct, amt = discount_from_amount(subtotal_ui, amt, country)
+            else:
+                pct = (amt / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
             pct = _clamp(pct, 0.0, MAX_DISCOUNT_PCT)
             sp_amt.setValue(amt)
             sp_pct.setValue(pct)
@@ -299,6 +325,13 @@ def show_discount_dialog_for_item(
 
         pct = _clamp(float(sp_pct.value()), 0.0, MAX_DISCOUNT_PCT)
         amt_ui = _clamp(float(sp_amt.value()), 0.0, max_amt_ui)
+        if integer_discount:
+            if last_edit["who"] == "amt":
+                pct, amt_ui = discount_from_amount(subtotal_ui, amt_ui, country)
+                amt_ui = _clamp(amt_ui, 0.0, max_amt_ui)
+            else:
+                pct = round_discount_percentage(pct, country)
+                amt_ui = _clamp(float(subtotal_ui) * pct / 100.0, 0.0, max_amt_ui)
 
         updating["lock"] = True
         try:

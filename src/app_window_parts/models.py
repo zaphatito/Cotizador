@@ -8,6 +8,7 @@ from ..config import APP_COUNTRY, convert_from_base
 from ..product_rules import uses_gram_quantity
 from ..country_rules import normalize_country_name, uses_peru_business_rules
 from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
+from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
 from ..logging_setup import get_logger
@@ -675,10 +676,16 @@ class ItemsModel(QAbstractTableModel):
 
         if mode == "percent":
             d_pct = self._clamp_pct(d_pct)
+            if discount_percentage_decimals(self.country) == 0:
+                d_pct = round_discount_percentage(d_pct, self.country)
             d_monto = round(subtotal * d_pct / 100.0, 2)
         elif mode == "amount":
-            d_monto = max(0.0, min(d_monto, subtotal))
-            d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
+            if discount_percentage_decimals(self.country) == 0:
+                d_pct, d_monto = discount_from_amount(subtotal, d_monto, self.country)
+                mode = "percent"
+            else:
+                d_monto = max(0.0, min(d_monto, subtotal))
+                d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
         else:
             d_pct = 0.0
             d_monto = 0.0
@@ -834,7 +841,8 @@ class ItemsModel(QAbstractTableModel):
                 d_pct = float(nz(it.get("descuento_pct"), 0.0))
                 d_monto = float(nz(it.get("descuento_monto"), 0.0))
                 if d_pct > 0:
-                    return f"{d_pct:.4f}%"
+                    decimals = 0 if discount_percentage_decimals(self.country) == 0 else 4
+                    return f"{d_pct:.{decimals}f}%"
                 if d_monto > 0:
                     return f"m:{d_monto:.2f}"
                 return ""
@@ -992,6 +1000,8 @@ class ItemsModel(QAbstractTableModel):
                 except Exception:
                     d_pct = 0.0
                 d_pct = max(0.0, min(d_pct, 100.0))
+                if discount_percentage_decimals(self.country) == 0:
+                    d_pct = round_discount_percentage(d_pct, self.country)
                 d_monto = round(subtotal * d_pct / 100.0, 2)
                 d_mode = "percent"
             elif mode == "amount":
@@ -1005,6 +1015,9 @@ class ItemsModel(QAbstractTableModel):
                     d_monto = subtotal
                 d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
                 d_mode = "amount"
+                if discount_percentage_decimals(self.country) == 0:
+                    d_pct, d_monto = discount_from_amount(subtotal, d_monto, self.country)
+                    d_mode = "percent"
             else:
                 return False
 

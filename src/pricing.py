@@ -1,4 +1,6 @@
 # src/pricing.py
+import math
+
 from .config import APP_COUNTRY
 from .product_rules import (
     normalize_country,
@@ -88,6 +90,43 @@ def _first_nonzero(prod: dict, *keys: str) -> float:
         if v > 0:
             return float(v)
     return 0.0
+
+
+def discount_percentage_decimals(country: str | None = None) -> int:
+    country_code = str(country or "").strip().upper()
+    if country_code in {"PE", "PERU", "PERÚ"}:
+        return 0
+    return 4
+
+
+def round_discount_percentage(value, country: str | None = None) -> float:
+    try:
+        percentage = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not math.isfinite(percentage):
+        return 0.0
+
+    decimals = discount_percentage_decimals(country)
+    if decimals == 0:
+        return float(math.floor(percentage + 0.5))
+    return round(percentage, decimals)
+
+
+def discount_from_amount(subtotal, amount, country: str | None = None) -> tuple[float, float]:
+    subtotal_value = max(0.0, float(nz(subtotal, 0.0)))
+    amount_value = max(0.0, min(float(nz(amount, 0.0)), subtotal_value))
+    if subtotal_value <= 0:
+        return 0.0, 0.0
+
+    percentage = round_discount_percentage(
+        amount_value / subtotal_value * 100.0,
+        country,
+    )
+    percentage = max(0.0, min(percentage, 100.0))
+    recalculated_amount = subtotal_value * percentage / 100.0
+    return percentage, recalculated_amount
 
 
 def normalize_price_id(value, default: int = 1) -> int:
