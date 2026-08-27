@@ -15,6 +15,8 @@ from ..pricing import (
     precio_unitario_por_categoria,
     factor_total_por_categoria,
     default_price_id_for_product,
+    round_price,
+    base_price_from_total,
 )
 from ..product_rules import uses_gram_quantity
 from ..country_rules import uses_peru_business_rules
@@ -216,7 +218,7 @@ class AddItemsMixin:
         if dlg.exec() != QDialog.Accepted or not dlg.resultado:
             return
         data = dlg.resultado
-        unit_price = float(nz(data["precio"], 0.0))  # siempre en moneda base
+        unit_price = round_price(data["precio"])  # siempre en moneda base
         qty = float(nz(data["cantidad"], 1))
 
         factor = factor_total_por_categoria(
@@ -369,7 +371,7 @@ class AddItemsMixin:
                 and uses_gram_quantity(prod, country=getattr(self, "country_name", APP_COUNTRY))
                 else 1.0
             )
-            unit_price = precio_unitario_por_categoria(cat, prod, qty_default)
+            unit_price = round_price(precio_unitario_por_categoria(cat, prod, qty_default))
             default_pid = int(default_price_id_for_product(prod))
             default_tier = "unitario"
             if default_pid == 2:
@@ -382,7 +384,9 @@ class AddItemsMixin:
                 prod,
                 country=getattr(self, "country_name", APP_COUNTRY),
             )
-            subtotal_base = round(float(unit_price) * float(qty_default) * factor, 2)
+            subtotal_base = base_price_from_total(
+                unit_price, getattr(self, "country_name", APP_COUNTRY)
+            ) * float(qty_default) * factor
 
             item = {
                 "_prod": prod,

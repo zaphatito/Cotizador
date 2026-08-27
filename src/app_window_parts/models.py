@@ -7,7 +7,12 @@ from PySide6.QtGui import QBrush, QFont
 from ..config import APP_COUNTRY, convert_from_base
 from ..product_rules import uses_gram_quantity
 from ..country_rules import normalize_country_name, uses_peru_business_rules
-from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
+from ..pricing import (
+    precio_unitario_por_categoria,
+    factor_total_por_categoria,
+    round_price,
+    base_price_from_total,
+)
 from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
@@ -484,9 +489,10 @@ class ItemsModel(QAbstractTableModel):
     def _compute_subtotal_base(self, it: dict, unit_price: float | None = None) -> float:
         if unit_price is None:
             unit_price = float(nz(it.get("precio"), 0.0))
+        unit_price = base_price_from_total(round_price(unit_price), self.country)
         qty = float(nz(it.get("cantidad"), 0.0))
         factor = self._get_factor_total(it)
-        return round(float(unit_price) * qty * factor, 2)
+        return float(unit_price) * qty * factor
 
     def _effective_discount_pct(self, subtotal: float, mode: str, d_pct: float, d_monto: float) -> float:
         if subtotal <= 0:
@@ -626,8 +632,8 @@ class ItemsModel(QAbstractTableModel):
         return changed
 
     def _normalize_discount_and_totals(self, it: dict, unit_price: float):
-        unit_price = float(nz(unit_price, 0.0))
-        unit_price = self._maybe_snap_override_to_tier(it, unit_price)
+        unit_price = round_price(unit_price)
+        unit_price = round_price(self._maybe_snap_override_to_tier(it, unit_price))
         it["precio"] = unit_price
 
         factor = self._get_factor_total(it)

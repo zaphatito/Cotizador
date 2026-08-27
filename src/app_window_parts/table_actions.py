@@ -215,6 +215,8 @@ class TableActionsMixin:
             precio_unitario_por_categoria,
             default_price_id_for_product,
             factor_total_por_categoria,
+            round_price,
+            base_price_from_total,
             discount_from_amount,
             discount_percentage_decimals,
             round_discount_percentage,
@@ -229,12 +231,12 @@ class TableActionsMixin:
             override = None
             item["precio_override"] = None
         if override is not None:
-            unit_price = float(override)
+            unit_price = round_price(override)
             item["id_precioventa"] = 4
         elif item.get("precio_tier"):
-            unit_price = float(_price_from_tier(base_prod, item["precio_tier"]) or 0.0)
+            unit_price = round_price(_price_from_tier(base_prod, item["precio_tier"]) or 0.0)
             if unit_price <= 0:
-                unit_price = float(
+                unit_price = round_price(
                     precio_unitario_por_categoria(cat, base_prod, qty) or 0.0
                 )
             tier_l = str(item.get("precio_tier") or "").strip().lower()
@@ -247,13 +249,15 @@ class TableActionsMixin:
             else:
                 item["id_precioventa"] = 1
         else:
-            unit_price = float(
+            unit_price = round_price(
                 precio_unitario_por_categoria(cat, base_prod, qty) or 0.0
             )
             item["id_precioventa"] = (
                 int(default_price_id_for_product(base_prod)) if cat != "SERVICIO" else 4
             )
 
+        country = getattr(self, "country_name", None)
+        unit_price = round_price(unit_price)
         item["precio"] = unit_price
 
         factor = float(
@@ -264,7 +268,7 @@ class TableActionsMixin:
             )
         )
         item["factor_total"] = factor
-        subtotal = round(unit_price * qty * factor, 2)
+        subtotal = base_price_from_total(unit_price, country) * qty * factor
         item["subtotal_base"] = subtotal
 
         d_pct = float(nz(item.get("descuento_pct"), 0.0))

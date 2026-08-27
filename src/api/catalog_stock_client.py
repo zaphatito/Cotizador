@@ -52,6 +52,7 @@ def build_catalog_stock_request(*, pid: str, known_state: Mapping[str, Any] | No
         raise ValueError("known_groups debe ser una lista.")
     request = {
         "pid": clean_pid,
+        "pricing_version": 2,
         "manifest_revision": str(state.get("manifest_revision") or ""),
         "known_groups": known_groups,
     }

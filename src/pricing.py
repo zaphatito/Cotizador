@@ -1,5 +1,6 @@
 # src/pricing.py
 import math
+from decimal import Decimal, ROUND_HALF_DOWN
 
 from .config import APP_COUNTRY
 from .product_rules import (
@@ -92,6 +93,51 @@ def _first_nonzero(prod: dict, *keys: str) -> float:
     return 0.0
 
 
+def round_price(value) -> float:
+    try:
+        return round(float(value) + 1e-9, 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def round_line_total(value) -> float:
+    """Redondea el importe comercial de una línea a 2 decimales."""
+    try:
+        return float(
+            Decimal(str(float(value or 0.0))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_DOWN
+            )
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def subtotal_desde_precio(precio_total_unitario, cantidad, factor_total=1.0) -> float:
+    """Calcula el subtotal desde un precio unitario ya redondeado."""
+    total_unitario = round_price(precio_total_unitario)
+    factor = float(factor_total or 1.0)
+    return total_unitario * float(cantidad or 0.0) * factor
+
+
+def total_desde_descuento(subtotal, descuento) -> float:
+    return float(subtotal or 0.0) - float(descuento or 0.0)
+
+
+def iva_percent_for_country(country) -> float:
+    code = str(country or "").strip().upper()
+    return {"PE": 18.0, "PERU": 18.0, "PY": 10.0, "PARAGUAY": 10.0,
+            "VE": 16.0, "VENEZUELA": 16.0, "BO": 16.0, "BOLIVIA": 16.0}.get(code, 0.0)
+
+
+def total_price_for_country(value, country) -> float:
+    return round_price(float(value or 0.0) * (1 + iva_percent_for_country(country) / 100.0))
+
+
+def base_price_from_total(value, country) -> float:
+    factor = 1 + iva_percent_for_country(country) / 100.0
+    return float(value or 0.0) / factor if factor else float(value or 0.0)
+
+
 def discount_percentage_decimals(country: str | None = None) -> int:
     country_code = str(country or "").strip().upper()
     if country_code in {"PE", "PERU", "PERÚ"}:
@@ -166,15 +212,15 @@ def price_for_price_id(prod: dict, price_id: int) -> float:
     p_oferta = _first_nonzero(prod, "p_oferta", "P_OFERTA")
 
     if pid == 2 and p_min > 0:
-        return float(p_min)
+        return round_price(p_min)
     if pid == 3 and p_oferta > 0:
-        return float(p_oferta)
+        return round_price(p_oferta)
     if p_max > 0:
-        return float(p_max)
+        return round_price(p_max)
     if p_oferta > 0:
-        return float(p_oferta)
+        return round_price(p_oferta)
     if p_min > 0:
-        return float(p_min)
+        return round_price(p_min)
     return 0.0
 
 

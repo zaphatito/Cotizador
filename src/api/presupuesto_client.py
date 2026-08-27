@@ -40,7 +40,13 @@ from sqlModels.settings_repo import get_setting, set_setting
 from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, CATS, currency_for_country
 from ..country_rules import country_code_for
-from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
+from ..pricing import (
+    base_price_from_total,
+    discount_from_amount,
+    discount_percentage_decimals,
+    round_discount_percentage,
+    round_price,
+)
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import is_py_unit_product
@@ -254,11 +260,13 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
         if not nombre:
             nombre = "ITEM"
         descuento_pct = float(nz(it.get("descuento_pct"), 0.0))
-        descuento_monto = float(nz(it.get("descuento_monto"), 0.0))
+        descuento_monto = round_price(it.get("descuento_monto"))
         if integer_discount:
             subtotal_base = float(nz(it.get("subtotal_base"), 0.0))
             if subtotal_base <= 0:
-                precio_base = float(nz(it.get("precio"), 0.0))
+                precio_base = base_price_from_total(
+                    round_price(it.get("precio")), discount_country
+                )
                 cantidad_base = float(nz(it.get("cantidad"), 0.0))
                 factor_total = float(nz(it.get("factor_total"), 1.0))
                 subtotal_base = max(0.0, precio_base * cantidad_base * factor_total)
@@ -272,14 +280,14 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
             else:
                 descuento_pct = round_discount_percentage(descuento_pct, discount_country)
                 if subtotal_base > 0:
-                    descuento_monto = subtotal_base * descuento_pct / 100.0
+                    descuento_monto = round_price(subtotal_base * descuento_pct / 100.0)
         out.append(
             {
                 "codigo": str(it.get("codigo") or ""),
                 "nombre": nombre,
                 "prc_descuento": descuento_pct,
-                "monto_descuento": descuento_monto,
-                "monto_unitario": float(nz(it.get("precio"), 0.0)),
+                "monto_descuento": round_price(descuento_monto),
+                "monto_unitario": round_price(it.get("precio")),
                 "cantidad": _quantity_for_api(it, cod_pais=cod_pais),
                 "id_precioventa": int(_price_id_from_item(it, tipo_prod)),
                 "tipo_prod": tipo_prod,
@@ -1007,6 +1015,7 @@ def build_presupuesto_payload(
     return {
         "presupuesto": {
             "id_cotizador": str(id_cotizador or ""),
+            "pricing_version": 2,
             "user": user_for_payload,
             "codigo": str(quote_code or ""),
             "fecha_emision": int(fecha_emision_num),

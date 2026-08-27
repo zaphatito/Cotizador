@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QMessageBox, QDialog
 from sqlModels.db import connect
 
 from ..config import CATS
-from ..pricing import price_for_price_id, default_price_id_for_product
+from ..pricing import price_for_price_id, default_price_id_for_product, round_price
 from ..stock_policy import stock_enforcement_enabled
 from ..utils import nz
 from ..presentations import map_pc_to_bottle_code, extract_ml_from_text, ml_from_pres_code_norm
@@ -346,13 +346,14 @@ class PresentationsMixin:
         precio_bot = (
             float(price_for_price_id(botella, default_price_id_for_product(botella))) if botella else 0.0
         )
-        unit_price = precio_pres + precio_bot
-        precio_oferta_total = (precio_oferta if precio_oferta > 0 else precio_pres) + precio_bot
+        unit_price = round_price(precio_pres + precio_bot)
+        precio_oferta_total = round_price((precio_oferta if precio_oferta > 0 else precio_pres) + precio_bot)
         precio_min_total = (
             precio_min
             if precio_min > 0
             else (precio_oferta if precio_oferta > 0 else precio_pres)
         ) + precio_bot
+        precio_min_total = round_price(precio_min_total)
 
         nombre_pres = (
             pres.get("NOMBRE") or pres.get("CODIGO_NORM") or pres.get("CODIGO")
@@ -528,14 +529,14 @@ class PresentationsMixin:
             nz(pres_final.get("P_MIN", pres_final.get("p_min", 0.0)), 0.0)
         )
         precio_pc = float(price_for_price_id(pc, default_price_id_for_product(pc)))
-        unit_price = precio_pres + precio_pc
-        oferta_price = (
+        unit_price = round_price(precio_pres + precio_pc)
+        oferta_price = round_price((
             (precio_pres_oferta if precio_pres_oferta > 0 else precio_pres) + precio_pc
-        )
-        min_price = (
+        ))
+        min_price = round_price((
             (precio_pres_min if precio_pres_min > 0 else (precio_pres_oferta if precio_pres_oferta > 0 else precio_pres))
             + precio_pc
-        )
+        ))
 
         nombre_pres = (
             pres_final.get("NOMBRE") or pres_final.get("CODIGO_NORM") or pres_final.get("CODIGO")

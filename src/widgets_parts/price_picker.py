@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
 )
 
-from ..pricing import default_price_id_for_product
+from ..pricing import default_price_id_for_product, round_price
 from ..config import convert_from_base
 from ..utils import fmt_money_ui
 from .helpers import _first_nonzero
@@ -77,24 +77,24 @@ def show_price_picker(
     cat = (item.get("categoria") or "").upper()
     is_service = (cat == "SERVICIO")
 
-    p_max = _first_nonzero(
+    p_max = round_price(_first_nonzero(
         prod,
         ["p_max", "P_MAX"],
-    )
-    p_oferta = _first_nonzero(
+    ))
+    p_oferta = round_price(_first_nonzero(
         prod,
         [
             "p_oferta",
             "P_OFERTA",
         ],
-    )
-    p_min = _first_nonzero(
+    ))
+    p_min = round_price(_first_nonzero(
         prod,
         [
             "p_min",
             "P_MIN",
         ],
-    )
+    ))
 
     def _format_tier_value(val_base: float) -> str:
         return (
@@ -285,7 +285,7 @@ def show_price_picker(
 
     def accept_custom():
         payload["mode"] = "custom"
-        payload["price"] = float(sp.value())
+        payload["price"] = round_price(sp.value())
         payload["id_precioventa"] = 4
         dlg.accept()
 

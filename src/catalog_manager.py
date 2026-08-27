@@ -95,7 +95,7 @@ def _products_frame(catalog: Mapping[str, Any], matrix: Mapping[str, Any] | None
     for column in ("p_max", "p_min", "p_oferta"):
         if column not in frame.columns:
             frame[column] = 0.0
-        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0).astype(float)
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0).round(2).astype(float)
 
     if "id_precioventa" not in frame.columns:
         frame["id_precioventa"] = 1
@@ -171,7 +171,7 @@ def _presentations_frame(
     for column in ("p_max", "p_min", "p_oferta"):
         if column not in frame.columns:
             frame[column] = 0.0
-        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0).astype(float)
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0).round(2).astype(float)
 
     department_ids = _lookup_key_series(
         frame.get("id_departamento", pd.Series("", index=frame.index))
