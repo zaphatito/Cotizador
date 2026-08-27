@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.37
-Fecha: 2026-08-21
+Versión: 2.0.38
+Fecha: 2026-08-27
 
 Resumen
 - Se corrigieron los descuentos del cotizador para Perú para trabajar únicamente con porcentajes enteros.
