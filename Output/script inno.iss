@@ -86,7 +86,7 @@ Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; Group
 
 [Run]
 ; Solo ejecutar al finalizar si es instalaciÃ³n NUEVA (no reinstalaciÃ³n silenciosa)
-Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstallAndConfigured
+Filename: "{app}\{#MyAppExeName}"; Description: "Ejecutar {#MyAppName}"; Flags: nowait postinstall; Check: IsFreshInstall
 
 [Code]
 #ifdef UNICODE
@@ -266,8 +266,6 @@ var
   PrevDir: string;
   PrevVersion: string;
   IsReinstall: Boolean;
-  InitialSetupSucceeded: Boolean;
-  OldInitialSetupRequired: Boolean;
 
   PaisPage: TWizardPage;
   cbPais: TNewComboBox;
@@ -514,16 +512,10 @@ begin
   OldAllow := False;
   PrevDir := '';
   PrevVersion := '';
-  OldInitialSetupRequired := False;
-
   IsReinstall := TryGetPrevAppDir();
-  InitialSetupSucceeded := IsReinstall;
 
   if IsReinstall then
   begin
-    OldInitialSetupRequired :=
-      FileExists(PrevDir + '\config\initial_configuration.required') or
-      FileExists(PrevDir + '\config\initial_configuration.pending.json');
     if not RegReadStrAnyView(HKLM, UNINST_KEY, 'DisplayVersion', PrevVersion) then
       RegReadStrAnyView(HKCU, UNINST_KEY, 'DisplayVersion', PrevVersion);
 
@@ -574,11 +566,6 @@ end;
 function IsFreshInstall(): Boolean;
 begin
   Result := not IsReinstall;
-end;
-
-function IsFreshInstallAndConfigured(): Boolean;
-begin
-  Result := (not IsReinstall) and InitialSetupSucceeded;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -698,46 +685,6 @@ begin
   chkTienda.State := cbUnchecked;
 end;
 
-procedure RunInitialSetupWizard();
-var
-  ExePath, SeedPath, Params: string;
-  RC: Integer;
-begin
-  InitialSetupSucceeded := False;
-  if IsSilentMode() then
-  begin
-    Log('WARN: La configuracion inicial interactiva se omitio en modo silencioso.');
-    Exit;
-  end;
-
-  ExePath := ExpandConstant('{app}\{#MyAppExeName}');
-  SeedPath := ExpandConstant('{app}\config\config.json');
-  SaveStringToFile(
-    ExpandConstant('{app}\config\initial_configuration.required'),
-    '1',
-    False
-  );
-  Params := '--initial-setup --seed "' + SeedPath + '"';
-  if not Exec(ExePath, Params, ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, RC) then
-  begin
-    MsgBox(
-      'No se pudo abrir el asistente de configuracion inicial.',
-      mbError,
-      MB_OK
-    );
-    Exit;
-  end;
-
-  InitialSetupSucceeded := RC = 0;
-  if not InitialSetupSucceeded then
-    MsgBox(
-      'La aplicacion fue instalada, pero la configuracion inicial no quedo completada.' + #13#10#13#10 +
-      'Al abrir el sistema se solicitara completar nuevamente este paso.',
-      mbError,
-      MB_OK
-    );
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   PaisSel, ListadoSelUpper, CompanySel, StoreIdSel, UsernameSel, TiendaStr, AllowStr: string;
@@ -847,8 +794,6 @@ begin
 
       if not SaveStringToFile(FJson, ConfJson, False) then
         Log('WARN: No se pudo crear config.json en ' + FJson)
-      else if (not IsReinstall) or OldInitialSetupRequired then
-        RunInitialSetupWizard();
     end;
 
   except
