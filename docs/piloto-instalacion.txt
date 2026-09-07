@@ -1,0 +1,17 @@
+Cotizador Piloto - prueba controlada
+
+Este instalador crea una aplicación independiente del Cotizador habitual.
+No reemplaza, copia ni borra la base de datos existente.
+
+Use el acceso directo "Cotizador Piloto". En el primer inicio se abrirá
+la configuración del piloto. Consulte al administrador qué usuario e ID usar.
+
+Los datos del piloto se guardan en Documentos/Cotizaciones Piloto Historico.
+El instalador y la desinstalación conservan esos datos.
+
+Las actualizaciones automáticas están desactivadas. Para cambiar de versión,
+el administrador debe entregar otro instalador piloto.
+
+El histórico compartido requiere que el administrador prepare el servicio y
+habilite el usuario participante. Los cambios compartidos afectan a ese usuario:
+utilice documentos de prueba para evaluar modificaciones y eliminaciones.
