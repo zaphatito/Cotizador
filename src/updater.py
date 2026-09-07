@@ -29,6 +29,7 @@ import urllib.error
 import shutil
 import zipfile
 from typing import Dict, Any, Tuple, Optional, Callable
+from .build_profile import automatic_updates_allowed
 
 UiCb = Optional[Callable[[str, Dict[str, Any]], None]]
 
@@ -853,6 +854,8 @@ def _plan_installer(manifest: Dict[str, Any], app_config: Dict[str, Any], log=No
 # ----------------- entrypoint -----------------
 
 def check_for_updates_and_maybe_install(app_config: Dict[str, Any], ui: UiCb = None, parent=None, log=None) -> Dict[str, Any]:
+    if not automatic_updates_allowed():
+        return {"status": "PILOT_MANUAL_ONLY"}
     try:
         if not app_config.get("update_check_on_startup", True):
             return {"status": "DISABLED"}

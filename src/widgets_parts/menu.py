@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -25,6 +26,7 @@ from ..logging_setup import get_logger
 from ..app_window import SistemaCotizaciones
 from ..config import APP_CURRENCY, get_secondary_currencies, is_ai_enabled
 from ..quote_context_service import build_quote_context
+from ..country_rules import country_profile
 
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.rates_repo import load_rates, set_rate
@@ -43,7 +45,7 @@ log = get_logger(__name__)
 
 
 class RatesDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, country_code=None, base_currency=None, secondary_currencies=None):
         super().__init__(parent)
         self.setWindowTitle("Tasas de cambio (DB)")
         self.setMinimumWidth(380)
@@ -54,7 +56,10 @@ class RatesDialog(QDialog):
         form = QFormLayout()
         layout.addLayout(form)
 
-        self.base = APP_CURRENCY
+        profile = country_profile(country_code) if country_code else None
+        self.base = profile.base_currency if profile else (base_currency or APP_CURRENCY)
+        currencies = profile.secondary_currencies if profile else (secondary_currencies if secondary_currencies is not None else get_secondary_currencies())
+        self.setWindowTitle(f"Tasas de cambio · {profile.name if profile else self.base}")
 
         db_path = resolve_db_path()
         con = connect(db_path)
@@ -62,7 +67,7 @@ class RatesDialog(QDialog):
         rates = load_rates(con, self.base)
         con.close()
 
-        for cur in (get_secondary_currencies() or []):
+        for cur in (currencies or []):
             cur_u = cur.upper()
             e = QLineEdit()
             e.setPlaceholderText(f"1 {self.base} = ? {cur_u}")
@@ -83,18 +88,27 @@ class RatesDialog(QDialog):
         self.adjustSize()
 
     def _save(self):
-        db_path = resolve_db_path()
-        con = connect(db_path)
-        ensure_schema(con)
-        with tx(con):
-            for cur, e in self._edits.items():
-                txt = (e.text() or "").strip().replace(",", ".")
-                try:
-                    rate = float(txt) if txt else 1.0
-                except Exception:
-                    rate = 1.0
-                set_rate(con, self.base, cur, rate)
-        con.close()
+        rates = {}
+        for cur, edit in self._edits.items():
+            txt = edit.text().strip().replace(",", ".")
+            if not txt:
+                continue
+            try:
+                rate = float(txt)
+                if not math.isfinite(rate) or rate <= 0:
+                    raise ValueError()
+            except ValueError:
+                QMessageBox.warning(self, "Tasa inválida", f"Introduce una tasa positiva para {cur}.")
+                return
+            rates[cur] = rate
+        con = connect(resolve_db_path())
+        try:
+            ensure_schema(con)
+            with tx(con):
+                for cur, rate in rates.items():
+                    set_rate(con, self.base, cur, rate)
+        finally:
+            con.close()
         QMessageBox.information(self, "OK", "Tasas guardadas en DB.")
         self.accept()
 
@@ -365,6 +379,7 @@ class MainMenuWindow(QMainWindow):
             quote_context=quote_context,
             local_catalog_id=local_catalog_id,
         )
+        win._history_window = self.parent()
         win.show()
         self._open_windows.append(win)
 
@@ -373,7 +388,7 @@ class MainMenuWindow(QMainWindow):
     def _open_rates_history(self):
         base_currency = APP_CURRENCY
         if bool(getattr(self.catalog_manager, "server_mode", False)):
-            scope = select_catalog_scope(self, self.catalog_manager)
+            scope = select_catalog_scope(self, self.catalog_manager, require_catalog=False)
             if scope is None:
                 return
             base_currency = build_quote_context(self.catalog_manager, scope).base_currency
@@ -385,7 +400,7 @@ class MainMenuWindow(QMainWindow):
         country_code = None
         quote_context = None
         if bool(getattr(self.catalog_manager, "server_mode", False)):
-            scope = select_catalog_scope(self, self.catalog_manager)
+            scope = select_catalog_scope(self, self.catalog_manager, require_catalog=False)
             if scope is None:
                 return
             country_code = scope.country_code

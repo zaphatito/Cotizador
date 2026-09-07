@@ -84,6 +84,8 @@ class PdfActionsMixin:
         QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(ruta)))
 
     def abrir_listado_productos(self):
+        if not self._ensure_currency_rate():
+            return
         current_currency, _secondary, _rate = self._currency_context()
         stock_matrix = None
         catalog_manager = getattr(self, "_catalog_manager", None)
@@ -102,6 +104,7 @@ class PdfActionsMixin:
             current_currency=current_currency,
             quote_context=quote_context,
             stock_matrix=stock_matrix,
+            listing_type=getattr(self, "listing_type", None),
         )
         main_geo = self.frameGeometry()
         main_center = main_geo.center()
@@ -112,6 +115,14 @@ class PdfActionsMixin:
         dlg.exec()
 
     def previsualizar_datos(self):
+        current, _secondary, rate = self._currency_context()
+        if rate <= 0 and not all(
+            (snapshot := matching_history_shown_snapshot(item, currency=current, rate=rate))
+            is not None and all(key in snapshot for key in ("precio", "subtotal", "descuento", "total"))
+            for item in self.items
+        ):
+            if not self._ensure_currency_rate():
+                return
         c = self.entry_cliente.text()
         ci = self.entry_cedula.text()
         t = self.entry_telefono.text()
@@ -306,6 +317,12 @@ class PdfActionsMixin:
         QTimer.singleShot(200, _bring_front)
 
     def generar_cotizacion(self):
+        authorize = getattr(self, "_ensure_authorized_quote_context", None)
+        if callable(authorize) and not authorize():
+            return
+        ensure_rate = getattr(self, "_ensure_currency_rate", None)
+        if callable(ensure_rate) and not ensure_rate():
+            return
         c = self.entry_cliente.text()
         ci = self.entry_cedula.text()
         t = self.entry_telefono.text()
@@ -425,6 +442,7 @@ class PdfActionsMixin:
                         base_currency=getattr(self, "base_currency", ""),
                         cotizador_username=getattr(self, "cotizador_username", ""),
                         id_cotizador=getattr(self, "id_cotizador", STORE_ID),
+                        require_complete_context=bool(getattr(self, "_server_catalog_mode", False)),
                         quote_no=quote_code,
                         quote_no_status=quote_no_status,
                         created_at=created_at,

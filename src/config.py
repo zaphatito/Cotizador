@@ -8,8 +8,9 @@ import logging
 from typing import Dict, Any, Tuple, List
 
 from .currency import normalize_currency_code
-from .country_rules import SUPPORTED_COUNTRIES, country_code_for, normalize_country_name
+from .country_rules import SUPPORTED_COUNTRIES, country_code_for, country_profile, normalize_country_name
 from .paths import DATA_DIR, user_docs_dir
+from .build_profile import IS_PILOT
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.api_identity import API_LOGIN_PASSWORD, build_api_settings
 from sqlModels.settings_repo import (
@@ -63,8 +64,8 @@ LEGACY_MANIFEST_URLS = {
     "https://media.githubusercontent.com/media/zaphatito/cotizador/main/config/cotizador.json",
 }
 
-# Categorías granel
-CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
+# Categorías granel / productos cuya cantidad se maneja por peso
+CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS", "DILUYENTES"]
 
 ALLOWED_COMPANY_TYPES: tuple[str, str] = (
     "LA CASA DEL PERFUME",
@@ -113,6 +114,8 @@ def _probe_sqlite_write_no_log(db_path: str) -> tuple[bool, bool]:
 
 
 def _resolve_db_path_no_log() -> str:
+    if IS_PILOT:
+        return os.path.join(DATA_DIR, "app.sqlite3")
     primary = os.path.join(_base_dir_for_app(), "sqlModels", "app.sqlite3")
     fallback = os.path.join(DATA_DIR, "app.sqlite3")
     primary_writable, primary_transient = _probe_sqlite_write_no_log(primary)
@@ -160,6 +163,8 @@ def _candidate_config_paths() -> list[str]:
     y lo mismo para app_config.json.
     """
     base = _base_dir_for_app()
+    if IS_PILOT:
+        return [os.path.join(base, "config", "config.json")]
     cands = []
 
     # frozen / install
@@ -287,6 +292,11 @@ def _set_meta(con, key: str, value: str) -> None:
 
 
 def _migrate_update_manifest_url(con) -> None:
+    if IS_PILOT:
+        set_setting(con, "update_mode", "OFF")
+        set_setting(con, "update_check_on_startup", "0")
+        set_setting(con, "update_manifest_url", "")
+        return
     current = str(get_setting(con, "update_manifest_url", "") or "").strip()
     if not current:
         set_setting(con, "update_manifest_url", RELEASE_MANIFEST_URL)
@@ -344,6 +354,8 @@ def _seed_settings_once(con) -> None:
 
 
 def _recover_identity_settings_if_using_fallback(con, active_db_path: str) -> bool:
+    if IS_PILOT:
+        return False
     try:
         primary = os.path.join(_base_dir_for_app(), "sqlModels", "app.sqlite3")
         fallback = os.path.join(DATA_DIR, "app.sqlite3")
@@ -623,30 +635,14 @@ def currency_for_country(country: str) -> str:
     """
     Devuelve moneda BASE (CANÓNICA ISO).
     """
-    c = normalize_country_name(country)
-    if c == "PERU":
-        return "PEN"
-    if c == "BOLIVIA":
-        return "BOB"
-    if c == "VENEZUELA":
-        return "USD"
-    return "PYG"
+    return country_profile(country).base_currency
 
 
 def secondary_currencies_for_country(country: str) -> List[str]:
     """
     Devuelve monedas secundarias (CANÓNICAS ISO).
     """
-    c = normalize_country_name(country)
-    if c == "PARAGUAY":
-        return ["ARS", "BRL", "USD"]
-    if c == "VENEZUELA":
-        return ["VES"]
-    if c == "PERU":
-        return ["BOB", "USD"]
-    if c == "BOLIVIA":
-        return ["PEN", "USD"]
-    return []
+    return list(country_profile(country).secondary_currencies)
 
 
 def secondary_currency_for_country(country: str, base: str) -> str:
@@ -687,12 +683,12 @@ def id_label_for_country(country: str) -> str:
     return "Documento"
 
 
-def listing_allows_products() -> bool:
-    return APP_LISTING_TYPE in ("PRODUCTOS", "AMBOS")
+def listing_allows_products(listing_type=None) -> bool:
+    return (APP_LISTING_TYPE if listing_type is None else listing_type) in ("PRODUCTOS", "AMBOS")
 
 
-def listing_allows_presentations() -> bool:
-    return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
+def listing_allows_presentations(listing_type=None) -> bool:
+    return (APP_LISTING_TYPE if listing_type is None else listing_type) in ("PRESENTACIONES", "AMBOS")
 
 
 # Contexto de moneda actual (siempre CANÓNICO)

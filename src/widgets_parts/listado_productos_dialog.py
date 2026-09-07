@@ -54,6 +54,7 @@ class ListadoProductosDialog(QDialog):
         current_currency: str | None = None,
         quote_context=None,
         stock_matrix=None,
+        listing_type=None,
     ):
         super().__init__(self_parent)
         self.setWindowTitle("Listado de Productos")
@@ -97,7 +98,7 @@ class ListadoProductosDialog(QDialog):
         self.entry_buscar_prod = None
         self.tabla_prod = None
 
-        if listing_allows_products():
+        if listing_allows_products(listing_type):
             self.tab_prod = QWidget()
             layout_prod = QVBoxLayout(self.tab_prod)
 
@@ -171,7 +172,7 @@ class ListadoProductosDialog(QDialog):
         self.entry_buscar_pres = None
         self.tabla_pres = None
 
-        if listing_allows_presentations():
+        if listing_allows_presentations(listing_type):
             self.tab_pres = QWidget()
             layout_pres = QVBoxLayout(self.tab_pres)
 

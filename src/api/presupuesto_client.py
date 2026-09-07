@@ -38,14 +38,14 @@ from sqlModels.sequences_repo import (
 from sqlModels.settings_repo import get_setting, set_setting
 
 from ..db_path import resolve_db_path
-from ..config import APP_CONFIG, CATS, currency_for_country
-from ..country_rules import country_code_for
+from ..config import APP_CONFIG, currency_for_country
+from ..country_rules import country_code_for, country_profile
 from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
-from ..product_rules import is_py_unit_product
+from ..product_rules import uses_gram_quantity
 from ..quote_code import extract_quote_digits, format_quote_code
-from ..server_identity import has_complete_server_identity, validate_functional_identity
+from ..server_identity import ApiIdentity, has_complete_server_identity, validate_functional_identity
 from ..utils import nz
 from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
@@ -61,7 +61,6 @@ from .generic_controller import ApiRequestError
 log = get_logger(__name__)
 
 _API_QUOTE_CODE_RE = re.compile(r"^[A-Z0-9]+-\d{7,}$")
-_CATS_UPPER = {str(x).strip().upper() for x in (CATS or []) if str(x).strip()}
 _SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
 _COTIZADOR_PID_KEY = "cotizador_pid"
@@ -223,16 +222,12 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
         qty = 0.0
 
     country = str(cod_pais or "").strip().upper()
-    cat = str(item.get("categoria") or "").strip().upper()
 
-    # Paraguay: para categorías CATS, el API espera gramos enteros.
-    if country == "PY" and is_py_unit_product(item, country="PARAGUAY"):
-        units = int(round(qty))
-        if qty > 0 and units <= 0:
-            return 1
-        return max(0, units)
-
-    if country == "PY" and cat in _CATS_UPPER:
+    # Paraguay recibe gramos enteros para todos los productos por peso,
+    # incluidos los que llegan con categoria genérica y departamento
+    # DILUYENTES. La excepción de productos por unidad vive en la regla
+    # compartida y por eso no se duplica aquí.
+    if country == "PY" and uses_gram_quantity(item, country="PARAGUAY"):
         grams = int(round(qty * 50.0))
         if qty > 0 and grams <= 0:
             return 1
@@ -501,15 +496,10 @@ def _load_api_identity(context: Any = None) -> tuple[int, str, str, str, str, st
         if mismatch:
             log.warning("password_api_hash no coincide con la clave API esperada.")
 
-    return (
-        int(user_id),
-        str(api_username),
-        str(app_username),
-        str(country or ""),
-        str(company or ""),
-        str(store_id or ""),
-        bool(telemarketing_cfg),
-    )
+    return ApiIdentity(technical_user_id=int(user_id), technical_username=str(api_username),
+        functional_username=str(app_username), country=str(country or ''),
+        company_type=str(company or ''), id_cotizador=str(store_id or ''),
+        telemarketing=bool(telemarketing_cfg))
 
 
 def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str, str, str, bool]:
@@ -577,41 +567,13 @@ def _country_code_from_country(country: str) -> str:
     if raw in ("BO", "BOL", "BOLIVIA"):
         # El API de EFAPI identifica Bolivia como BO (id_pais=4).
         return "BO"
-    return country_code_for(country, default="PY")
+    return country_profile(country).code
 
 
 def _quote_context_from_header(header: dict[str, Any]):
-    from ..catalog_context import QuoteContext
+    from ..quote_context_service import quote_context_from_header
 
-    country_code = _country_code_from_country(str(header.get("country_code") or ""))
-    company_type = str(
-        header.get("company_type")
-        or APP_CONFIG.get("company_type")
-        or "LA CASA DEL PERFUME"
-    ).strip()
-    username = str(
-        header.get("cotizador_username")
-        or APP_CONFIG.get("username")
-        or ""
-    ).strip()
-    id_cotizador = str(
-        header.get("id_cotizador")
-        or _extract_id_cotizador(
-            str(header.get("quote_no") or ""),
-            str(APP_CONFIG.get("store_id") or ""),
-        )
-    ).strip()
-    base_currency = str(
-        header.get("base_currency")
-        or currency_for_country(country_code)
-    ).strip()
-    return QuoteContext.from_values(
-        country_code=country_code,
-        company_type=company_type,
-        username=username,
-        id_cotizador=id_cotizador,
-        base_currency=base_currency,
-    )
+    return quote_context_from_header(header, defaults=APP_CONFIG)
 
 
 def _infer_tipo_documento_for_api(doc_cliente: str, cod_pais: str) -> str:
@@ -1443,6 +1405,7 @@ def verify_cotizador_signature_once(*, login_password: str | None = None) -> dic
             "message": message,
             "login_status": int(login_resp.status_code),
             "verify_status": int(verify_resp.status_code),
+            "sync": verify_resp.data.get("sync", {}) if isinstance(verify_resp.data, dict) else {},
             "response": verify_resp.data if verify_resp.data is not None else verify_resp.text,
             "payload": payload,
         }
@@ -1489,6 +1452,13 @@ def reserve_next_quote_code(
     user_id, api_username, app_username, country, _company_type, store_id, _tienda = _unpack_api_identity(
         _load_api_identity() if context is None else _load_api_identity(context)
     )
+    # Reserve every authorized scope using the session of this installation.
+    if context is not None:
+        origin = _load_api_identity()
+        user_id = origin.technical_user_id
+        api_username = origin.technical_username
+        app_username = origin.functional_username
+        store_id = origin.id_cotizador
     cod_pais = _country_code_from_country(country)
     store_id = str(store_id or "").strip().upper()
     user_for_payload = _require_functional_username(
@@ -1515,6 +1485,8 @@ def reserve_next_quote_code(
             "id_cotizador": str(id_cotizador or ""),
             "user": user_for_payload,
             "cod_pais": str(cod_pais or ""),
+            "empresa": _normalize_company_type_for_api(_company_type),
+            "pid": _load_or_create_cotizador_pid(),
         }
         if local_last_value is not None:
             try:
@@ -2058,9 +2030,10 @@ def _reserve_provisional_quote_number(
     quote_id: int,
     *,
     login_password: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     qid = int(quote_id)
-    db_path = resolve_db_path()
+    db_path = db_path or resolve_db_path()
     con = connect(db_path)
     _ensure_schema_once(con)
     try:
@@ -2193,6 +2166,8 @@ def _regenerate_quote_artifacts(
         quote_code=quote_code,
         country=country_code,
         store_id=quote_context.id_cotizador,
+        company_type=quote_context.scope.company_type,
+        context=quote_context,
         cliente_nombre=str(header.get("cliente") or ""),
         printer_name="TICKERA",
         width=48,
@@ -2305,6 +2280,8 @@ def send_quote_from_history_once(
     quote_context = None
     try:
         header = get_quote_header(con, qid)
+        if get_setting(con, 'shared_quote_sync_owner', ''):
+            return {'quote_id': qid, 'status': 'PENDING_SHARED_SYNC'}
         quote_context = _quote_context_from_header(header)
         if not force and (
             not str(quote_context.username or "").strip()

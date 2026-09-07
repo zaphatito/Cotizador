@@ -224,6 +224,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
                 cur_v = _infer_schema_version(con)
                 meta_dirty = True
 
+        # Also install on an empty database, where DDL already has current version.
+        from .quote_sync_repo import install as install_quote_sync
+        install_quote_sync(con)
+
         # 3) migrar incremental
         migrated = False
         if cur_v < SCHEMA_VERSION:

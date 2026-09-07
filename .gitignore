@@ -35,4 +35,19 @@ AGENTS.md
 skills-lock.json
 
 # Pruebas locales (no versionar)
-/tests/
+/tests/*
+!/tests/test_shared_quote_sync.py
+!/tests/shared_quote_crossstack.py
+!/tests/test_shared_history_ui.py
+/tmp/
+/output/
+/Output/piloto-historico/
+!/tests/test_pilot_distribution.py
+!/tests/conftest.py
+!/tests/test_quote_context_service.py
+!/tests/test_quote_context_persistence.py
+!/tests/test_multicountry_regressions.py
+!/tests/test_multicountry_windows.py
+!/tests/test_pdf_context_isolation.py
+!/tests/test_window_currency_context.py
+!/Utilidades/piloto_historico.spec

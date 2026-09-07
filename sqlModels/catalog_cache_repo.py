@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -8,6 +9,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
+
+from src.country_rules import country_profile
 
 
 _REVISION_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -830,15 +833,12 @@ def _normalize_group(raw: Any) -> dict[str, Any]:
             default=_first(country_raw, "base_currency", "currency"),
         )
     )
-    country_currency = _BASE_CURRENCY_BY_COUNTRY.get(country_code, "")
-
-    # La moneda base de Bolivia es BOB. Algunos manifiestos antiguos enviaban
-    # PYG para este grupo, lo que hacía que el cotizador mostrara guaraníes aun
-    # cuando el país seleccionado era Bolivia.
-    if country_code in ("BO", "BOL"):
-        base_currency = country_currency
-    else:
-        base_currency = manifest_currency or country_currency
+    base_currency = country_profile(country_code).base_currency
+    if manifest_currency and manifest_currency != base_currency:
+        logging.getLogger(__name__).warning(
+            "Moneda de catálogo corregida por país: %s, %s -> %s",
+            country_code, manifest_currency, base_currency,
+        )
 
     stores_raw = _first(raw, "stores", "shops", "tiendas")
     if not isinstance(stores_raw, list):

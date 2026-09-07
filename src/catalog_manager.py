@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 import pandas as pd
@@ -64,9 +65,11 @@ def _stock_totals(matrix: Mapping[str, Any] | None) -> dict[str, float]:
         if not code:
             continue
         try:
-            totals[code] = float(row.get("total_stock") or 0.0)
+            stocks = row.get("stocks")
+            known = not isinstance(stocks, Mapping) or any(value is not None for value in stocks.values())
+            totals[code] = float(row.get("total_stock") or 0.0) if known else -1.0
         except (TypeError, ValueError):
-            totals[code] = 0.0
+            totals[code] = -1.0
     return totals
 
 
@@ -111,7 +114,7 @@ def _products_frame(catalog: Mapping[str, Any], matrix: Mapping[str, Any] | None
     frame["departamento"] = department_ids.map(departments).fillna("").astype(str).str.strip().str.upper()
     frame["genero"] = gender_ids.map(genders).fillna("").astype(str).str.strip()
     frame["categoria"] = frame["departamento"].where(frame["departamento"] != "", "PRODUCTO")
-    frame["cantidad_disponible"] = frame["codigo"].map(totals).fillna(0.0).astype(float)
+    frame["cantidad_disponible"] = frame["codigo"].map(totals).fillna(-1.0).astype(float)
     frame["id"] = frame["codigo"]
     frame["ml"] = ""
     frame["fuente"] = "EFAPI"
@@ -190,7 +193,7 @@ def _presentations_frame(
     presentation_price_ids = pd.to_numeric(frame["id_precioventa"], errors="coerce").fillna(1).round().astype(int)
     frame["precio_venta"] = presentation_price_ids.where(presentation_price_ids.isin((1, 2, 3)), 1)
     frame["cantidad_disponible"] = (
-        frame["presentation_key"].map(totals).fillna(0.0).astype(float)
+        frame["presentation_key"].map(totals).fillna(-1.0).astype(float)
     )
 
     frame["CODIGO"] = frame["codigo"]
@@ -676,7 +679,7 @@ class CatalogManager(QObject):
 
     def stock_matrix(self, scope: CatalogScope | None = None) -> dict[str, Any]:
         selected = scope or self._active_scope
-        return dict(self._stock_matrices.get(selected) or {})
+        return deepcopy(self._stock_matrices.get(selected) or {})
 
     def _set_active_frames(
         self,

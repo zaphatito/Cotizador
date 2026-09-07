@@ -1,10 +1,41 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import NamedTuple
+
+
+class ApiIdentity(NamedTuple):
+    technical_user_id: int
+    technical_username: str
+    functional_username: str
+    country: str
+    company_type: str
+    id_cotizador: str
+    telemarketing: bool
 
 
 _NUMERIC_IDENTIFIER_RE = re.compile(r"^\d+$")
-_TECHNICAL_API_RE = re.compile(r"^cotizador-[a-z]{2}-\d+$", re.IGNORECASE)
+_TECHNICAL_API_RE = re.compile(r"^cotizador[\s_-]+[a-z]{2}[\s_-]+\d+$", re.IGNORECASE)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ServerIdentity:
+    api_username: str
+    functional_username: str
+    pid: str
+    id_cotizador: str
+
+    def validated(self) -> "ServerIdentity":
+        username, installation = validate_functional_identity(
+            self.functional_username, self.id_cotizador,
+            api_username=self.api_username,
+        )
+        if not str(self.pid or "").strip():
+            raise ValueError("El PID de la instalación es obligatorio.")
+        return ServerIdentity(api_username=self.api_username,
+                              functional_username=username,
+                              pid=self.pid.strip(), id_cotizador=installation)
 
 def normalized_server_identity(
     username: object,
@@ -35,6 +66,8 @@ def validate_server_identity_pair(username: object, id_cotizador: object) -> boo
             "Ingrese juntos el nombre de usuario y el ID del cotizador, "
             "o deje ambos vacíos para trabajar offline."
         )
+    if clean_username:
+        validate_functional_identity(clean_username, clean_id)
     return bool(clean_username)
 
 
@@ -51,6 +84,9 @@ def validate_functional_identity(
         raise ValueError(
             "El usuario funcional y el ID del cotizador son obligatorios para sincronizar."
         )
+
+    if len(clean_username) > 100 or len(clean_id) > 100 or any(ord(char) < 32 or ord(char) == 127 for char in clean_username + clean_id):
+        raise ValueError("El usuario funcional admite hasta 100 caracteres sin controles.")
 
     technical = str(api_username or "").strip()
     if (
@@ -71,6 +107,7 @@ def validate_functional_identity(
 
 
 __all__ = [
+    "ServerIdentity",
     "has_complete_server_identity",
     "is_offline_identity",
     "normalized_server_identity",

@@ -194,7 +194,7 @@ class AddItemsMixin:
         if not match:
             return False
 
-        if not listing_allows_presentations():
+        if not listing_allows_presentations(getattr(self, "listing_type", None)):
             if not silent:
                 QMessageBox.warning(
                     self,
@@ -212,6 +212,9 @@ class AddItemsMixin:
         return True
 
     def agregar_producto_personalizado(self):
+        guard = getattr(self, "_ensure_catalog_for_add", None)
+        if callable(guard) and not guard():
+            return False
         dlg = CustomProductDialog(self, app_icon=self._app_icon)
         if dlg.exec() != QDialog.Accepted or not dlg.resultado:
             return
@@ -257,6 +260,9 @@ class AddItemsMixin:
         )
 
     def _agregar_por_codigo(self, cod, *, silent: bool = False) -> bool:
+        guard = getattr(self, "_ensure_catalog_for_add", None)
+        if callable(guard) and not guard():
+            return False
         pres_payload = cod if isinstance(cod, dict) else None
         if pres_payload is not None:
             cod_u = str(
@@ -326,7 +332,7 @@ class AddItemsMixin:
 
                     pres = sorted(pres_candidates, key=_score_pres)[0]
         if pres:
-            if not listing_allows_presentations():
+            if not listing_allows_presentations(getattr(self, "listing_type", None)):
                 if not silent:
                     QMessageBox.warning(
                         self,
@@ -343,7 +349,7 @@ class AddItemsMixin:
             None,
         )
         if prod:
-            if not listing_allows_products():
+            if not listing_allows_products(getattr(self, "listing_type", None)):
                 if not silent:
                     QMessageBox.warning(
                         self,
@@ -406,7 +412,7 @@ class AddItemsMixin:
 
         # 4) Legacy PC como presentación (solo si no existe como producto normal)
         if cod_u.startswith("PC"):
-            if not listing_allows_presentations():
+            if not listing_allows_presentations(getattr(self, "listing_type", None)):
                 if not silent:
                     QMessageBox.warning(
                         self,
@@ -468,6 +474,9 @@ class AddItemsMixin:
         - Soporta que el “precio” venga como tier string del chat: oferta/minimo/base/etc.
           En ese caso, se aplica como precio_tier y se recalcula.
         """
+        guard = getattr(self, "_ensure_catalog_for_add", None)
+        if callable(guard) and not guard():
+            return False
         items_list = getattr(self, "items", []) or []
         before = len(items_list)
 

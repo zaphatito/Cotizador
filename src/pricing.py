@@ -68,7 +68,7 @@ def factor_total_por_categoria(
     """
     Factor que SOLO afecta el calculo de subtotal/total (no el precio unitario mostrado).
 
-    - CATS (esencias/granel):
+    - Categorías por peso (CATS, incluyendo diluyentes):
         * PERU: qty ya viene en otra unidad, NO aplica x50 aqui.
         * NO-PERU: qty representa unidades de 50g => total = unit * qty * 50
         * Excepcion PY: FERO001/FIJ002 se comportan como unidades => NO aplica x50

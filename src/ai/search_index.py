@@ -1130,7 +1130,9 @@ class LocalSearchIndex:
             try:
                 clients = _load_fuzzy_clients(con)
 
-                essence_cats = {"ESENCIA", "ESENCIAS", "AROMATERAPIA"}
+                # Debe coincidir con las categorías por peso que también
+                # permiten generar combinaciones desde el catálogo.
+                essence_cats = {"ESENCIA", "ESENCIAS", "AROMATERAPIA", "DILUYENTES"}
                 prows = con.execute(
                     """
                     SELECT

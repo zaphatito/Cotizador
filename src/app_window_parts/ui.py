@@ -256,6 +256,8 @@ class UiMixin:
             if catalog_name
             else BASE_APP_TITLE
         )
+        if getattr(self, "quote_context", None) is not None:
+            base_title += f" · {self.country_name} · {self.company_type}"
         self.setWindowTitle(f"{name} - {base_title}" if name else base_title)
 
     def _on_ai_client_picked(self, payload: dict):
@@ -823,10 +825,10 @@ class UiMixin:
         out = []
         for r in recs:
             if r.kind in ("presentation", "pc"):
-                if not listing_allows_presentations():
+                if not listing_allows_presentations(getattr(self, "listing_type", None)):
                     continue
             else:
-                if not listing_allows_products():
+                if not listing_allows_products(getattr(self, "listing_type", None)):
                     continue
             out.append(r)
         return out
@@ -1311,7 +1313,7 @@ class UiMixin:
         try:
             seeds = tuple([str(it.get("codigo") or "").strip().upper() for it in (self.items or []) if str(it.get("codigo") or "").strip()])
             trip = self._client_triplet_for_recs()
-            sig = (trip, seeds, float(self.REC_P_THRESHOLD), bool(listing_allows_products()), bool(listing_allows_presentations()))
+            sig = (trip, seeds, float(self.REC_P_THRESHOLD), bool(listing_allows_products(getattr(self, "listing_type", None))), bool(listing_allows_presentations(getattr(self, "listing_type", None))))
         except Exception:
             sig = None
 
@@ -1579,6 +1581,15 @@ class UiMixin:
         main.setContentsMargins(10, 8, 10, 10)
         main.setSpacing(7)
 
+        self.lbl_context = QLabel(
+            f"{self.country_name} · {self.company_type} · Base: {self.base_currency}"
+        )
+        main.addWidget(self.lbl_context)
+        if getattr(self, "_server_catalog_mode", False):
+            self.btn_stock = QPushButton("Stock de tiendas")
+            self.btn_stock.clicked.connect(self.abrir_stock_tiendas)
+            main.addWidget(self.btn_stock)
+
         grp_cli = QGroupBox("Datos del Cliente")
         form_cli = QGridLayout()
         form_cli.setContentsMargins(10, 8, 10, 8)
@@ -1809,6 +1820,8 @@ class UiMixin:
             converter=getattr(self, "_convert_from_base", None),
             currency_code=getattr(self, "current_currency", None),
             currency_provider=lambda: self._currency_context()[0],
+            rate_provider=lambda: self._currency_context()[2],
+            edit_guard=getattr(self, "_ensure_currency_rate", None),
         )
         self.model.set_code_edit_handler(self._replace_row_item_by_code)
         self.table.setModel(self.model)
@@ -1905,6 +1918,7 @@ class UiMixin:
         btn_prev.clicked.connect(self.previsualizar_datos)
 
         btn_gen = QPushButton("Generar Cotización")
+        self.btn_generar = btn_gen
         btn_gen.setProperty("variant", "primary")
         self._apply_btn_responsive(btn_gen, 140, 36)
         btn_gen.clicked.connect(self.generar_cotizacion)

@@ -37,11 +37,12 @@ from .ai.assistant.ollama_bootstrap import ensure_ollama_on_startup
 from .api.presupuesto_client import verify_cotizador_signature_once
 from .server_identity import has_complete_server_identity
 from .ui_theme import apply_modern_theme
+from .build_profile import MUTEX_NAME, SHOW_EVENT_NAME
 log = get_logger(__name__)
 
 _MUTEX_HANDLE = None
-_MUTEX_NAME = "Local\\SistemaCotizaciones_SingleInstance"
-_SHOW_EVENT_NAME = "Local\\SistemaCotizaciones_ShowMainWindow"
+_MUTEX_NAME = MUTEX_NAME
+_SHOW_EVENT_NAME = SHOW_EVENT_NAME
 ERROR_ALREADY_EXISTS = 183
 
 

@@ -1270,7 +1270,7 @@ class AssistantController(ClarifyFlowMixin):
             if scope is None:
                 raise RuntimeError("No se seleccionó un país y empresa para la cotización.")
             available = tuple(getattr(cm, "available_scopes", ()) or ())
-            if available and scope not in available:
+            if scope not in available:
                 raise RuntimeError(
                     "El pais y empresa de la cotizacion pendiente ya no estan autorizados."
                 )

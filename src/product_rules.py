@@ -59,6 +59,23 @@ def uses_gram_quantity(category_or_item: Any, *, country: str | None = None) -> 
     }
     if uses_peru_business_rules(current_country):
         gram_categories.update(_PERU_EXTRA_GRAM_CATEGORIES)
-    if category not in gram_categories:
+
+    # Los catálogos remotos pueden conservar ``categoria=PRODUCTO`` y
+    # ``departamento=DILUYENTES``. Las presentaciones, servicios y botellas
+    # no deben heredar el gramaje de su departamento.
+    categories = {category}
+    if isinstance(category_or_item, dict) and category not in {
+        "PRESENTACION",
+        "PRESENTACIONES",
+        "SERVICIO",
+        "BOTELLAS",
+    }:
+        department = normalize_product_category(
+            {"departamento": _mapping_value(category_or_item, "departamento")}
+        )
+        if department:
+            categories.add(department)
+
+    if not categories.intersection(gram_categories):
         return False
     return not is_py_unit_product(category_or_item, country=current_country)

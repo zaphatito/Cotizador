@@ -2423,6 +2423,12 @@ def mig_45(con: sqlite3.Connection) -> None:
     )
 
 
+def mig_46(con: sqlite3.Connection) -> None:
+    """v46: snapshots históricos, outbox, revisiones y cursores compartidos."""
+    from .quote_sync_repo import install
+    install(con)
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2469,4 +2475,5 @@ MIGRATIONS: dict[int, callable] = {
     43: mig_43,
     44: mig_44,
     45: mig_45,
+    46: mig_46,
 }

@@ -5,7 +5,7 @@ from .catalog_cache_repo import CATALOG_CACHE_DDL
 from .offline_catalogs_repo import OFFLINE_CATALOG_DDL
 
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 DDL = [
     # =========================

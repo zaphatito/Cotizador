@@ -26,6 +26,9 @@ def build_api_cases(base_url: str | None = None) -> tuple[tuple[int, str], ...]:
         (API_CASE_GET_COUNTRY_CLIENTS, f"{root}/db/getCountryClients"),
         (API_CASE_POST_LABEL_PRINT_LOG, f"{root}/db/postEtiquetasImpresas"),
         (API_CASE_GET_COTIZADOR_CATALOG_STOCK, f"{root}/db/getCotizadorCatalogStock"),
+        (API_CASE_POST_QUOTE_SYNC, f"{root}/db/postCotizacionSync"),
+        (API_CASE_GET_QUOTES_SYNC, f"{root}/db/getCotizacionesSync"),
+        (API_CASE_GET_QUOTE_SYNC, f"{root}/db/getCotizacionSync"),
     )
 
 
@@ -39,6 +42,9 @@ API_CASE_GET_NEXT_QUOTE_CODE: Final[int] = 4
 API_CASE_GET_COUNTRY_CLIENTS: Final[int] = 5
 API_CASE_POST_LABEL_PRINT_LOG: Final[int] = 6
 API_CASE_GET_COTIZADOR_CATALOG_STOCK: Final[int] = 7
+API_CASE_POST_QUOTE_SYNC: Final[int] = 8
+API_CASE_GET_QUOTES_SYNC: Final[int] = 9
+API_CASE_GET_QUOTE_SYNC: Final[int] = 10
 
 API_CASES: Final[tuple[tuple[int, str], ...]] = build_api_cases(API_BASE_URL)
 
