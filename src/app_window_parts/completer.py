@@ -70,6 +70,7 @@ def build_completer_strings(
     presentaciones=None,
     *,
     quote_context=None,
+    listing_type=None,
 ):
     sugs = []
     seen = set()
@@ -95,7 +96,7 @@ def build_completer_strings(
         seen.add(key)
         sugs.append(t)
 
-    if listing_allows_products():
+    if listing_allows_products(listing_type):
         for p in productos or []:
             if enforce_stock and float(
                 nz(p.get("cantidad_disponible"), 0.0)
@@ -106,7 +107,7 @@ def build_completer_strings(
             gen = p.get("genero", "")
             _add_sug(f"{p['id']} - {p['nombre']} - {cat}" + (f" - {gen}" if gen else ""))
 
-    if listing_allows_presentations():
+    if listing_allows_presentations(listing_type):
         for pr in presentaciones or []:
             stock = float(
                 nz(
@@ -314,6 +315,7 @@ class CompleterMixin:
                 self._botellas_pc,
                 self.presentaciones,
                 quote_context=getattr(self, "quote_context", None),
+                listing_type=getattr(self, "listing_type", None),
             )
         )
         self._completer = QCompleter(self._sug_model, self)

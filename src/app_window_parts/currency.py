@@ -1,7 +1,11 @@
 # src/app_window_parts/currency.py
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMessageBox
+from ..currency import normalize_currency_code
 
 from ..logging_setup import get_logger
 from ..widgets import show_currency_dialog
@@ -23,24 +27,37 @@ class CurrencyMixin:
         return (
             str(getattr(self, "current_currency", self.base_currency) or self.base_currency).upper(),
             str(getattr(self, "secondary_currency", "") or "").upper(),
-            float(getattr(self, "currency_rate", 1.0) or 1.0),
+            float(getattr(self, "currency_rate", 1.0) or 0.0),
         )
 
-    def _set_currency_context(self, currency: str, rate: float) -> None:
-        selected = str(currency or self.base_currency).strip().upper()
-        self.current_currency = selected or self.base_currency
+    def _set_currency_context(self, currency: str, rate: float, *, allow_missing: bool = False) -> None:
+        selected = normalize_currency_code(currency or self.base_currency)
         try:
             parsed_rate = float(rate)
         except (TypeError, ValueError):
+            parsed_rate = 0.0
+        if selected == self.base_currency:
             parsed_rate = 1.0
-        self.currency_rate = (
-            1.0
-            if self.current_currency == self.base_currency
-            else (parsed_rate if parsed_rate > 0 else 1.0)
-        )
+        elif not math.isfinite(parsed_rate) or parsed_rate <= 0:
+            if not allow_missing:
+                raise ValueError("Configura una tasa positiva para convertir entre monedas.")
+            parsed_rate = 0.0
+        self.current_currency = selected
+        self.currency_rate = parsed_rate
+
+    def _ensure_currency_rate(self) -> bool:
+        currency, _secondary, rate = self._currency_context()
+        if currency == self.base_currency or (math.isfinite(rate) and rate > 0):
+            return True
+        QMessageBox.information(self, "Tasa pendiente", "La cotización no tiene una tasa válida. Selecciona una tasa antes de recalcular importes.")
+        self.abrir_dialogo_moneda_y_tasa()
+        return self.currency_rate > 0
 
     def _convert_from_base(self, amount: float) -> float:
-        return float(amount) * float(getattr(self, "currency_rate", 1.0) or 1.0)
+        currency, _secondary, rate = self._currency_context()
+        if currency != self.base_currency and (not math.isfinite(rate) or rate <= 0):
+            raise ValueError("La tasa de esta cotización está pendiente.")
+        return float(amount) * rate
 
     def _load_exchange_rate_file(self) -> dict[str, float]:
         try:
@@ -52,7 +69,9 @@ class CurrencyMixin:
             out: dict[str, float] = {}
             for k, v in (rates or {}).items():
                 try:
-                    out[str(k).upper()] = float(v)
+                    value = float(v)
+                    if math.isfinite(value) and value > 0:
+                        out[str(k).upper()] = value
                 except Exception:
                     continue
             return out
@@ -75,7 +94,7 @@ class CurrencyMixin:
                         r = float(rate)
                     except Exception:
                         continue
-                    if r <= 0:
+                    if not math.isfinite(r) or r <= 0:
                         continue
                     set_rate(con, self.base_currency, str(cur).upper(), r)
             con.close()
@@ -112,8 +131,6 @@ class CurrencyMixin:
                 r = float(rate_ctx)
             except Exception:
                 r = 0.0
-            if not r or r <= 0:
-                r = (getattr(self, "_rates", {}) or {}).get(cur)
             if r and r > 0:
                 txt = f"Moneda: {cur} (1 {base} = {r:.4f} {cur})"
             else:
@@ -160,7 +177,11 @@ class CurrencyMixin:
                 f = float(val)
             except Exception:
                 f = 0.0
-            new_rates[code.upper()] = f if f > 0 else 0.0
+            new_rates[code.upper()] = f if math.isfinite(f) and f > 0 else 0.0
+
+        if not is_base and selected != base and not (math.isfinite(new_rates.get(selected, 0.0)) and new_rates.get(selected, 0.0) > 0):
+            QMessageBox.warning(self, "Tasa inválida", "Ingresa una tasa positiva para la moneda seleccionada.")
+            return
 
         # guardar cambios en DB
         prev_rates = dict(getattr(self, "_rates", {}) or {})
@@ -179,9 +200,6 @@ class CurrencyMixin:
             self._set_currency_context(base, 1.0)
         else:
             r = float(new_rates.get(selected, 0.0))
-            if r <= 0:
-                # si no hay tasa válida, forzar 1.0 para no romper UI
-                r = 1.0
             self._set_currency_context(selected, r)
 
         self._update_currency_label()

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 
 import pandas as pd
 
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QMainWindow, QMessageBox
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt
 
@@ -13,20 +14,22 @@ from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.settings_repo import get_setting, set_setting
 
 from ..config import (
-    APP_CURRENCY,
+    APP_CONFIG,
     APP_COUNTRY,
     APP_COMPANY_TYPE,
     APP_USERNAME,
     COUNTRY_CODE,
     STORE_ID,
     SECONDARY_CURRENCY,
-    currency_for_country,
     secondary_currencies_for_country,
     get_secondary_currencies,
     is_ai_enabled,
     is_recommendations_enabled,
 )
-from ..country_rules import normalize_country_name
+from ..country_rules import country_profile
+from ..currency import normalize_currency_code
+from ..quote_context_service import quote_context_is_authorized
+from .history_snapshot import history_base_snapshot
 from ..catalog_refresh import (
     historical_product_for_item,
     refreshed_product_for_item,
@@ -107,6 +110,8 @@ class SistemaCotizaciones(
         self._catalog_manager = catalog_manager
         self._quote_events = quote_events
         self.quote_context = quote_context
+        self.listing_type = str(APP_CONFIG.get("listing_type") or "AMBOS")
+        self._stock_dialog = None
         self._server_catalog_mode = manager_server_mode
         self._local_catalog_name = ""
         self._local_catalog_id = (
@@ -120,8 +125,9 @@ class SistemaCotizaciones(
             if local_name:
                 self._local_catalog_name = local_name
         scope = getattr(quote_context, "scope", None)
-        self.country_code = str(getattr(scope, "country_code", "") or COUNTRY_CODE).strip().upper()
-        self.country_name = normalize_country_name(self.country_code, default=APP_COUNTRY)
+        profile = country_profile(getattr(scope, "country_code", "") or COUNTRY_CODE)
+        self.country_code = profile.code
+        self.country_name = profile.name
         self.company_type = str(
             getattr(scope, "company_type", "") or APP_COMPANY_TYPE
         ).strip().upper()
@@ -146,11 +152,7 @@ class SistemaCotizaciones(
         self._ctx_row = None
 
         # === Moneda / tasa (DB) ===
-        self.base_currency = str(
-            getattr(quote_context, "base_currency", "")
-            or currency_for_country(self.country_code)
-            or APP_CURRENCY
-        ).strip().upper()
+        self.base_currency = profile.base_currency
         scoped_secondary = (
             secondary_currencies_for_country(self.country_code)
             if quote_context is not None
@@ -212,6 +214,7 @@ class SistemaCotizaciones(
                     self._catalog_manager.stock_updated.connect(
                         self._on_scope_stock_updated
                     )
+                    self._catalog_manager.scopes_updated.connect(self._on_scopes_updated)
                 except Exception:
                     pass
             elif self._local_catalog_id is not None and hasattr(
@@ -235,6 +238,61 @@ class SistemaCotizaciones(
                 self._quote_events.rates_updated.connect(self._on_rates_updated)
             except Exception:
                 pass
+
+    def _ensure_authorized_quote_context(self) -> bool:
+        if not self._server_catalog_mode:
+            return True
+        if quote_context_is_authorized(self.quote_context, self._catalog_manager):
+            return True
+        QMessageBox.warning(self, "Asignación retirada", "El país y empresa de esta cotización ya no están asignados a este usuario/cotizador.")
+        return False
+
+    def _ensure_catalog_for_add(self) -> bool:
+        if not self._ensure_authorized_quote_context():
+            return False
+        if self._server_catalog_mode:
+            healthy, reason = self._catalog_manager.catalog_health(self.quote_context.scope)
+            if not healthy:
+                QMessageBox.warning(self, "Catálogo no disponible", reason)
+                return False
+        return self._ensure_currency_rate()
+
+    def _on_scopes_updated(self, _scopes):
+        authorized = quote_context_is_authorized(self.quote_context, self._catalog_manager)
+        self.btn_generar.setEnabled(authorized)
+        self.lbl_context.setText(
+            f"{self.country_name} · {self.company_type} · Base: {self.base_currency}"
+            + ("" if authorized else " · Asignación retirada")
+        )
+        if not authorized:
+            self.productos = []
+            self.presentaciones = []
+            self._rec_engine = None
+            self._build_completer()
+            for item in self.items:
+                item["stock_disponible"] = -1
+
+    def abrir_stock_tiendas(self):
+        if not self._ensure_authorized_quote_context():
+            return
+        from ..widgets_parts.stock_matrix_dialog import StockMatrixDialog
+
+        if self._stock_dialog is not None:
+            self._stock_dialog.reload()
+            self._stock_dialog.show()
+            self._stock_dialog.raise_()
+            return
+        history = getattr(self, "_history_window", None)
+        dialog = StockMatrixDialog(
+            catalog_manager=self._catalog_manager,
+            sync_service=getattr(history, "_catalog_sync_service", None),
+            scope=self.quote_context.scope,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_: setattr(self, "_stock_dialog", None))
+        self._stock_dialog = dialog
+        dialog.show()
 
     def _attach_inline_assistant(self):
         if getattr(self, "_assistant", None) is not None:
@@ -293,16 +351,8 @@ class SistemaCotizaciones(
             self._rates = self._load_exchange_rate_file()
         except Exception:
             self._rates = {}
-        current_currency = str(
-            getattr(self, "current_currency", self.base_currency) or self.base_currency
-        ).strip().upper()
-        if current_currency and current_currency != self.base_currency:
-            try:
-                updated_rate = float((self._rates or {}).get(current_currency) or 0.0)
-            except (TypeError, ValueError):
-                updated_rate = 0.0
-            if updated_rate > 0:
-                self._set_currency_context(current_currency, updated_rate)
+        # Las tasas disponibles pueden cambiar; la tasa aplicada pertenece a
+        # esta cotización y solo cambia por una selección explícita aquí.
         try:
             self._update_currency_label()
         except Exception:
@@ -350,7 +400,7 @@ class SistemaCotizaciones(
         df_productos: pd.DataFrame,
         df_presentaciones: pd.DataFrame,
     ):
-        if scope != getattr(self.quote_context, "scope", None):
+        if scope != getattr(self.quote_context, "scope", None) or not quote_context_is_authorized(self.quote_context, self._catalog_manager):
             return
         self._apply_catalog_update(
             df_productos,
@@ -359,7 +409,7 @@ class SistemaCotizaciones(
         )
 
     def _on_scope_stock_updated(self, scope):
-        if scope != getattr(self.quote_context, "scope", None):
+        if scope != getattr(self.quote_context, "scope", None) or not quote_context_is_authorized(self.quote_context, self._catalog_manager):
             return
         try:
             df_productos, df_presentaciones = self._catalog_manager.catalog_for_scope(scope)
@@ -446,6 +496,9 @@ class SistemaCotizaciones(
                             pass
 
                     changed_any = True
+                elif self._server_catalog_mode:
+                    it["stock_disponible"] = -1
+                    changed_any = True
 
             if changed_any and self.model.rowCount() > 0:
                 top = self.model.index(0, 0)
@@ -459,9 +512,9 @@ class SistemaCotizaciones(
         base_currency = str(getattr(self, "base_currency", "") or "").strip().upper()
         currency = str(
             (payload or {}).get("currency_shown")
-            or (payload or {}).get("base_currency")
             or base_currency
         ).strip().upper()
+        currency = normalize_currency_code(currency)
 
         try:
             saved_rate = float((payload or {}).get("tasa_shown"))
@@ -469,15 +522,10 @@ class SistemaCotizaciones(
             saved_rate = 0.0
         if currency == base_currency:
             rate = 1.0
-        elif saved_rate > 0:
+        elif math.isfinite(saved_rate) and saved_rate > 0:
             rate = saved_rate
         else:
-            try:
-                rate = float((getattr(self, "_rates", None) or {}).get(currency) or 1.0)
-            except (TypeError, ValueError):
-                rate = 1.0
-            if rate <= 0:
-                rate = 1.0
+            rate = 0.0  # conservar snapshots, no inventar una conversión
 
         shown_items = (payload or {}).get("items_shown") or []
         self._history_shown_items_snapshot = deepcopy(
@@ -491,7 +539,10 @@ class SistemaCotizaciones(
             "currency": currency or base_currency,
             "rate": float(rate),
         }
-        self._set_currency_context(currency or base_currency, rate)
+        if rate > 0:
+            self._set_currency_context(currency or base_currency, rate)
+        else:
+            self._set_currency_context(currency or base_currency, rate, allow_missing=True)
         try:
             self._update_currency_label()
         except Exception:
@@ -620,7 +671,8 @@ class SistemaCotizaciones(
                             return None
             return None
 
-        for it in payload.get("items_base") or []:
+        shown_items = payload.get("items_shown") or []
+        for item_index, it in enumerate(payload.get("items_base") or []):
             codigo = str(it.get("codigo") or "").strip()
             cat_u_in = str(it.get("categoria") or "").strip().upper()
 
@@ -654,9 +706,12 @@ class SistemaCotizaciones(
             item.setdefault("descuento_pct", 0.0)
             item.setdefault("descuento_monto", 0.0)
 
-            # Abrir una cotización crea una nueva edición con precios vigentes.
-            # La regeneración del PDF lee por separado items_shown desde SQLite.
-            self.model._recalc_price_for_qty(item)
+            # Abrir no es repricing. Conservar los dos snapshots hasta una
+            # edición explícita; el catálogo solo aporta stock y metadatos.
+            item["_history_base_snapshot"] = history_base_snapshot(item)
+            item["_history_display_snapshot"] = deepcopy(self._history_display_snapshot)
+            if item_index < len(shown_items):
+                item["_history_shown_snapshot"] = deepcopy(shown_items[item_index])
             self.model.add_item(item, preserve_snapshot=True)
 
     @staticmethod

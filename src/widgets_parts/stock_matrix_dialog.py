@@ -21,11 +21,13 @@ from .bounded_table_columns import install_bounded_columns
 
 
 class StockMatrixDialog(QDialog):
-    def __init__(self, *, catalog_manager, sync_service=None, parent=None):
+    def __init__(self, *, catalog_manager, sync_service=None, scope=None, parent=None):
         super().__init__(parent)
         self.catalog_manager = catalog_manager
+        self.scope = scope
+        self._owner = (getattr(catalog_manager, "username", ""), getattr(catalog_manager, "id_cotizador", ""))
         self.sync_service = None
-        self.setWindowTitle("Stock por tiendas")
+        self.setWindowTitle("Stock por tiendas" + (f" · {scope.label}" if scope is not None else ""))
         self.resize(1120, 680)
         self.setMinimumSize(760, 460)
 
@@ -134,8 +136,13 @@ class StockMatrixDialog(QDialog):
 
     def reload(self) -> None:
         selected_key = self._current_store_key()
-        self.tabs.clear()
+        while self.tabs.count():
+            page = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            page.deleteLater()
         scopes = tuple(getattr(self.catalog_manager, "available_scopes", ()) or ())
+        if self.scope is not None:
+            scopes = (self.scope,) if self.scope in scopes and self._owner == (getattr(self.catalog_manager, "username", ""), getattr(self.catalog_manager, "id_cotizador", "")) else ()
         multiple_scopes = len(scopes) > 1
         for scope in scopes:
             if not isinstance(scope, CatalogScope):
@@ -149,7 +156,7 @@ class StockMatrixDialog(QDialog):
                 store_key = f"{scope.group_key}:{store_view['store_id']}"
                 page.setProperty("store_key", store_key)
                 page_layout = QVBoxLayout(page)
-                context = QLabel(f"{country} · {company}")
+                context = QLabel(f"{country} · {company}" + (" · Sin snapshot de esta tienda" if not store_view["snapshot_available"] else ""))
                 context.setProperty("role", "muted")
                 page_layout.addWidget(context)
                 type_tabs = QTabWidget()
@@ -206,7 +213,8 @@ class StockMatrixDialog(QDialog):
         self.refresh_button.setEnabled(True)
 
     def _on_stock_updated(self, _scope: object) -> None:
-        self.reload()
+        if self.scope is None or self.scope == _scope:
+            self.reload()
 
     def _on_scopes_updated(self, _scopes: object) -> None:
         self.reload()

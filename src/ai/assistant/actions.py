@@ -325,10 +325,10 @@ def _get_catalog_manager(window):
     return getattr(window, "_catalog_manager", None) or getattr(window, "catalog_manager", None)
 
 
-def _ensure_effective_catalog_scope(window):
+def _ensure_effective_catalog_scope(window, *, force_select=False):
     scope = effective_catalog_scope(window)
     cm = _get_catalog_manager(window)
-    if scope is not None or cm is None or not bool(getattr(cm, "server_mode", False)):
+    if (scope is not None and not force_select) or cm is None or not bool(getattr(cm, "server_mode", False)):
         return scope
 
     from ...widgets_parts.catalog_scope_dialog import select_catalog_scope
@@ -704,7 +704,9 @@ def set_currency_on_window(window, currency: str) -> tuple[str, float]:
     rate = 1.0
     if cur and base and cur != base:
         rates = getattr(window, "_rates", {}) or {}
-        rate = float(rates.get(cur) or 0.0) or 1.0
+        rate = float(rates.get(cur) or 0.0)
+        if not math.isfinite(rate) or rate <= 0:
+            raise ValueError(f"Configura una tasa positiva de {base} a {cur} antes de crear la cotización.")
 
     if hasattr(window, "_set_currency_context"):
         window._set_currency_context(cur or base, float(rate))
@@ -750,7 +752,7 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
     }
 
     cm = _get_catalog_manager(window)
-    assistant_scope = _ensure_effective_catalog_scope(window)
+    assistant_scope = _ensure_effective_catalog_scope(window, force_select=getattr(window, "quote_context", None) is None)
     if assistant_scope is None and cm is not None and bool(getattr(cm, "server_mode", False)):
         if assistant_scope is None:
             resolved["unresolved"].append(
@@ -912,11 +914,13 @@ def create_quote_preview(window, args: dict) -> tuple[str, dict]:
 
 
 def execute_create_quote(window, resolved: dict) -> str:
-    window.limpiar_formulario()
-
+    guard = getattr(window, "_ensure_catalog_for_add", None)
+    if callable(guard) and not guard():
+        return "No se pudo crear la cotización: revisa asignación, catálogo y tasa."
     cur = str(resolved.get("currency") or "").upper().strip()
     if cur:
         set_currency_on_window(window, cur)
+    window.limpiar_formulario()
 
     cli = (resolved.get("client") or {})
     try:

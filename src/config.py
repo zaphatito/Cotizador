@@ -8,7 +8,7 @@ import logging
 from typing import Dict, Any, Tuple, List
 
 from .currency import normalize_currency_code
-from .country_rules import SUPPORTED_COUNTRIES, country_code_for, normalize_country_name
+from .country_rules import SUPPORTED_COUNTRIES, country_code_for, country_profile, normalize_country_name
 from .paths import DATA_DIR, user_docs_dir
 from sqlModels.db import connect, ensure_schema, tx
 from sqlModels.api_identity import API_LOGIN_PASSWORD, build_api_settings
@@ -63,8 +63,8 @@ LEGACY_MANIFEST_URLS = {
     "https://media.githubusercontent.com/media/zaphatito/cotizador/main/config/cotizador.json",
 }
 
-# Categorías granel
-CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS"]
+# Categorías granel / productos cuya cantidad se maneja por peso
+CATS = ["ESENCIA", "AROMATERAPIA", "ESENCIAS", "DILUYENTES"]
 
 ALLOWED_COMPANY_TYPES: tuple[str, str] = (
     "LA CASA DEL PERFUME",
@@ -623,30 +623,14 @@ def currency_for_country(country: str) -> str:
     """
     Devuelve moneda BASE (CANÓNICA ISO).
     """
-    c = normalize_country_name(country)
-    if c == "PERU":
-        return "PEN"
-    if c == "BOLIVIA":
-        return "BOB"
-    if c == "VENEZUELA":
-        return "USD"
-    return "PYG"
+    return country_profile(country).base_currency
 
 
 def secondary_currencies_for_country(country: str) -> List[str]:
     """
     Devuelve monedas secundarias (CANÓNICAS ISO).
     """
-    c = normalize_country_name(country)
-    if c == "PARAGUAY":
-        return ["ARS", "BRL", "USD"]
-    if c == "VENEZUELA":
-        return ["VES"]
-    if c == "PERU":
-        return ["BOB", "USD"]
-    if c == "BOLIVIA":
-        return ["PEN", "USD"]
-    return []
+    return list(country_profile(country).secondary_currencies)
 
 
 def secondary_currency_for_country(country: str, base: str) -> str:
@@ -687,12 +671,12 @@ def id_label_for_country(country: str) -> str:
     return "Documento"
 
 
-def listing_allows_products() -> bool:
-    return APP_LISTING_TYPE in ("PRODUCTOS", "AMBOS")
+def listing_allows_products(listing_type=None) -> bool:
+    return (APP_LISTING_TYPE if listing_type is None else listing_type) in ("PRODUCTOS", "AMBOS")
 
 
-def listing_allows_presentations() -> bool:
-    return APP_LISTING_TYPE in ("PRESENTACIONES", "AMBOS")
+def listing_allows_presentations(listing_type=None) -> bool:
+    return (APP_LISTING_TYPE if listing_type is None else listing_type) in ("PRESENTACIONES", "AMBOS")
 
 
 # Contexto de moneda actual (siempre CANÓNICO)

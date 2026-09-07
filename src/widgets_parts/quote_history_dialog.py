@@ -149,28 +149,9 @@ def _parse_dt(value) -> datetime.datetime | None:
 
 
 def _quote_context_from_header(header: dict) -> QuoteContext:
-    return QuoteContext.from_values(
-        country_code=country_code_for(
-            header.get("country_code"),
-            default=COUNTRY_CODE,
-        ),
-        company_type=str(
-            header.get("company_type")
-            or APP_CONFIG.get("company_type")
-            or "LA CASA DEL PERFUME"
-        ).strip(),
-        username=str(
-            header.get("cotizador_username")
-            or APP_CONFIG.get("username")
-            or ""
-        ).strip(),
-        id_cotizador=str(
-            header.get("id_cotizador") or STORE_ID
-        ).strip(),
-        base_currency=str(
-            header.get("base_currency") or APP_CURRENCY
-        ).strip(),
-    )
+    from ..quote_context_service import quote_context_from_header
+
+    return quote_context_from_header(header, defaults=APP_CONFIG)
 
 
 def format_dt_legible(value) -> str:
@@ -477,7 +458,14 @@ class HistoryConfigDialog(QDialog):
             QMessageBox.critical(self, "Error", f"No se pudo abrir personalizacion:\n{e}")
 
     def _open_rates(self):
-        dlg = RatesDialog(self)
+        manager = getattr(self._history, "catalog_manager", None)
+        country = None
+        if bool(getattr(manager, "server_mode", False)):
+            scope = select_catalog_scope(self, manager, require_catalog=False)
+            if scope is None:
+                return
+            country = scope.country_code
+        dlg = RatesDialog(self, country_code=country)
         if dlg.exec() == QDialog.Accepted:
             try:
                 if self._history.quote_events is not None:
@@ -2553,61 +2541,15 @@ class QuoteHistoryWindow(QMainWindow):
             df_productos = self.catalog_manager.df_productos
             df_presentaciones = self.catalog_manager.df_presentaciones
             if bool(getattr(self.catalog_manager, "server_mode", False)):
-                historical_scope, used_legacy_scope = resolve_historical_quote_scope(
-                    header,
-                    tuple(self.catalog_manager.available_scopes or ()),
-                    default_country_code=COUNTRY_CODE,
-                )
-                if historical_scope is None:
-                    QMessageBox.warning(
-                        self,
-                        "Catálogo histórico no autorizado",
-                        "La cotización usa un país y empresa que ya no están asignados "
-                        "a este usuario/cotizador.",
-                    )
-                    return
-                if used_legacy_scope:
-                    log.info(
-                        "Cotización legacy abierta con el único scope autorizado "
-                        "del país: %s",
-                        historical_scope.group_key,
-                    )
+                from ..quote_context_service import quote_context_from_header
 
-                current_username = str(self.catalog_manager.username or "").strip()
-                current_id = str(self.catalog_manager.id_cotizador or "").strip()
-                historical_owner = resolve_historical_quote_owner(
-                    header,
-                    current_username=current_username,
-                    current_id_cotizador=current_id,
-                )
-                if historical_owner is None:
-                    QMessageBox.warning(
-                        self,
-                        "Caché de otro cotizador",
-                        "No se puede duplicar esta cotización con el catálogo de otra "
-                        "identidad de usuario/cotizador.",
-                    )
-                    return
-                historical_username, historical_id = historical_owner
-
-                # El scope exacto se conserva; una fila legacy solo puede usar
-                # el único scope autorizado del mismo país.
-                scope = historical_scope
-                df_productos, df_presentaciones = self.catalog_manager.catalog_for_scope(scope)
-                ok, reason = validate_products_catalog_df(df_productos)
-                if ok:
-                    default_context = build_quote_context(self.catalog_manager, scope)
-                    quote_context = QuoteContext.from_values(
-                        country_code=scope.country_code,
-                        company_type=scope.company_type,
-                        username=historical_username or default_context.username,
-                        id_cotizador=historical_id or default_context.id_cotizador,
-                        base_currency=(
-                            str(header.get("base_currency") or "").strip()
-                            or default_context.base_currency
-                        ),
-                    )
+                quote_context = quote_context_from_header(header, catalog_manager=self.catalog_manager)
+                df_productos, df_presentaciones = self.catalog_manager.catalog_for_scope(quote_context.scope)
+                # El snapshot basta para abrir; agregar artículos valida el
+                # catálogo actual y la autorización en el editor.
+                ok, reason = True, ""
             else:
+                quote_context = _quote_context_from_header(header)
                 local_catalogs = tuple(
                     getattr(self.catalog_manager, "available_local_catalogs", ()) or ()
                 )
@@ -2770,7 +2712,7 @@ class QuoteHistoryWindow(QMainWindow):
                 pdf_path=pdf_path,
                 items_pdf=items_shown,
                 quote_code=quote_code,
-                country=header.get("country_code") or APP_COUNTRY,
+                country=label_quote_context.scope.country_code,
                 store_id=historical_store_id,
                 company_type=ticket_context.scope.company_type,
                 context=ticket_context,
@@ -2821,36 +2763,15 @@ class QuoteHistoryWindow(QMainWindow):
             quote_no=header.get("quote_no"),
             width=7,
         )
-        label_quote_context = None
         try:
-            historical_id = str(header.get("id_cotizador") or STORE_ID).strip()
-            if historical_id:
-                label_quote_context = QuoteContext.from_values(
-                    country_code=country_code_for(
-                        header.get("country_code"),
-                        default=COUNTRY_CODE,
-                    ),
-                    company_type=str(
-                        header.get("company_type")
-                        or APP_CONFIG.get("company_type")
-                        or "LA CASA DEL PERFUME"
-                    ).strip(),
-                    username=str(
-                        header.get("cotizador_username")
-                        or APP_CONFIG.get("username")
-                        or ""
-                    ).strip(),
-                    id_cotizador=historical_id,
-                    base_currency=str(
-                        header.get("base_currency") or APP_CURRENCY
-                    ).strip(),
-                )
-        except (TypeError, ValueError):
-            label_quote_context = None
+            label_quote_context = _quote_context_from_header(header)
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Contexto histórico inválido", str(exc))
+            return
         dlg = LabelsDialog(
             self,
             quote_code=quote_code,
-            country=header.get("country_code") or APP_COUNTRY,
+            country=label_quote_context.scope.country_code,
             items=items_shown,
             company_type=str(header.get("company_type") or "").strip(),
             quote_context=label_quote_context,
@@ -2874,15 +2795,10 @@ class QuoteHistoryWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "La cotización no tiene ruta de PDF.")
                 return
 
-            historical_country_code = country_code_for(
-                header.get("country_code"),
-                default=COUNTRY_CODE,
-            )
-            historical_country = normalize_country_name(
-                historical_country_code,
-                default=APP_COUNTRY,
-            )
-            historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
+            context = _quote_context_from_header(header)
+            historical_country_code = context.scope.country_code
+            historical_country = normalize_country_name(historical_country_code)
+            historical_store_id = context.id_cotizador
             quote_code = format_quote_code(
                 country_code=historical_country_code,
                 store_id=historical_store_id,
@@ -2980,15 +2896,10 @@ class QuoteHistoryWindow(QMainWindow):
         if not old_out_path:
             raise RuntimeError("La cotización no tiene ruta de PDF.")
 
-        historical_country_code = country_code_for(
-            header.get("country_code"),
-            default=COUNTRY_CODE,
-        )
-        historical_country = normalize_country_name(
-            historical_country_code,
-            default=APP_COUNTRY,
-        )
-        historical_store_id = str(header.get("id_cotizador") or STORE_ID).strip()
+        context = _quote_context_from_header(header)
+        historical_country_code = context.scope.country_code
+        historical_country = normalize_country_name(historical_country_code)
+        historical_store_id = context.id_cotizador
         quote_code = format_quote_code(
             country_code=historical_country_code,
             store_id=historical_store_id,
@@ -3085,7 +2996,7 @@ class QuoteHistoryWindow(QMainWindow):
             pdf_path=new_pdf_path,
             items_pdf=items_shown,
             quote_code=quote_code,
-            country=header.get("country_code") or APP_COUNTRY,
+            country=label_quote_context.scope.country_code,
             store_id=str(header.get("id_cotizador") or STORE_ID).strip(),
             company_type=ticket_context.scope.company_type,
             context=ticket_context,

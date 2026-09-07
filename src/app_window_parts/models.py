@@ -12,7 +12,7 @@ from ..pricing import discount_from_amount, discount_percentage_decimals, round_
 from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
 from ..logging_setup import get_logger
-from .history_snapshot import matching_history_shown_snapshot
+from .history_snapshot import history_base_snapshot, matching_history_shown_snapshot
 
 log = get_logger(__name__)
 
@@ -216,6 +216,8 @@ class ItemsModel(QAbstractTableModel):
         converter=None,
         currency_code: str | None = None,
         currency_provider=None,
+        rate_provider=None,
+        edit_guard=None,
     ):
         super().__init__()
         self._items = items
@@ -229,6 +231,8 @@ class ItemsModel(QAbstractTableModel):
         self._currency_converter = converter if callable(converter) else convert_from_base
         self._currency_code = str(currency_code or "").strip().upper()
         self._currency_provider = currency_provider if callable(currency_provider) else None
+        self._rate_provider = rate_provider if callable(rate_provider) else None
+        self._edit_guard = edit_guard if callable(edit_guard) else None
         self._py_cash_mode = False
         self._recs_preview: list[dict] = []
         self._code_edit_handler = None
@@ -251,7 +255,7 @@ class ItemsModel(QAbstractTableModel):
 
     def _matching_history_shown_snapshot(self, item: dict) -> dict | None:
         try:
-            rate = self._convert_from_base(1.0)
+            rate = self._rate_provider() if self._rate_provider is not None else self._convert_from_base(1.0)
         except Exception:
             return None
         return matching_history_shown_snapshot(
@@ -772,6 +776,8 @@ class ItemsModel(QAbstractTableModel):
             shown_snapshot = (
                 None if is_preview else self._matching_history_shown_snapshot(it)
             )
+            if col in (2, 4, 5) and shown_snapshot is None and self._rate_provider is not None and self._rate_provider() <= 0:
+                return "Tasa pendiente"
             if col == 0:
                 return it["codigo"]
             elif col == 1:
@@ -901,6 +907,8 @@ class ItemsModel(QAbstractTableModel):
         self._apply_price_and_total(it, p)
 
     def setData(self, index, value, role=Qt.EditRole):
+        if index.isValid() and index.column() in (0, 2, 3, 4) and self._edit_guard is not None and not self._edit_guard():
+            return False
         if role != Qt.EditRole or not index.isValid():
             return False
 
@@ -1138,7 +1146,9 @@ class ItemsModel(QAbstractTableModel):
             item["descuento_monto"] = 0.0
 
         cat = (item.get("categoria") or "").upper()
-        if _is_service_category(cat):
+        if preserve_snapshot:
+            pass
+        elif _is_service_category(cat):
             item["id_precioventa"] = PRICE_ID_PERSONALIZADO
             item["precio_tier"] = None
             if item.get("precio_override") is None:
@@ -1174,6 +1184,8 @@ class ItemsModel(QAbstractTableModel):
 
         if not preserve_snapshot:
             self._normalize_discount_and_totals(item, unit_price)
+        elif "_history_display_snapshot" in item:
+            item["_history_base_snapshot"] = history_base_snapshot(item)
 
         self.beginInsertRows(QModelIndex(), len(self._items), len(self._items))
         self._items.append(item)

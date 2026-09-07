@@ -135,6 +135,7 @@ def build_store_stock_tabs(
             {
                 "store_id": store_id,
                 "label": store_label(store),
+                "snapshot_available": bool(store.get("stock_revision")),
                 "sections": sections,
             }
         )

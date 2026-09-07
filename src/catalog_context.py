@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Mapping
 
-from .country_rules import local_country_code_for
+from .country_rules import country_profile, local_country_code_for
 
 
 def _required_upper(value: Any, *, field: str) -> str:
@@ -22,6 +23,7 @@ class CatalogScope:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "country_code", _required_upper(self.country_code, field="country_code"))
+        country_profile(self.country_code)
         object.__setattr__(self, "company_type", _required_upper(self.company_type, field="company_type"))
 
     @property
@@ -64,7 +66,14 @@ class QuoteContext:
             raise TypeError("scope debe ser CatalogScope.")
         object.__setattr__(self, "username", str(self.username or "").strip())
         object.__setattr__(self, "id_cotizador", _required_upper(self.id_cotizador, field="id_cotizador"))
-        object.__setattr__(self, "base_currency", _required_upper(self.base_currency, field="base_currency"))
+        base = country_profile(self.scope.country_code).base_currency
+        supplied = str(self.base_currency or "").strip().upper()
+        if supplied and supplied != base:
+            logging.getLogger(__name__).warning(
+                "Moneda base corregida por país: %s, %s -> %s",
+                self.scope.country_code, supplied, base,
+            )
+        object.__setattr__(self, "base_currency", base)
         policy = _required_upper(self.stock_policy, field="stock_policy")
         if policy != "INFORMATIONAL":
             raise ValueError("El catalogo remoto solo admite stock_policy=INFORMATIONAL.")

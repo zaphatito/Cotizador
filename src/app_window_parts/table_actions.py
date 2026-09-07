@@ -136,6 +136,9 @@ class TableActionsMixin:
             self._abrir_dialogo_observacion(row, item)
 
     def _abrir_dialogo_descuento(self, row: int):
+        guard = getattr(self, "_ensure_currency_rate", None)
+        if callable(guard) and not guard():
+            return
         if row < 0 or row >= len(self.items):
             return
         it = self.items[row]
@@ -161,6 +164,9 @@ class TableActionsMixin:
         self._abrir_dialogo_descuento(row)
 
     def _abrir_selector_precio(self, row: int):
+        guard = getattr(self, "_ensure_currency_rate", None)
+        if callable(guard) and not guard():
+            return
         if row < 0 or row >= len(self.items):
             return
         item = self.items[row]

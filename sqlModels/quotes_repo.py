@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+import logging
 import sqlite3
 from typing import Any, Optional
+
+from src.country_rules import country_profile, historical_country_code
 
 
 
@@ -720,22 +723,26 @@ def _resolve_quote_context(
     base_currency: Any,
     cotizador_username: Any,
     id_cotizador: Any,
+    allow_defaults: bool = True,
 ) -> tuple[str, str, str, str]:
     country = _country_code_norm(country_code)
     company = str(company_type or "").strip()
-    if not company:
+    if not company and allow_defaults:
         company = _setting_value(con, "company_type") or _setting_value(con, "company")
-    base = str(base_currency or "").strip().upper()
-    if not base:
-        base = {
-            "BO": "BOB",
-            "PE": "PEN",
-            "PY": "PYG",
-            "VE": "USD",
-        }.get(country, "")
-    username = str(cotizador_username or "").strip() or _setting_value(con, "username")
+    # No reinterpretar importes: solo la moneda base se deriva del país.
+    try:
+        base = country_profile(country).base_currency
+        stored_base = str(base_currency or "").strip().upper()
+        if stored_base and stored_base != base:
+            logging.getLogger(__name__).warning(
+                "Moneda base histórica corregida por país: %s, %s -> %s",
+                country, stored_base, base,
+            )
+    except ValueError:
+        base = ""  # una lectura incompleta se valida al abrir el editor
+    username = str(cotizador_username or "").strip() or (_setting_value(con, "username") if allow_defaults else "")
     cotizador = str(id_cotizador or "").strip()
-    if not cotizador:
+    if not cotizador and allow_defaults:
         cotizador = _infer_id_cotizador(quote_no) or _setting_value(con, "store_id")
     return company, base, username, cotizador
 
@@ -847,6 +854,7 @@ def insert_quote(
     base_currency: str = "",
     cotizador_username: str = "",
     id_cotizador: str = "",
+    require_complete_context: bool = False,
 
     created_at: str,
     cliente: str,
@@ -880,12 +888,15 @@ def insert_quote(
     items_shown: list[dict],
 
 ) -> int:
+    if require_complete_context and not all(str(value or "").strip() for value in (country_code, company_type, cotizador_username, id_cotizador)):
+        raise ValueError("La cotización remota requiere país, empresa, usuario e ID explícitos.")
     if len(items_base) != len(items_shown):
 
         raise ValueError("items_base y items_shown deben tener el mismo tamaÃ±o")
 
 
 
+    country_code = historical_country_code({"country_code": country_code, "quote_no": quote_no})
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
     has_chatbot = _has_column(con, "quotes", "chatbot")
@@ -1608,6 +1619,12 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
     if not r:
         raise KeyError(f"Cotización no encontrada: {quote_id}")
     out = dict(r)
+    try:
+        out["country_code"] = historical_country_code(out)
+    except ValueError:
+        # Mantener disponible el PDF original. Duplicación/envío validan el
+        # contexto completo y explican la inconsistencia sin usar otro país.
+        pass
     current_doc = str(out.get("cedula") or out.get("documento") or "")
     current_tipo = str(out.get("tipo_documento") or "")
     if "client_nombre" in out:
@@ -1645,6 +1662,7 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
         base_currency=out.get("base_currency"),
         cotizador_username=out.get("cotizador_username"),
         id_cotizador=out.get("id_cotizador"),
+        allow_defaults=int(out.get("quote_context_version") or 0) < 1,
     )
     out["company_type"] = company
     out["base_currency"] = base

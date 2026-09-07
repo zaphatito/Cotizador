@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 import unicodedata
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -35,6 +38,44 @@ _COUNTRY_CODES: dict[str, str] = {
 # Bolivia comparte las reglas operativas de Peru. El perfil PDF se resuelve
 # por separado para que BO conserve plantilla y layout propios.
 PERU_BUSINESS_RULE_COUNTRIES = frozenset({"PERU", "BOLIVIA"})
+
+
+@dataclass(frozen=True, slots=True)
+class CountryProfile:
+    code: str
+    name: str
+    base_currency: str
+    secondary_currencies: tuple[str, ...]
+
+
+_PROFILES = {
+    "BOLIVIA": CountryProfile("BO", "BOLIVIA", "BOB", ("PEN", "USD")),
+    "PERU": CountryProfile("PE", "PERU", "PEN", ("BOB", "USD")),
+    "PARAGUAY": CountryProfile("PY", "PARAGUAY", "PYG", ("ARS", "BRL", "USD")),
+    "VENEZUELA": CountryProfile("VE", "VENEZUELA", "USD", ("VES",)),
+}
+
+
+def country_profile(value: Any) -> CountryProfile:
+    """Perfil estricto: nunca resolver un país desconocido como Paraguay."""
+    profile = _PROFILES.get(normalize_country_name(value))
+    if profile is None:
+        raise ValueError("El país de la cotización está vacío o no está soportado.")
+    return profile
+
+
+def historical_country_code(header: Mapping[str, Any]) -> str:
+    """Resolver país sin configuración global ni escritura sobre el histórico."""
+    raw_country = str(header.get("country_code") or "").strip()
+    country = country_profile(raw_country).code if raw_country else ""
+    code = str(header.get("quote_no") or "").strip()
+    match = re.fullmatch(r"([A-Za-z]{2,3})-(?:[A-Za-z0-9]+-)?[0-9]+", code)
+    code_country = country_profile(match.group(1)).code if match else ""
+    if country and code_country and country != code_country:
+        raise ValueError("El país guardado no coincide con el código de la cotización.")
+    if not country and not code_country:
+        raise ValueError("No se puede determinar el país de la cotización histórica.")
+    return country or code_country
 
 
 def normalize_country_name(value: Any, *, default: str = "") -> str:
