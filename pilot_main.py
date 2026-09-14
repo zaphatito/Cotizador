@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 def main():
+    os.environ.setdefault("COTIZADOR_PROFILE", "pilot")
     if "--pilot-self-check" in sys.argv:
         from tools.pilot_self_check import run_self_check
         return run_self_check(sys.argv[sys.argv.index("--pilot-self-check") + 1])

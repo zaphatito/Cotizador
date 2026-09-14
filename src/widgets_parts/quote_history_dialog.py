@@ -29,7 +29,7 @@ from sqlModels.rates_repo import load_rates
 
 from ..logging_setup import get_logger
 from ..utils import nz
-from ..paths import DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
+from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
 
 from ..db_path import resolve_db_path
 from ..api.presupuesto_client import (
@@ -1238,7 +1238,7 @@ class QuoteHistoryWindow(QMainWindow):
 
     def __init__(self, *, catalog_manager, quote_events, app_icon):
         super().__init__()
-        self.setWindowTitle("Cotizador Piloto - Histórico")
+        self.setWindowTitle(f"{BASE_APP_TITLE} - Histórico")
         self.resize(*self._DEFAULT_SIZE)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)

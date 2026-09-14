@@ -36,6 +36,7 @@ from ..catalog_refresh import (
 )
 from ..logging_setup import get_logger
 from ..db_path import resolve_db_path
+from ..paths import BASE_APP_TITLE
 from ..utils import nz
 
 from .ui import UiMixin
@@ -99,7 +100,7 @@ class SistemaCotizaciones(
                 )
 
         super().__init__()
-        self.setWindowTitle("Cotizador Piloto - Cotización")
+        self.setWindowTitle(f"{BASE_APP_TITLE} - Cotización")
         self.resize(*self._DEFAULT_SIZE)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
