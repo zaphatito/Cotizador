@@ -397,6 +397,7 @@ class PdfActionsMixin:
         offline_warn = ""
         saved_ok = False
 
+        con = None
         try:
             db_path = resolve_db_path()
             con = connect(db_path)
@@ -434,7 +435,7 @@ class PdfActionsMixin:
             log.info("PDF generado en %s", ruta)
             pdf_store = os.path.basename(ruta)
             try:
-                with tx(con):
+                with tx(con, immediate=True):
                     insert_quote(
                         con,
                         country_code=getattr(self, "country_code", COUNTRY_CODE),
@@ -531,6 +532,9 @@ class PdfActionsMixin:
                     f"Detalle:\n{e}"
                 ),
             )
+        finally:
+            if con is not None:
+                con.close()
 
     def limpiar_formulario(self):
         self.entry_cliente.clear()

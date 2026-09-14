@@ -314,6 +314,54 @@ def test_delete_refreshes_only_its_client_and_preserves_historical_name(local_hi
         con.close()
 
 
+def test_generating_quote_saves_it_when_sync_tries_to_write(local_history, monkeypatch, qapp, tmp_path):
+    from sqlModels.db import connect
+    from sqlModels.quotes_repo import insert_quote
+    from src.app_window_parts import pdf_actions as ui
+    db_path, _, data = local_history
+    entry = lambda text: SimpleNamespace(text=lambda: text)
+    window = SimpleNamespace(entry_cliente=entry('Cliente nuevo'), entry_cedula=entry('23456789'),
+        entry_telefono=entry('000000000'), entry_direccion=entry('Prueba'), entry_email=entry('a@example.invalid'),
+        _validate_doc_phone_values=lambda *a, **kw: (True, '', 'DNI'), _confirm_quote_stock=lambda: True,
+        items=data['items_base'], _build_items_for_pdf=lambda: data['items_shown'],
+        _shown_totals_for_output=lambda _: dict(subtotal_bruto=10, descuento_total=0, total_general=10),
+        _get_metodo_pago_actual=lambda: '', country_name='PERU', country_code='PE',
+        company_type='LA CASA DEL PERFUME', base_currency='PEN', cotizador_username='TESTUSER',
+        id_cotizador='001', _currency_context=lambda: ('USD', None, 3.8),
+        _quote_events=SimpleNamespace(quote_saved=Mock()), _focus_history_after_close=Mock(), close=Mock())
+    def interleaved_insert(con, **kwargs):
+        con.execute('SELECT count(*) FROM quotes').fetchone()
+        other = connect(db_path)
+        try:
+            other.execute('PRAGMA busy_timeout=0')
+            try:
+                with other:
+                    other.execute("INSERT OR REPLACE INTO settings VALUES ('sync_during_save', '1')")
+            except sqlite3.OperationalError as exc:
+                assert 'locked' in str(exc)
+        finally:
+            other.close()
+        return insert_quote(con, **kwargs)
+    monkeypatch.setattr(ui, 'resolve_db_path', lambda: db_path)
+    monkeypatch.setattr(ui, 'insert_quote', interleaved_insert)
+    monkeypatch.setattr(ui, 'allocate_quote_code_for_new_quote', lambda *a, **kw:
+        dict(quote_code='PE-001-0000002', quote_no_status='confirmed'))
+    monkeypatch.setattr(ui, 'generar_pdf', lambda *a, **kw: str(tmp_path / 'new.pdf'))
+    monkeypatch.setattr(ui, 'generar_ticket_para_cotizacion', lambda **kw: {})
+    monkeypatch.setattr(ui.QMessageBox, 'information', Mock())
+    error = Mock()
+    monkeypatch.setattr(ui.QMessageBox, 'critical', error)
+    monkeypatch.setattr(ui.QDesktopServices, 'openUrl', Mock())
+    ui.PdfActionsMixin.generar_cotizacion(window)
+    assert not error.called
+    window._quote_events.quote_saved.emit.assert_called_once()
+    con = connect(db_path)
+    try:
+        assert con.execute("SELECT count(*) FROM quotes WHERE quote_no='PE-001-0000002'").fetchone()[0] == 1
+    finally:
+        con.close()
+
+
 class FullSQLiteHistoryTests(unittest.TestCase):
     def test_inventory_groups_only_the_same_user_and_code(self):
         from unittest.mock import patch
