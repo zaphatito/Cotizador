@@ -76,6 +76,11 @@ Source: "{#ProjectRoot}\changelog.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; Referencia (opcional)
 Source: "{#ProjectRoot}\Utilidades\requirements.txt"; DestDir: "{app}\Utilidades"; Flags: ignoreversion
 
+[InstallDelete]
+; El build anterior podía dejar estas DLL ICU incompatibles durante un upgrade.
+Type: files; Name: "{app}\_internal\icuuc.dll"
+Type: files; Name: "{app}\_internal\icudt78.dll"
+
 [Icons]
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "Cotizador.1"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; AppUserModelID: "Cotizador.1"
