@@ -1,7 +1,8 @@
 # src/version.py
-__version__ = "2.0.42"
+__version__ = "2.0.43"
 
 __all__ = ["__version__"]
+
 
 
 
