@@ -1080,7 +1080,8 @@ def insert_quote(
     try:
         from .clients_repo import upsert_client
 
-        client_id = upsert_client(
+        importing = con.execute("SELECT 1 FROM sqlite_temp_master WHERE name='quote_sync_importing'").fetchone()
+        client_id = None if importing else upsert_client(
             con,
             country_code=country_code,
             tipo_documento=tipo_documento_norm,
@@ -1101,12 +1102,21 @@ def insert_quote(
     except Exception:
         pass
 
+    from .quote_sync_repo import remember_client
+    remember_client(con, quote_id, dict(
+        cliente=cliente, cedula=cedula, telefono=telefono, direccion=direccion,
+        email=email, tipo_documento=tipo_documento_norm,
+    ))
+    from .quote_sync_repo import register_new_quote
+    register_new_quote(con, quote_id)
     return quote_id
 
 
 
 
 def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: str) -> None:
+    from .quote_sync_repo import local_metadata
+    local_metadata(con, quote_id, pago=str(metodo_pago or ""))
 
     if not _has_column(con, "quotes", "metodo_pago"):
 
@@ -1133,6 +1143,8 @@ def update_quote_payment(con: sqlite3.Connection, quote_id: int, metodo_pago: st
 
 
 def update_quote_chatbot(con: sqlite3.Connection, quote_id: int, chatbot: bool) -> None:
+    from .quote_sync_repo import local_metadata
+    local_metadata(con, quote_id, chatbot=bool(chatbot))
 
     if not _has_column(con, "quotes", "chatbot"):
 
@@ -1161,6 +1173,8 @@ def update_quote_chatbot(con: sqlite3.Connection, quote_id: int, chatbot: bool) 
 
 
 def update_quote_status(con: sqlite3.Connection, quote_id: int, estado: str | None) -> None:
+    from .quote_sync_repo import local_metadata
+    local_metadata(con, quote_id, estado=normalize_status(estado) or "")
 
     if not _has_column(con, "quotes", "estado"):
 
@@ -1191,6 +1205,8 @@ def update_quote_status(con: sqlite3.Connection, quote_id: int, estado: str | No
 
 
 def soft_delete_quote(con: sqlite3.Connection, quote_id: int, deleted_at_iso: str) -> None:
+    from .quote_sync_repo import local_metadata
+    local_metadata(con, quote_id, deleted_at=deleted_at_iso)
     con.execute(
         "UPDATE quotes SET deleted_at = ? WHERE id = ?",
         (deleted_at_iso, int(quote_id)),
@@ -1239,6 +1255,19 @@ def list_quotes(
 
     if not include_deleted:
         where.append("q.deleted_at IS NULL")
+    if _table_exists(con, 'quote_sync_document'):
+        import json
+        caps_row = con.execute("SELECT value FROM settings WHERE key='shared_quote_sync_capabilities'").fetchone()
+        if caps_row:
+            caps = json.loads(caps_row[0])
+            scopes = caps.get('scopes', [])
+            scope_sql = ' OR '.join('(sd.country_code=? AND sd.company_type=?)' for _ in scopes) or '0'
+            where.append(f'''(NOT EXISTS(SELECT 1 FROM quote_sync_document sd WHERE sd.quote_id=q.id)
+                OR EXISTS(SELECT 1 FROM quote_sync_document sd WHERE sd.quote_id=q.id
+                    AND sd.owner_id=? AND ({scope_sql})))''')
+            params.append(str(caps['owner_id']))
+            for scope in scopes:
+                params.extend([scope['country_code'], scope['company_type']])
 
     has_mp = _has_column(con, "quotes", "metodo_pago")
     has_estado = _has_column(con, "quotes", "estado")
@@ -1262,6 +1291,11 @@ def list_quotes(
         cedula_expr = "COALESCE(q.cedula, '')" if _has_column(con, "quotes", "cedula") else "''"
         telefono_expr = "COALESCE(q.telefono, '')" if _has_column(con, "quotes", "telefono") else "''"
 
+    if _table_exists(con, 'quote_client_snapshot'):
+        client_join += ' LEFT JOIN quote_client_snapshot qcs ON qcs.quote_id=q.id'
+        cliente_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cliente'),{cliente_expr})"
+        cedula_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cedula'),{cedula_expr})"
+        telefono_expr = f"COALESCE(json_extract(qcs.snapshot,'$.telefono'),{telefono_expr})"
     status_join = "LEFT JOIN quote_statuses qs ON qs.code = q.estado" if (has_estado and has_status_catalog) else ""
 
     quote_tail = (
@@ -1668,11 +1702,35 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
     out["base_currency"] = base
     out["cotizador_username"] = username
     out["id_cotizador"] = cotizador
+    if _table_exists(con, "quote_client_snapshot"):
+        import json
+        saved_client = con.execute(
+            "SELECT snapshot FROM quote_client_snapshot WHERE quote_id=?", (int(quote_id),)
+        ).fetchone()
+        if saved_client:
+            out.update(json.loads(saved_client[0]))
+    if _table_exists(con, "quote_sync_document"):
+        sync = con.execute('SELECT owner_id,quote_uuid,revision,snapshot,completeness FROM quote_sync_document WHERE quote_id=?',
+                           (int(quote_id),)).fetchone()
+        if sync:
+            if sync[4] == 'complete':
+                import json
+                out.update(json.loads(sync[3])['header'])
+            out.update(sync_owner_id=sync[0], quote_uuid=sync[1], sync_revision=sync[2])
+            configured = con.execute("SELECT value FROM settings WHERE key='shared_quote_sync_owner'").fetchone()
+            out['sync_current_owner_id'] = configured[0] if configured else ''
     return out
 
 
 
 def get_quote_items(con: sqlite3.Connection, quote_id: int) -> tuple[list[dict], list[dict]]:
+    if _table_exists(con, 'quote_sync_document'):
+        saved = con.execute("SELECT snapshot FROM quote_sync_document WHERE quote_id=? AND completeness='complete'",
+                            (int(quote_id),)).fetchone()
+        if saved:
+            import json
+            snapshot = json.loads(saved[0])
+            return snapshot['items_base'], snapshot['items_shown']
     has_price_id = _has_column(con, "quote_items", "id_precioventa")
     has_tipo_prod = _has_column(con, "quote_items", "tipo_prod")
     has_factor_total = _has_column(con, "quote_items", "factor_total")

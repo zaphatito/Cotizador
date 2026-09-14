@@ -6,6 +6,7 @@ import sys
 import sqlite3
 
 from .paths import DATA_DIR
+from .build_profile import IS_PILOT
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -69,6 +70,9 @@ def _can_write_sqlite(db_path: str) -> bool:
 
 
 def db_path_candidates() -> tuple[str, str]:
+    if IS_PILOT:
+        pilot = os.path.join(DATA_DIR, "app.sqlite3")
+        return pilot, pilot
     base_dir = _base_dir_for_app()
     primary = os.path.join(base_dir, "sqlModels", "app.sqlite3")
     fallback = os.path.join(DATA_DIR, "app.sqlite3")

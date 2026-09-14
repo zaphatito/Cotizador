@@ -60,6 +60,7 @@ class QuoteContext:
     id_cotizador: str
     base_currency: str
     stock_policy: str = "INFORMATIONAL"
+    preserve_historical_currency: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, CatalogScope):
@@ -68,6 +69,8 @@ class QuoteContext:
         object.__setattr__(self, "id_cotizador", _required_upper(self.id_cotizador, field="id_cotizador"))
         base = country_profile(self.scope.country_code).base_currency
         supplied = str(self.base_currency or "").strip().upper()
+        if self.preserve_historical_currency and supplied:
+            base = supplied
         if supplied and supplied != base:
             logging.getLogger(__name__).warning(
                 "Moneda base corregida por país: %s, %s -> %s",

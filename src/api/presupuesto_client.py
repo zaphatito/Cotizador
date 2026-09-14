@@ -45,7 +45,7 @@ from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import uses_gram_quantity
 from ..quote_code import extract_quote_digits, format_quote_code
-from ..server_identity import has_complete_server_identity, validate_functional_identity
+from ..server_identity import ApiIdentity, has_complete_server_identity, validate_functional_identity
 from ..utils import nz
 from .cases import (
     API_CASE_GET_COUNTRY_CLIENTS,
@@ -496,15 +496,10 @@ def _load_api_identity(context: Any = None) -> tuple[int, str, str, str, str, st
         if mismatch:
             log.warning("password_api_hash no coincide con la clave API esperada.")
 
-    return (
-        int(user_id),
-        str(api_username),
-        str(app_username),
-        str(country or ""),
-        str(company or ""),
-        str(store_id or ""),
-        bool(telemarketing_cfg),
-    )
+    return ApiIdentity(technical_user_id=int(user_id), technical_username=str(api_username),
+        functional_username=str(app_username), country=str(country or ''),
+        company_type=str(company or ''), id_cotizador=str(store_id or ''),
+        telemarketing=bool(telemarketing_cfg))
 
 
 def _unpack_api_identity(identity: tuple[Any, ...]) -> tuple[int, str, str, str, str, str, bool]:
@@ -1410,6 +1405,7 @@ def verify_cotizador_signature_once(*, login_password: str | None = None) -> dic
             "message": message,
             "login_status": int(login_resp.status_code),
             "verify_status": int(verify_resp.status_code),
+            "sync": verify_resp.data.get("sync", {}) if isinstance(verify_resp.data, dict) else {},
             "response": verify_resp.data if verify_resp.data is not None else verify_resp.text,
             "payload": payload,
         }
@@ -1456,6 +1452,13 @@ def reserve_next_quote_code(
     user_id, api_username, app_username, country, _company_type, store_id, _tienda = _unpack_api_identity(
         _load_api_identity() if context is None else _load_api_identity(context)
     )
+    # Reserve every authorized scope using the session of this installation.
+    if context is not None:
+        origin = _load_api_identity()
+        user_id = origin.technical_user_id
+        api_username = origin.technical_username
+        app_username = origin.functional_username
+        store_id = origin.id_cotizador
     cod_pais = _country_code_from_country(country)
     store_id = str(store_id or "").strip().upper()
     user_for_payload = _require_functional_username(
@@ -1482,6 +1485,8 @@ def reserve_next_quote_code(
             "id_cotizador": str(id_cotizador or ""),
             "user": user_for_payload,
             "cod_pais": str(cod_pais or ""),
+            "empresa": _normalize_company_type_for_api(_company_type),
+            "pid": _load_or_create_cotizador_pid(),
         }
         if local_last_value is not None:
             try:
@@ -2025,9 +2030,10 @@ def _reserve_provisional_quote_number(
     quote_id: int,
     *,
     login_password: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     qid = int(quote_id)
-    db_path = resolve_db_path()
+    db_path = db_path or resolve_db_path()
     con = connect(db_path)
     _ensure_schema_once(con)
     try:
@@ -2274,6 +2280,8 @@ def send_quote_from_history_once(
     quote_context = None
     try:
         header = get_quote_header(con, qid)
+        if get_setting(con, 'shared_quote_sync_owner', ''):
+            return {'quote_id': qid, 'status': 'PENDING_SHARED_SYNC'}
         quote_context = _quote_context_from_header(header)
         if not force and (
             not str(quote_context.username or "").strip()

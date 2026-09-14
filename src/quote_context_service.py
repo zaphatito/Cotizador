@@ -98,6 +98,10 @@ def resolve_historical_quote_owner(
 ) -> tuple[str, str] | None:
     current_username = str(current_username or "").strip()
     current_id = str(current_id_cotizador or "").strip()
+    if header.get('sync_owner_id'):
+        if str(header['sync_owner_id']) != str(header.get('sync_current_owner_id') or ''):
+            return None
+        return str(header.get('cotizador_username') or ''), str(header.get('id_cotizador') or '')
     if is_legacy_quote_context(header):
         return current_username, current_id
 
@@ -148,6 +152,18 @@ def quote_context_from_header(
         username=username,
         id_cotizador=cotizador,
         base_currency=str(header.get("base_currency") or ""),
+        preserve_historical_currency=bool(header.get("sync_owner_id")),
+    )
+
+
+def duplicate_quote_context(header: Mapping[str, Any], manager: Any) -> QuoteContext:
+    historical = quote_context_from_header(header, catalog_manager=manager)
+    return QuoteContext(
+        scope=historical.scope,
+        username=str(manager.username),
+        id_cotizador=str(manager.id_cotizador),
+        base_currency=historical.base_currency,
+        preserve_historical_currency=True,
     )
 
 

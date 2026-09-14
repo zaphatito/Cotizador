@@ -99,7 +99,7 @@ class SistemaCotizaciones(
                 )
 
         super().__init__()
-        self.setWindowTitle("Cotizador")
+        self.setWindowTitle("Cotizador Piloto - Cotización")
         self.resize(*self._DEFAULT_SIZE)
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
@@ -152,7 +152,11 @@ class SistemaCotizaciones(
         self._ctx_row = None
 
         # === Moneda / tasa (DB) ===
-        self.base_currency = profile.base_currency
+        self.base_currency = (
+            quote_context.base_currency
+            if getattr(quote_context, "preserve_historical_currency", False)
+            else profile.base_currency
+        )
         scoped_secondary = (
             secondary_currencies_for_country(self.country_code)
             if quote_context is not None

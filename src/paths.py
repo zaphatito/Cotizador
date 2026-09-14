@@ -2,8 +2,9 @@
 import os, sys, shutil, re
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QStandardPaths
+from .build_profile import APP_TITLE, DATA_FOLDER, APP_ID, IS_PILOT
 
-BASE_APP_TITLE = "Cotizador"
+BASE_APP_TITLE = APP_TITLE
 
 def resource_path(relative_path: str) -> str:
     """
@@ -40,7 +41,7 @@ def user_docs_root() -> str:
         )
     except Exception:
         base = os.path.join(os.path.expanduser("~"), "Documents")
-    root = os.path.join(base, "Cotizaciones")
+    root = os.path.join(base, DATA_FOLDER)
     os.makedirs(root, exist_ok=True)
     return root
 
@@ -173,7 +174,7 @@ def set_win_app_id():
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(u"Cotizador.1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
         except Exception:
             pass
 
@@ -203,7 +204,7 @@ def resolve_pdf_path_portable(stored: str) -> str:
     if not p:
         return ""
     # Si ya existe tal cual (misma PC/ruta), úsalo
-    if os.path.isabs(p) and os.path.exists(p):
+    if not IS_PILOT and os.path.isabs(p) and os.path.exists(p):
         return p
     # Si no existe (otra PC/usuario), usa la carpeta local y solo el filename
     return os.path.join(COTIZACIONES_DIR, os.path.basename(p))
