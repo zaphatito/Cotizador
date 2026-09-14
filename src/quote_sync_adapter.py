@@ -61,6 +61,7 @@ def inventory(con, *, owner_id, username, pid, scopes, id_cotizador=None, quote_
                                        snapshot=snapshot, deleted_at=raw.get('deleted_at'))
             budget = None if raw.get('deleted_at') else projection(snapshot)
             repo.freeze(con, quote_uuid, pid=pid, presupuesto=budget)
+            con.execute("UPDATE quotes SET api_error_message='' WHERE id=?", (raw['id'],))
             result['registered'] += 1
         except (ValueError, RuntimeError, TypeError) as exc:
             con.execute('UPDATE quotes SET api_error_message=? WHERE id=?', (str(exc), raw['id']))
@@ -76,18 +77,38 @@ def inventory_batch(db_path, *, owner_id, username, pid, scopes, limit=25):
     con = connect(db_path)
     try:
         after_id = int(get_setting(con, 'shared_quote_inventory_after_id', '0') or '0')
-        ids = [row[0] for row in con.execute('''SELECT q.id FROM quotes q
+        # Give recent unsent documents a few slots without starving the historical
+        # cursor. Previously a new quote could wait behind thousands of old rows.
+        priority_ids = []
+        priority_limit = min(5, limit // 2)
+        if scopes and priority_limit:
+            scope_sql = ' OR '.join('''(q.country_code=? AND
+                CASE WHEN q.company_type='LCDP' THEN 'LA CASA DEL PERFUME'
+                ELSE q.company_type END=?)''' for _ in scopes)
+            priority_ids = [row[0] for row in con.execute(f'''SELECT q.id FROM quotes q
+                LEFT JOIN quote_sync_document d ON d.quote_id=q.id
+                WHERE d.quote_id IS NULL AND COALESCE(q.api_sent_at,'')=''
+                AND COALESCE(q.deleted_at,'')=''
+                AND COALESCE(q.quote_no_status,'') IN ('','confirmed')
+                AND LOWER(TRIM(q.cotizador_username))=? AND LOWER(TRIM(q.id_cotizador))=?
+                AND ({scope_sql}) ORDER BY q.id DESC LIMIT ?''',
+                (username.strip().lower(), get_setting(con, 'store_id', '').strip().lower(),
+                 *(value for scope in scopes for value in scope), priority_limit)).fetchall()]
+        history_limit = limit - len(priority_ids)
+        exclusions = (' AND q.id NOT IN (' + ','.join('?' for _ in priority_ids) + ')'
+                      if priority_ids else '')
+        ids = [row[0] for row in con.execute(f'''SELECT q.id FROM quotes q
             LEFT JOIN quote_sync_document d ON d.quote_id=q.id
-            WHERE d.quote_id IS NULL AND q.id>? ORDER BY q.id LIMIT ?''',
-            (after_id, limit + 1)).fetchall()]
-        result = dict(registered=0, pending=0, more=len(ids) > limit)
-        for quote_id in ids[:limit]:
+            WHERE d.quote_id IS NULL AND q.id>? {exclusions} ORDER BY q.id LIMIT ?''',
+            (after_id, *priority_ids, history_limit + 1)).fetchall()]
+        result = dict(registered=0, pending=0, more=len(ids) > history_limit)
+        for quote_id in priority_ids + ids[:history_limit]:
             with tx(con, immediate=True):
                 current = inventory(con, owner_id=owner_id, username=username,
                     pid=pid, scopes=scopes, quote_id=quote_id)
             for key in ('registered', 'pending'):
                 result[key] += current[key]
-        next_id = ids[limit - 1] if result['more'] else 0
+        next_id = ids[history_limit - 1] if result['more'] else 0
         if next_id != after_id:
             with tx(con, immediate=True):
                 set_setting(con, 'shared_quote_inventory_after_id', str(next_id))
@@ -171,6 +192,7 @@ class EfapiQuoteTransport:
             body = response.data if response and isinstance(response.data, dict) else {}
             raise SyncFailure(body.get('message') or 'No se pudo contactar al servidor.',
                 status=response.status_code if response else 0,
+                code=str(body.get('code') or ''),
                 remote=(body.get('details') or {}).get('remote') if isinstance(body.get('details'), dict) else None) from exc
 
     def mutate(self, payload):
@@ -199,7 +221,7 @@ def projection(snapshot):
 
 
 def run_shared_cycle(db_path, verification):
-    from sqlModels.db import connect
+    from sqlModels.db import connect, tx
     from sqlModels.settings_repo import get_setting, set_setting
     from .api.presupuesto_client import _load_api_identity, _login_api, _reserve_provisional_quote_number
     from .quote_sync_service import QuoteSyncService
@@ -223,6 +245,12 @@ def run_shared_cycle(db_path, verification):
                 set_setting(con, 'shared_quote_sync_owner', owner_id)
                 set_setting(con, 'shared_quote_sync_capabilities', encoded_capabilities)
                 set_setting(con, 'shared_quote_inventory_after_id', '0')
+        recovery_marker = repo.encode(dict(owner_id=owner_id, scopes=sorted(scopes)))
+        if (capabilities.get('quote_code_version') == 2 and
+                get_setting(con, 'shared_quote_code_recovery_v2', '') != recovery_marker):
+            with tx(con, immediate=True):
+                repo.requeue_code_rejections(con, owner_id=owner_id, scopes=scopes)
+                set_setting(con, 'shared_quote_code_recovery_v2', recovery_marker)
         pending_number = con.execute('''SELECT id FROM quotes WHERE quote_no_status IN ('provisional','reserved')
             AND deleted_at IS NULL AND upper(trim(cotizador_username))=upper(trim(?))
             AND id_cotizador=? ORDER BY id LIMIT 1''',

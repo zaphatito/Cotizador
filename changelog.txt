@@ -3,15 +3,14 @@ Versión: 2.0.42
 Fecha: 2026-09-14
 
 Resumen
-- Correcciones de sincronización, bloqueos del histórico y nombres de PDF.
+- Recuperación de cotizaciones locales pendientes y compatibilidad con números antiguos.
 
 Correcciones
-- [Fix] Guardar registra únicamente la cotización nueva; el histórico pendiente se procesa en lotes cortos que liberan la base entre cotizaciones.
-- [Fix] Eliminar, cambiar estado y editar pago coordinan la escritura con la sincronización. Eliminar actualiza únicamente el cliente afectado.
-- [Fix] Se reutiliza la sesión del API y se reducen las verificaciones repetidas. Los cambios pendientes continúan enviándose sin esperar el intervalo de reposo.
-- [Fix] Las incidencias de sincronización aplican esperas progresivas y muestran cuando faltan países y empresas autorizados.
-- [Fix] El PDF regenerado usa el nombre histórico del cliente. Las confirmaciones del servidor conservan el PDF cuando su contenido no cambia.
-- [Fix] Se retiró el botón Stock duplicado de Acciones rápidas; el stock continúa disponible en Productos.
+- [Fix] Las cotizaciones recientes sin enviar entran en sincronización antes de completar la incorporación del histórico antiguo.
+- [Fix] El envío da prioridad a cotizaciones pendientes y cambios locales, conservando el procesamiento del histórico por lotes cortos.
+- [Fix] Al detectar el API 1.6.5 compatible, se reintentan una vez los envíos bloqueados por «Código de cotización inválido», con el mismo número y sin perder cambios posteriores.
+- [Fix] El histórico muestra cuántos envíos están pendientes o requieren revisión; una conexión activa ya no oculta esos bloqueos.
 
 Compatibilidad
 - Se conservan la configuración, las cotizaciones guardadas y los cambios pendientes.
+- La recuperación de códigos antiguos requiere actualizar y reiniciar primero el API 1.6.5. No requiere otra migración SQL.

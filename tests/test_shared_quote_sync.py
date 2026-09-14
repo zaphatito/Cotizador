@@ -166,6 +166,155 @@ def add_history_quote(con, number, **overrides):
         items_base=data['items_base'], items_shown=data['items_shown'])
 
 
+@pytest.mark.parametrize('server_accepts', [True, False])
+def test_api_upgrade_retries_code_rejection_once_with_the_same_payload(local_history, monkeypatch, server_accepts):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    from src.api import controller, presupuesto_client as pc
+    from src.api.generic_controller import ApiRequestError, ApiResponse
+    from src.server_identity import ApiIdentity
+    db_path, qid, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    monkeypatch.setattr(pc, '_login_api', lambda **_: ('test-token', None))
+    monkeypatch.setattr(pc, '_load_api_identity', lambda: ApiIdentity(1, 'api-test', 'TESTUSER',
+        'PERU', 'LA CASA DEL PERFUME', '001', False))
+    capabilities = dict(enabled=True, owner_id='9', username='TESTUSER',
+        scopes=[dict(country_code='PE', company_type='LA CASA DEL PERFUME')])
+    verification = dict(status='ACTIVE', pid='test-installation-001', sync=capabilities)
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute("UPDATE quotes SET quote_no='PE-1' WHERE id=?", (qid,))
+        adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
+            pid=verification['pid'], scopes=[('PE', 'LA CASA DEL PERFUME')])
+        with con:
+            con.execute("UPDATE quote_sync_outbox SET blocked=1,attempts=1,error='Código de cotización inválido.'")
+            frozen = con.execute('SELECT payload FROM quote_sync_outbox').fetchone()[0]
+            repo.local_metadata(con, qid, pago='EFECTIVO')
+    finally:
+        con.close()
+    sent = []
+    def post(case, *, json_data, **_):
+        if case == 8:
+            sent.append(json_data)
+            if not server_accepts:
+                response = ApiResponse(status_code=422, data=dict(
+                    code='INVALID_QUOTE_CODE', message='Código de cotización inválido.'),
+                    text='', headers={}, ok=False, method='POST', case=8,
+                    url='https://example.invalid/sync', elapsed_ms=1)
+                raise ApiRequestError('rechazado', response=response)
+            return SimpleNamespace(data={'data': dict(json_data, snapshot=json.loads(frozen)['snapshot'],
+                revision='1', owner_id='9', completeness='complete', deleted_at=None)})
+        return SimpleNamespace(data={'data': dict(events=[], next_cursor='cursor')})
+    monkeypatch.setattr(controller, 'post', post)
+    before = adapter.run_shared_cycle(db_path, verification)
+    assert before['sent'] == 0
+    assert before['blocked'] == 1
+    assert sent == []
+    capabilities['quote_code_version'] = 2
+    retried = adapter.run_shared_cycle(db_path, verification)
+    assert retried['sent'] == int(server_accepts)
+    assert sent == [json.loads(frozen)]
+    con = connect(db_path)
+    try:
+        row = con.execute('SELECT snapshot,revision FROM quote_sync_document WHERE quote_id=?', (qid,)).fetchone()
+        assert json.loads(row[0])['header']['metodo_pago'] == 'EFECTIVO'
+        assert json.loads(row[0])['header']['quote_no'] == 'PE-1'
+        if not server_accepts:
+            assert adapter.run_shared_cycle(db_path, verification)['blocked'] == 1
+            assert len(sent) == 1
+            assert con.execute('SELECT payload FROM quote_sync_outbox').fetchone()[0] == frozen
+        else:
+            assert row[1] == '1'
+    finally:
+        con.close()
+
+
+def test_code_recovery_preserves_conflicts_other_errors_and_other_owners(local_history, monkeypatch):
+    from sqlModels.db import connect, tx
+    from src import quote_sync_adapter as adapter
+    db_path, first_id, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    con = connect(db_path)
+    try:
+        with con:
+            for number in range(2, 6):
+                add_history_quote(con, number)
+        adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
+            pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+        ids = [r[0] for r in con.execute('SELECT quote_uuid FROM quote_sync_document ORDER BY quote_id')]
+        with con:
+            con.execute("UPDATE quote_sync_outbox SET blocked=1,retry_at=900,error='Código de cotización inválido.'")
+            con.execute("UPDATE quote_sync_outbox SET error='Sin permiso' WHERE quote_uuid=?", (ids[1],))
+            con.execute("UPDATE quote_sync_document SET owner_id='other' WHERE quote_uuid=?", (ids[2],))
+            con.execute("UPDATE quote_sync_document SET country_code='PY' WHERE quote_uuid=?", (ids[3],))
+            repo.conflict(con, ids[4], {}, 'Código de cotización inválido.')
+        with pytest.raises(RuntimeError), tx(con, immediate=True):
+            assert repo.requeue_code_rejections(con, owner_id='9', scopes=[('PE', 'LA CASA DEL PERFUME')]) == 1
+            raise RuntimeError('interrupted recovery')
+        assert all(r[0] == 1 for r in con.execute('SELECT blocked FROM quote_sync_outbox'))
+        with tx(con, immediate=True):
+            assert repo.requeue_code_rejections(con, owner_id='9', scopes=[('PE', 'LA CASA DEL PERFUME')]) == 1
+        assert [r[0] for r in con.execute('SELECT quote_uuid FROM quote_sync_outbox WHERE blocked=0')] == [ids[0]]
+    finally:
+        con.close()
+
+
+def test_new_unsent_quotes_go_before_already_sent_history(local_history, monkeypatch):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    from src.quote_sync_service import QuoteSyncService
+    db_path, old_id, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute("UPDATE quotes SET api_sent_at='2026-09-14T10:00:00' WHERE id=?", (old_id,))
+            new_id = add_history_quote(con, 2)
+        adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
+            pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+    finally:
+        con.close()
+    sent = []
+    def mutate(payload):
+        sent.append(payload)
+        return dict(payload, revision='1', owner_id='9', completeness='complete', deleted_at=None)
+    service = QuoteSyncService(connect=lambda: connect(db_path),
+        transport=SimpleNamespace(mutate=mutate, changes=lambda _: dict(events=[], next_cursor='cursor')),
+        owner_id='9', pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')],
+        materialize=adapter.materialize)
+    assert service.cycle()['sent'] == 1
+    assert sent[0]['snapshot']['header']['quote_no'] == 'PE-001-0000002'
+    assert service.cycle()['sent'] == 1
+    assert sent[1]['snapshot']['header']['quote_no'] == 'PE-001-0000001'
+
+
+def test_recent_pending_quote_is_registered_before_old_history_backfill(local_history, monkeypatch):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    db_path, _, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    con = connect(db_path)
+    try:
+        with con:
+            for number in range(2, 60):
+                add_history_quote(con, number)
+            con.execute("UPDATE quotes SET api_sent_at='2026-09-14T10:00:00'")
+            recent = add_history_quote(con, 60)
+            con.execute("UPDATE quotes SET api_error_message='El ámbito histórico no está autorizado.' WHERE id=?", (recent,))
+        args = dict(owner_id='9', username='TESTUSER', pid='test-installation-001',
+                    scopes=[('PE', 'LA CASA DEL PERFUME')])
+        first = adapter.inventory_batch(db_path, **args)
+        assert first == dict(registered=25, pending=0, more=True)
+        assert con.execute('SELECT 1 FROM quote_sync_document WHERE quote_id=?', (recent,)).fetchone()
+        assert con.execute('SELECT api_error_message FROM quotes WHERE id=?', (recent,)).fetchone()[0] == ''
+        assert adapter.inventory_batch(db_path, **args)['registered'] == 25
+        assert adapter.inventory_batch(db_path, **args)['registered'] == 10
+        assert con.execute('SELECT count(*) FROM quote_sync_document').fetchone()[0] == 60
+    finally:
+        con.close()
+
+
 def test_saving_one_quote_does_not_inventory_the_entire_history(local_history, monkeypatch):
     from sqlModels.db import connect
     from src import quote_sync_adapter as adapter
@@ -195,6 +344,7 @@ def test_inventory_releases_each_quote_and_resumes_after_interruption(local_hist
         with con:
             second_id = add_history_quote(con, 2)
             add_history_quote(con, 3)
+            con.execute("UPDATE quotes SET api_sent_at='2026-09-14T10:00:00'")
         projection = Mock(side_effect=[None, OSError('Interrupted backfill')])
         monkeypatch.setattr(adapter, 'projection', projection)
         args = dict(owner_id='9', username='TESTUSER', pid='test-installation-001',

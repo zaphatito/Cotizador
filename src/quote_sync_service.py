@@ -10,10 +10,11 @@ from sqlModels.db import tx
 
 
 class SyncFailure(RuntimeError):
-    def __init__(self, message, *, status=0, remote=None):
+    def __init__(self, message, *, status=0, remote=None, code=''):
         super().__init__(message)
         self.status = status
         self.remote = remote
+        self.code = code
 
 
 class QuoteSyncService:
@@ -62,6 +63,11 @@ class QuoteSyncService:
                 result['failed'] += 1
                 result['offline'] = result['offline'] or isinstance(exc, OSError) or (
                     isinstance(exc, SyncFailure) and (exc.status == 0 or exc.status >= 500))
+        con = self.connect()
+        try:
+            result.update(repo.queue_status(con, owner_id=self.owner_id, scopes=self.scopes))
+        finally:
+            con.close()
         return result
 
     def _send_one(self, country, company, result):
@@ -69,12 +75,15 @@ class QuoteSyncService:
         try:
             with tx(con, immediate=True):
                 candidates = con.execute('''SELECT d.quote_uuid FROM quote_sync_document d
+                    LEFT JOIN quotes q ON q.id=d.quote_id
                     LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid
                     LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
                     WHERE d.owner_id=? AND d.country_code=? AND d.company_type=?
                     AND d.generation>d.acknowledged_generation AND c.quote_uuid IS NULL
                     AND COALESCE(o.blocked,0)=0 AND COALESCE(o.retry_at,0)<=?
-                    AND d.error='' ORDER BY COALESCE(o.retry_at,0),d.rowid LIMIT 1''',
+                    AND d.error='' ORDER BY
+                    CASE WHEN d.generation>1 OR COALESCE(q.api_sent_at,'')='' THEN 0 ELSE 1 END,
+                    COALESCE(o.retry_at,0),q.id DESC,d.rowid LIMIT 1''',
                     (self.owner_id, country, company, self.clock())).fetchone()
                 budget = None
                 prior = con.execute('SELECT 1 FROM quote_sync_outbox WHERE quote_uuid=?',
@@ -109,10 +118,11 @@ class QuoteSyncService:
                         attempts = sent['attempts'] + 1
                         delay = (5, 15, 30, 60, 120, 300)[min(attempts - 1, 5)]
                         permanent = isinstance(exc, SyncFailure) and exc.status in (403, 409, 422)
+                        detail = f'{exc.code}: {exc}' if isinstance(exc, SyncFailure) and exc.code else str(exc)
                         con.execute('''UPDATE quote_sync_outbox SET attempts=?,retry_at=?,
                             error=?,blocked=? WHERE mutation_id=?''',
                             (attempts, self.clock() + min(300, delay * self.jitter(.9, 1.1)),
-                             str(exc)[:500], int(permanent), sent['mutation_id']))
+                             detail[:500], int(permanent), sent['mutation_id']))
                 result['failed'] += 1
             finally:
                 con.close()

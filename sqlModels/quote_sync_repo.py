@@ -73,6 +73,42 @@ def document(con, quote_uuid):
     return _row(con, 'SELECT * FROM quote_sync_document WHERE quote_uuid=?', (quote_uuid,))
 
 
+def requeue_code_rejections(con, *, owner_id, scopes):
+    """Retry explicit code rejections after the server advertises compatibility.
+
+    Only scheduling changes: the mutation ID, bytes and pending edits stay intact.
+    The caller records the recovery marker in this same transaction.
+    """
+    recovered = 0
+    for country, company in scopes:
+        recovered += con.execute('''UPDATE quote_sync_outbox SET blocked=0,retry_at=0
+            WHERE blocked=1 AND (error='Código de cotización inválido.'
+                OR error LIKE 'INVALID_QUOTE_CODE: %') AND quote_uuid IN (
+                SELECT d.quote_uuid FROM quote_sync_document d
+                LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
+                WHERE d.owner_id=? AND d.country_code=? AND d.company_type=?
+                AND d.revision='0' AND d.generation>d.acknowledged_generation
+                AND d.error='' AND c.quote_uuid IS NULL)''',
+            (str(owner_id), country, company)).rowcount
+    return recovered
+
+
+def queue_status(con, *, owner_id, scopes):
+    result = dict(pending=0, blocked=0)
+    for country, company in scopes:
+        row = con.execute('''SELECT count(*),COALESCE(sum(CASE
+            WHEN d.error<>'' OR o.blocked=1 OR c.quote_uuid IS NOT NULL THEN 1 ELSE 0 END),0)
+            FROM quote_sync_document d
+            LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid
+            LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
+            WHERE d.owner_id=? AND d.country_code=? AND d.company_type=?
+            AND d.generation>d.acknowledged_generation''',
+            (str(owner_id), country, company)).fetchone()
+        result['pending'] += row[0]
+        result['blocked'] += row[1]
+    return result
+
+
 def remember_client(con, quote_id, client):
     con.execute('INSERT OR IGNORE INTO quote_client_snapshot VALUES (?,?)',
                 (quote_id, encode(client)))

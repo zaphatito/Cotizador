@@ -1860,7 +1860,9 @@ class QuoteHistoryWindow(QMainWindow):
                     self.shared_sync_status.emit(
                         shared.get('message') or 'Sincronización pausada; los cambios locales se conservan.' if shared.get('paused') else
                         'Sin conexión; los cambios locales se conservan.' if shared.get('offline') else
+                        f"{shared['blocked']} cotizaciones requieren revisión en Sincronización…" if shared.get('blocked') else
                         'Hay incidencias pendientes. Consulte Sincronización…' if shared.get('failed') or shared.get('conflicts') else
+                        f"Enviando cotizaciones pendientes: {shared['pending']}." if shared.get('pending') else
                         'Histórico compartido conectado.'
                     )
                     if shared.get('received') or shared.get('sent') or shared.get('conflicts'):
