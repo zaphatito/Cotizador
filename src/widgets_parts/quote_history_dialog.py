@@ -5,6 +5,7 @@ import os
 import datetime
 import re
 import threading
+import time
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent, Signal
 from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont, QPen
@@ -64,7 +65,7 @@ from ..quote_context_service import (
     resolve_historical_quote_scope,
 )
 from ..country_rules import country_code_for, normalize_country_name, uses_peru_business_rules
-from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits
+from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits, quote_pdf_filename
 from ..server_identity import (
     has_complete_server_identity,
     validate_server_identity_pair,
@@ -1809,6 +1810,13 @@ class QuoteHistoryWindow(QMainWindow):
         batch_limit = 25
         wait_s = 25.0
         disabled_logged = False
+        consecutive_errors = 0
+
+        def _error_wait():
+            nonlocal consecutive_errors
+            delay = (60.0, 120.0, 300.0)[min(consecutive_errors, 2)]
+            consecutive_errors += 1
+            return delay
 
         def _has_api_identity() -> bool:
             try:
@@ -1832,6 +1840,7 @@ class QuoteHistoryWindow(QMainWindow):
                 continue
 
             try:
+                self._last_api_sync_at = time.monotonic()
                 verification = verify_cotizador_signature_once()
                 if bool(verification.get("blocked")):
                     detail = str(verification.get("detail") or "").strip()
@@ -1849,14 +1858,19 @@ class QuoteHistoryWindow(QMainWindow):
                 self._shared_sync_enabled = bool(shared.get('enabled'))
                 if shared.get('enabled'):
                     self.shared_sync_status.emit(
-                        'Sincronización pausada; los cambios locales se conservan.' if shared.get('paused') else
+                        shared.get('message') or 'Sincronización pausada; los cambios locales se conservan.' if shared.get('paused') else
                         'Sin conexión; los cambios locales se conservan.' if shared.get('offline') else
                         'Hay incidencias pendientes. Consulte Sincronización…' if shared.get('failed') or shared.get('conflicts') else
                         'Histórico compartido conectado.'
                     )
                     if shared.get('received') or shared.get('sent') or shared.get('conflicts'):
                         self.history_refresh_requested.emit()
-                    wait_s = 10.0 if self._shared_sync_active else 30.0
+                    if shared.get('offline') or shared.get('failed'):
+                        wait_s = _error_wait()
+                    else:
+                        consecutive_errors = 0
+                        wait_s = (180.0 if shared.get('paused') else 1.0 if shared.get('more')
+                                  else 30.0 if self._shared_sync_active else 120.0)
                     continue
 
                 res = sync_pending_history_quotes_once(limit=batch_limit)
@@ -1905,7 +1919,7 @@ class QuoteHistoryWindow(QMainWindow):
                     wait_s = interval_idle_s
             except Exception as e:
                 log.warning("Sync API automatico fallo: %s", e)
-                wait_s = 5.0 if self._shared_sync_enabled else interval_error_s
+                wait_s = _error_wait() if self._shared_sync_enabled else interval_error_s
 
     def _apply_admin_lockdown(self, message: str):
         if self._lockdown_active:
@@ -2108,7 +2122,7 @@ class QuoteHistoryWindow(QMainWindow):
     def changeEvent(self, event):
         if event.type() == QEvent.ActivationChange:
             self._shared_sync_active = self.isActiveWindow()
-            if self._shared_sync_active:
+            if self._shared_sync_active and time.monotonic() - getattr(self, '_last_api_sync_at', 0) >= 30.0:
                 self._wake_background_api_sync()
         super().changeEvent(event)
 
@@ -2320,7 +2334,7 @@ class QuoteHistoryWindow(QMainWindow):
         con = None
         try:
             con = connect(self._db_path)
-            with tx(con):
+            with tx(con, immediate=True):
                 update_quote_status(con, qid, new_status)
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -2378,7 +2392,7 @@ class QuoteHistoryWindow(QMainWindow):
         con = None
         try:
             con = connect(self._db_path)
-            with tx(con):
+            with tx(con, immediate=True):
                 update_quote_payment(con, qid, new_mp)
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -2434,7 +2448,7 @@ class QuoteHistoryWindow(QMainWindow):
         con = None
         try:
             con = connect(self._db_path)
-            with tx(con):
+            with tx(con, immediate=True):
                 update_quote_chatbot(con, qid, new_chatbot)
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -2617,7 +2631,7 @@ class QuoteHistoryWindow(QMainWindow):
             box.exec()
             if box.clickedButton() not in (accept, reapply):
                 return
-            with tx(con):
+            with tx(con, immediate=True):
                 quote_sync_repo.resolve(con, saved['quote_uuid'],
                     reapply=box.clickedButton() is reapply, materialize=materialize)
             self._refresh_shared_history()
@@ -2816,16 +2830,21 @@ class QuoteHistoryWindow(QMainWindow):
         if QMessageBox.question(self, "Eliminar", "Eliminar esta cotización del historial") != QMessageBox.Yes:
             return
 
+        con = None
         try:
             con = connect(self._db_path)
 
-            with tx(con):
+            with tx(con, immediate=True):
                 soft_delete_quote(con, qid, datetime.datetime.now().isoformat(timespec="seconds"))
 
             self._reload_first_page()
+            self._wake_background_api_sync()
         except Exception as e:
             log.exception("Error eliminando cotización")
             QMessageBox.critical(self, "Error", f"No se pudo eliminar:\n{e}")
+        finally:
+            if con is not None:
+                con.close()
 
     def _reprint_ticket(self):
         qid = self._selected_quote_id()
@@ -2927,84 +2946,7 @@ class QuoteHistoryWindow(QMainWindow):
             return
 
         try:
-            con = connect(self._db_path)
-
-            header = get_quote_header(con, qid)
-            _items_base, items_shown = get_quote_items(con, qid)
-
-            old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
-            if not old_out_path:
-                os.makedirs(COTIZACIONES_DIR, exist_ok=True)
-                old_out_path = os.path.join(COTIZACIONES_DIR, f"cotizacion_{qid}.pdf")
-
-            context = _quote_context_from_header(header)
-            historical_country_code = context.scope.country_code
-            historical_country = normalize_country_name(historical_country_code)
-            historical_store_id = context.id_cotizador
-            quote_code = format_quote_code(
-                country_code=historical_country_code,
-                store_id=historical_store_id,
-                quote_no=header.get("quote_no"),
-                width=7,
-            )
-
-            old_base = os.path.splitext(os.path.basename(old_out_path))[0]
-            if "_" in old_base:
-                suffix = old_base.split("_", 1)[1].strip()
-            else:
-                cli_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(header.get("cliente") or "").strip()).strip("_")
-                suffix = cli_slug or "cliente"
-
-            new_filename = f"C-{quote_code}_{suffix}.pdf"
-            new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
-
-            metodo_pago = (header.get("metodo_pago") or "").strip()
-            if uses_peru_business_rules(historical_country):
-                pass
-            elif historical_country == "PARAGUAY":
-                if not metodo_pago:
-                    metodo_pago = "Efectivo"
-            else:
-                if not metodo_pago:
-                    metodo_pago = "Transferencia"
-
-            datos = {
-                "fecha": (header.get("created_at", "") or "")[:10],
-                "cliente": header.get("cliente", ""),
-                "cedula": header.get("cedula", ""),
-                "tipo_documento": header.get("tipo_documento", ""),
-                "telefono": header.get("telefono", ""),
-                "metodo_pago": metodo_pago,
-                "items": items_shown,
-                "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
-                "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
-                "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
-            }
-
-            generar_pdf(
-                datos,
-                fixed_quote_no=quote_code,
-                out_path=new_out_path,
-                country_code=historical_country_code,
-                store_id=historical_store_id,
-                company_type=str(header.get("company_type") or "").strip(),
-                currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
-            )
-
-            con = connect(self._db_path)
-
-            with tx(con):
-                con.execute(
-                    "UPDATE quotes SET quote_no = ?, pdf_path = ? WHERE id = ?",
-                    (quote_code, os.path.basename(new_out_path), int(qid)),
-                )
-
-            if os.path.abspath(old_out_path) != os.path.abspath(new_out_path):
-                try:
-                    if os.path.exists(old_out_path):
-                        os.remove(old_out_path)
-                except Exception:
-                    pass
+            quote_code, new_out_path = self._regen_pdf_overwrite_for_quote_id(qid)
 
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -3036,7 +2978,9 @@ class QuoteHistoryWindow(QMainWindow):
 
         old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
         if not old_out_path:
-            raise RuntimeError("La cotización no tiene ruta de PDF.")
+            os.makedirs(COTIZACIONES_DIR, exist_ok=True)
+            old_out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(
+                str(header.get("quote_no") or ""), header.get("cliente")))
 
         context = _quote_context_from_header(header)
         historical_country_code = context.scope.country_code
@@ -3049,14 +2993,7 @@ class QuoteHistoryWindow(QMainWindow):
             width=7,
         )
 
-        old_base = os.path.splitext(os.path.basename(old_out_path))[0]
-        if "_" in old_base:
-            suffix = old_base.split("_", 1)[1].strip()
-        else:
-            cli_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(header.get("cliente") or "").strip()).strip("_")
-            suffix = cli_slug or "cliente"
-
-        new_filename = f"C-{quote_code}_{suffix}.pdf"
+        new_filename = quote_pdf_filename(quote_code, header.get("cliente"))
         new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
 
         metodo_pago = (header.get("metodo_pago") or "").strip()

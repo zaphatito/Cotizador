@@ -11,6 +11,11 @@ _ONLY_DIGITS_RE = re.compile(r"\d+")
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
+def quote_pdf_filename(quote_code: str, client_name: object) -> str:
+    customer = re.sub(r"[^A-Za-z0-9_-]+", "_", str(client_name or "").strip()).strip("_")
+    return f"C-{quote_code}_{customer or 'cliente'}.pdf"
+
+
 def normalize_country_code(country_code: str | None, *, default: str = "PY") -> str:
     s = str(country_code or "").strip().upper()
     if not s:

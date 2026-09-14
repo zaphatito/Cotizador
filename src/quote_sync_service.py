@@ -6,6 +6,7 @@ import random
 import time
 
 from sqlModels import quote_sync_repo as repo
+from sqlModels.db import tx
 
 
 class SyncFailure(RuntimeError):
@@ -31,7 +32,7 @@ class QuoteSyncService:
 
     def cycle(self):
         """One upload and one download per scope; bad documents cannot starve peers."""
-        result = dict(sent=0, received=0, failed=0, conflicts=0, offline=False)
+        result = dict(sent=0, received=0, failed=0, conflicts=0, offline=False, more=False)
         if not self.scopes:
             return result
         scopes = self.scopes[self.offset:] + self.scopes[:self.offset]
@@ -47,13 +48,14 @@ class QuoteSyncService:
                 finally:
                     con.close()
                 page = self.transport.changes(dict(pid=self.pid, country_code=country,
-                    company_type=company, cursor=cursor[0] if cursor else None))
+                    company_type=company, cursor=cursor[0] if cursor else None, limit=25))
                 con = self.connect()
                 try:
-                    with con:
+                    with tx(con, immediate=True):
                         repo.apply_page(con, owner_id=self.owner_id, country_code=country,
                             company_type=company, page=page, materialize=self.materialize)
                     result['received'] += len(page['events'])
+                    result['more'] = result['more'] or bool(page.get('has_more'))
                 finally:
                     con.close()
             except (SyncFailure, OSError, ValueError) as exc:
@@ -65,7 +67,7 @@ class QuoteSyncService:
     def _send_one(self, country, company, result):
         con = self.connect()
         try:
-            with con:
+            with tx(con, immediate=True):
                 candidates = con.execute('''SELECT d.quote_uuid FROM quote_sync_document d
                     LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid
                     LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
@@ -99,7 +101,7 @@ class QuoteSyncService:
                 isinstance(exc, SyncFailure) and (exc.status == 0 or exc.status >= 500))
             con = self.connect()
             try:
-                with con:
+                with tx(con, immediate=True):
                     if isinstance(exc, SyncFailure) and exc.status == 409 and exc.remote:
                         repo.conflict(con, sent['quote_uuid'], exc.remote, str(exc))
                         result['conflicts'] += 1
@@ -117,7 +119,7 @@ class QuoteSyncService:
             return
         con = self.connect()
         try:
-            with con:
+            with tx(con, immediate=True):
                 current = repo.document(con, sent['quote_uuid'])
                 repo.acknowledge(con, sent['mutation_id'], remote)
                 acknowledged = repo.document(con, remote['quote_uuid'])
@@ -127,5 +129,6 @@ class QuoteSyncService:
                     self.materialize(con, dict(remote, snapshot=json.loads(acknowledged['snapshot']),
                         deleted_at=acknowledged['deleted_at']), current['quote_id'])
             result['sent'] += 1
+            result['more'] = True
         finally:
             con.close()

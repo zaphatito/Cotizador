@@ -916,6 +916,28 @@ def delete_client(con: sqlite3.Connection, client_id: int) -> None:
     ensure_generic_clients(con)
 
 
+def refresh_client_after_quote_delete(con: sqlite3.Connection, quote_id: int) -> None:
+    """Refresh only the affected client's source; keep historical snapshots."""
+    if not _has_column(con, 'quotes', 'id_cliente'):
+        rebuild_clients_from_quotes(con)
+        return
+    client = con.execute('''SELECT c.* FROM clients c
+        JOIN quotes q ON q.id_cliente=c.id WHERE q.id=?''', (quote_id,)).fetchone()
+    if not client:
+        return
+    latest = con.execute('''SELECT id,created_at FROM quotes
+        WHERE id_cliente=? AND deleted_at IS NULL
+        ORDER BY created_at DESC,id DESC LIMIT 1''', (client['id'],)).fetchone()
+    if latest:
+        con.execute('''UPDATE clients SET source_quote_id=?,source_created_at=?,
+            updated_at=datetime('now') WHERE id=?''',
+            (latest['id'], latest['created_at'], client['id']))
+    elif client['source_quote_id'] is not None and not _is_generic_doc_key(
+        country_code=client['country_code'], tipo_documento=client['tipo_documento'],
+        documento_norm=client['documento_norm']):
+        con.execute('DELETE FROM clients WHERE id=?', (client['id'],))
+
+
 def rebuild_clients_from_quotes(con: sqlite3.Connection) -> dict[str, int]:
     ensure_clients_table(con)
     if not _table_exists(con, "quotes"):

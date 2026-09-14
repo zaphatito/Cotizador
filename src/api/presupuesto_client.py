@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from copy import deepcopy
 import getpass
 import hashlib
 import json
@@ -9,6 +10,7 @@ import platform
 import re
 import socket
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -44,7 +46,7 @@ from ..pricing import discount_from_amount, discount_percentage_decimals, round_
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import uses_gram_quantity
-from ..quote_code import extract_quote_digits, format_quote_code
+from ..quote_code import extract_quote_digits, format_quote_code, quote_pdf_filename
 from ..server_identity import ApiIdentity, has_complete_server_identity, validate_functional_identity
 from ..utils import nz
 from .cases import (
@@ -70,6 +72,8 @@ _VERIFICATION_STATUS_KEY = "cotizador_last_verification_status"
 _VERIFICATION_MESSAGE_KEY = "cotizador_last_verification_message"
 _VERIFICATION_GRACE_STARTED_KEY = "cotizador_verification_grace_started_at"
 _VERIFICATION_STALE_AFTER = datetime.timedelta(days=3)
+_verification_cache = None
+_verification_lock = threading.Lock()
 _QUOTE_NO_CONFIRMED = "confirmed"
 _QUOTE_NO_PROVISIONAL = "provisional"
 _QUOTE_NO_RESERVED = "reserved"
@@ -1344,10 +1348,26 @@ def _auth_headers(token: str) -> dict[str, str]:
     }
 
 
-def verify_cotizador_signature_once(*, login_password: str | None = None) -> dict[str, Any]:
-    user_id, api_username, app_username, country, company_type, store_id, telemarketing = _unpack_api_identity(
-        _load_api_identity()
-    )
+def verify_cotizador_signature_once(*, login_password: str | None = None,
+                                   force: bool = False) -> dict[str, Any]:
+    global _verification_cache
+    identity = _unpack_api_identity(_load_api_identity())
+    if not has_complete_server_identity(identity[2], identity[5]):
+        return _verify_cotizador_signature(identity, login_password=login_password)
+    key = (resolve_db_path(), identity, _load_or_create_cotizador_pid(),
+           hashlib.sha256(str(login_password or API_LOGIN_PASSWORD).encode('utf-8')).digest())
+    with _verification_lock:
+        cached = _verification_cache
+        if not force and cached and cached[0] == key and time.monotonic() < cached[1]:
+            return deepcopy(cached[2])
+        result = _verify_cotizador_signature(identity, login_password=login_password)
+        interval = 180.0 if result.get('status') == 'ACTIVE' else 60.0
+        _verification_cache = (key, time.monotonic() + interval, deepcopy(result))
+        return result
+
+
+def _verify_cotizador_signature(identity, *, login_password=None) -> dict[str, Any]:
+    user_id, api_username, app_username, country, company_type, store_id, telemarketing = identity
 
     if not has_complete_server_identity(app_username, store_id):
         return {
@@ -2112,19 +2132,9 @@ def _regenerate_quote_artifacts(
     if not old_pdf_path:
         raise PresupuestoApiError("La cotizacion no tiene una ruta de PDF valida.")
 
-    old_base = os.path.splitext(os.path.basename(old_pdf_path))[0]
-    if "_" in old_base:
-        suffix = old_base.split("_", 1)[1].strip()
-    else:
-        suffix = re.sub(
-            r"[^A-Za-z0-9_-]+",
-            "_",
-            str(header.get("cliente") or "").strip(),
-        ).strip("_")
-    suffix = suffix or "cliente"
     new_pdf_path = os.path.join(
         os.path.dirname(old_pdf_path),
-        f"C-{quote_code}_{suffix}.pdf",
+        quote_pdf_filename(quote_code, header.get("cliente")),
     )
 
     metodo_pago = str(header.get("metodo_pago") or "").strip()

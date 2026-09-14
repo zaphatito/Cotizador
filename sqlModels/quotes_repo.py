@@ -1212,9 +1212,9 @@ def soft_delete_quote(con: sqlite3.Connection, quote_id: int, deleted_at_iso: st
         (deleted_at_iso, int(quote_id)),
     )
     try:
-        from .clients_repo import rebuild_clients_from_quotes
+        from .clients_repo import refresh_client_after_quote_delete
 
-        rebuild_clients_from_quotes(con)
+        refresh_client_after_quote_delete(con, quote_id)
     except Exception:
         pass
 
@@ -1626,7 +1626,7 @@ def list_quotes(
 
 
 
-def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
+def get_quote_header(con: sqlite3.Connection, quote_id: int, *, include_sync_snapshot: bool = True) -> dict:
     if _has_column(con, "quotes", "id_cliente") and _table_exists(con, "clients"):
         client_direccion_expr = "COALESCE(c.direccion, '') AS client_direccion" if _has_column(con, "clients", "direccion") else "'' AS client_direccion"
         client_email_expr = "COALESCE(c.email, '') AS client_email" if _has_column(con, "clients", "email") else "'' AS client_email"
@@ -1713,7 +1713,7 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int) -> dict:
         sync = con.execute('SELECT owner_id,quote_uuid,revision,snapshot,completeness FROM quote_sync_document WHERE quote_id=?',
                            (int(quote_id),)).fetchone()
         if sync:
-            if sync[4] == 'complete':
+            if include_sync_snapshot and sync[4] == 'complete':
                 import json
                 out.update(json.loads(sync[3])['header'])
             out.update(sync_owner_id=sync[0], quote_uuid=sync[1], sync_revision=sync[2])

@@ -1,15 +1,17 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
 Versión: 2.0.41
 Fecha: 2026-09-14
 
 Resumen
-- Correcciones de cantidades en Perú, identificación del histórico compartido y presentación del cotizador.
+- Correcciones de sincronización, bloqueos del histórico y nombres de PDF.
 
 Correcciones
-- [Fix] BASE01 (Base 1 Litro LCDP x 30 Unidades) se maneja como unidades en Perú y no se incluye en los gramos del editor, PDF, ticket ni etiquetas.
-- [Fix] El histórico compartido identifica al usuario por su código y nombre, evitando mezclar cotizaciones de códigos distintos.
-- [Fix] Se retiró la fila superior añadida y el acceso al stock quedó compacto en Acciones rápidas.
-- [Fix] Con una sola configuración de país se abre la cotización directamente; la selección se muestra cuando existen varias configuraciones.
+- [Fix] Guardar registra únicamente la cotización nueva; el histórico pendiente se procesa en lotes cortos que liberan la base entre cotizaciones.
+- [Fix] Eliminar, cambiar estado y editar pago coordinan la escritura con la sincronización. Eliminar actualiza únicamente el cliente afectado.
+- [Fix] Se reutiliza la sesión del API y se reducen las verificaciones repetidas. Los cambios pendientes continúan enviándose sin esperar el intervalo de reposo.
+- [Fix] Las incidencias de sincronización aplican esperas progresivas y muestran cuando faltan países y empresas autorizados.
+- [Fix] El PDF regenerado usa el nombre histórico del cliente. Las confirmaciones del servidor conservan el PDF cuando su contenido no cambia.
+- [Fix] Se retiró el botón Stock duplicado de Acciones rápidas; el stock continúa disponible en Productos.
 
 Compatibilidad
-- Se conservan la configuración y las cotizaciones guardadas.
+- Se conservan la configuración, las cotizaciones guardadas y los cambios pendientes.

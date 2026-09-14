@@ -8,7 +8,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from .config import APP_COUNTRY, id_label_for_country, COUNTRY_CODE, STORE_ID
 from .country_rules import normalize_country_name
 from .paths  import COTIZACIONES_DIR, resolve_country_asset, resolve_template_path, resolve_font_asset, DATA_DIR
-from .quote_code import format_quote_code, format_quote_display_no
+from .quote_code import format_quote_code, format_quote_display_no, quote_pdf_filename
 from .utils  import fmt_money_pdf, fmt_money_pdf_whole, nz
 from .pricing import cantidad_para_mostrar
 
@@ -494,7 +494,6 @@ def generar_pdf(
         return formatter(value, currency=scoped_currency or None)
 
     cliente_raw  = (datos.get("cliente","") or "").strip()
-    cliente_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", cliente_raw).strip("_")
     if fixed_quote_no:
         quote_code = format_quote_code(
             country_code=cc,
@@ -505,7 +504,7 @@ def generar_pdf(
     else:
         quote_code = _next_quote_number(cc, scoped_store_id)
     if not out_path:
-        out_path = os.path.join(COTIZACIONES_DIR, f"C-{quote_code}_{cliente_slug}.pdf")
+        out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(quote_code, cliente_raw))
     if out_path:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     c = canvas.Canvas(out_path, pagesize=A4)

@@ -112,7 +112,6 @@ class SistemaCotizaciones(
         self._quote_events = quote_events
         self.quote_context = quote_context
         self.listing_type = str(APP_CONFIG.get("listing_type") or "AMBOS")
-        self._stock_dialog = None
         self._server_catalog_mode = manager_server_mode
         self._local_catalog_name = ""
         self._local_catalog_id = (
@@ -277,28 +276,6 @@ class SistemaCotizaciones(
             self._build_completer()
             for item in self.items:
                 item["stock_disponible"] = -1
-
-    def abrir_stock_tiendas(self):
-        if not self._ensure_authorized_quote_context():
-            return
-        from ..widgets_parts.stock_matrix_dialog import StockMatrixDialog
-
-        if self._stock_dialog is not None:
-            self._stock_dialog.reload()
-            self._stock_dialog.show()
-            self._stock_dialog.raise_()
-            return
-        history = getattr(self, "_history_window", None)
-        dialog = StockMatrixDialog(
-            catalog_manager=self._catalog_manager,
-            sync_service=getattr(history, "_catalog_sync_service", None),
-            scope=self.quote_context.scope,
-            parent=self,
-        )
-        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
-        dialog.destroyed.connect(lambda *_: setattr(self, "_stock_dialog", None))
-        self._stock_dialog = dialog
-        dialog.show()
 
     def _attach_inline_assistant(self):
         if getattr(self, "_assistant", None) is not None:

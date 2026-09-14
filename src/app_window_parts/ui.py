@@ -1722,14 +1722,6 @@ class UiMixin:
             actions_row.addStretch(1)
             actions_row.addWidget(btn_listado, 0)
 
-        if getattr(self, "_server_catalog_mode", False):
-            self.btn_stock = QPushButton("Stock")
-            self.btn_stock.setToolTip("Consultar stock por tienda")
-            self._apply_btn_responsive(self.btn_stock, 62, 28)
-            self.btn_stock.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            self.btn_stock.clicked.connect(self.abrir_stock_tiendas)
-            rate_row.addWidget(self.btn_stock, 0)
-
         grp_quick = QGroupBox("Acciones rápidas")
         quick = QVBoxLayout(grp_quick)
         quick.setContentsMargins(8, 5, 8, 5)

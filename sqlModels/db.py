@@ -19,9 +19,11 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 @contextmanager
-def tx(con: sqlite3.Connection):
+def tx(con: sqlite3.Connection, *, immediate: bool = False):
     try:
-        con.execute("BEGIN")
+        # Short read/modify/write operations reserve the writer before reading,
+        # avoiding SQLITE_BUSY_SNAPSHOT when another connection commits meanwhile.
+        con.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         yield
         con.commit()
     except Exception:

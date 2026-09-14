@@ -34,14 +34,19 @@ def snapshot_for(con, quote_id):
     return snapshot
 
 
-def inventory(con, *, owner_id, username, pid, scopes, id_cotizador=None):
+def inventory(con, *, owner_id, username, pid, scopes, id_cotizador=None, quote_id=None):
     from sqlModels.settings_repo import get_setting
     user_code = str(id_cotizador or get_setting(con, 'store_id', '')).strip().casefold()
     allowed = set(scopes)
     result = dict(registered=0, pending=0)
     # Include sent and deleted records. Never replace the stored historical author.
-    for raw in con.execute('''SELECT q.* FROM quotes q LEFT JOIN quote_sync_document d
-        ON d.quote_id=q.id WHERE d.quote_id IS NULL ORDER BY q.id''').fetchall():
+    query = '''SELECT q.* FROM quotes q LEFT JOIN quote_sync_document d
+        ON d.quote_id=q.id WHERE d.quote_id IS NULL'''
+    args = ()
+    if quote_id is not None:
+        query += ' AND q.id=?'
+        args = (int(quote_id),)
+    for raw in con.execute(query + ' ORDER BY q.id', args).fetchall():
         raw = dict(raw)
         try:
             snapshot = snapshot_for(con, raw['id'])
@@ -64,12 +69,40 @@ def inventory(con, *, owner_id, username, pid, scopes, id_cotizador=None):
     return result
 
 
+def inventory_batch(db_path, *, owner_id, username, pid, scopes, limit=25):
+    """Backfill a bounded batch, releasing the SQLite writer after each quote."""
+    from sqlModels.db import connect, tx
+    from sqlModels.settings_repo import get_setting, set_setting
+    con = connect(db_path)
+    try:
+        after_id = int(get_setting(con, 'shared_quote_inventory_after_id', '0') or '0')
+        ids = [row[0] for row in con.execute('''SELECT q.id FROM quotes q
+            LEFT JOIN quote_sync_document d ON d.quote_id=q.id
+            WHERE d.quote_id IS NULL AND q.id>? ORDER BY q.id LIMIT ?''',
+            (after_id, limit + 1)).fetchall()]
+        result = dict(registered=0, pending=0, more=len(ids) > limit)
+        for quote_id in ids[:limit]:
+            with tx(con, immediate=True):
+                current = inventory(con, owner_id=owner_id, username=username,
+                    pid=pid, scopes=scopes, quote_id=quote_id)
+            for key in ('registered', 'pending'):
+                result[key] += current[key]
+        next_id = ids[limit - 1] if result['more'] else 0
+        if next_id != after_id:
+            with tx(con, immediate=True):
+                set_setting(con, 'shared_quote_inventory_after_id', str(next_id))
+        return result
+    finally:
+        con.close()
+
+
 def materialize(con, remote, quote_id):
     if remote['completeness'] != 'complete':
         # A partial record stays in sync storage; do not fabricate missing amounts.
         return quote_id
     snapshot = remote['snapshot']
     h = snapshot['header']
+    previous_header = get_quote_header(con, quote_id, include_sync_snapshot=False) if quote_id is not None else {}
     if quote_id is None:
         args = {key: h.get(key, '') for key in HEADER_FIELDS if key != 'estado'}
         con.execute('CREATE TEMP TABLE quote_sync_importing(marker INTEGER)')
@@ -94,7 +127,8 @@ def materialize(con, remote, quote_id):
             shown['precio'], shown['subtotal'], shown['descuento'], shown['total']]))
     existing = [tuple(row) for row in con.execute(
         f"SELECT {','.join(columns)} FROM quote_items WHERE quote_id=? ORDER BY id", (quote_id,))]
-    if existing != expected:
+    details_changed = existing != expected
+    if details_changed:
         con.execute('DELETE FROM quote_items WHERE quote_id=?', (quote_id,))
         con.executemany(f"INSERT INTO quote_items(quote_id,{','.join(columns)}) VALUES ({','.join('?' for _ in range(len(columns)+1))})",
                         [(quote_id,) + row for row in expected])
@@ -102,14 +136,21 @@ def materialize(con, remote, quote_id):
         'tasa_shown', 'subtotal_bruto_base', 'descuento_total_base', 'total_neto_base',
         'subtotal_bruto_shown', 'descuento_total_shown', 'total_neto_shown',
         'cotizador_username', 'id_cotizador', 'created_at']
+    rendered_fields = stable_columns + ['cliente', 'cedula', 'tipo_documento',
+        'telefono', 'direccion', 'email', 'estado', 'metodo_pago', 'chatbot']
+    def rendered_value(header, key):
+        value = header.get(key) or ''
+        return 'LA CASA DEL PERFUME' if key == 'company_type' and value == 'LCDP' else value
+    pdf_changed = details_changed or any(rendered_value(previous_header, key) != rendered_value(h, key)
+                                         for key in rendered_fields)
     con.execute(f"UPDATE quotes SET {','.join(column+'=?' for column in stable_columns)} WHERE id=?",
                 tuple(h[key] for key in stable_columns) + (quote_id,))
     con.execute('UPDATE quote_client_snapshot SET snapshot=? WHERE quote_id=?',
         (repo.encode({key: h.get(key, '') for key in ('cliente','cedula','tipo_documento','telefono','direccion','email')}), quote_id))
     con.execute('''UPDATE quotes SET estado=?,metodo_pago=?,chatbot=?,deleted_at=?,
-        pdf_path='',sync_uuid=? WHERE id=?''',
+        pdf_path=CASE WHEN ? THEN '' ELSE pdf_path END,sync_uuid=? WHERE id=?''',
         (h.get('estado') or '', h.get('metodo_pago') or '', int(bool(h.get('chatbot'))),
-         remote.get('deleted_at'), remote['quote_uuid'], quote_id))
+         remote.get('deleted_at'), pdf_changed, remote['quote_uuid'], quote_id))
     return quote_id
 
 
@@ -168,12 +209,20 @@ def run_shared_cycle(db_path, verification):
         sticky = get_setting(con, 'shared_quote_sync_owner', '')
         if not capabilities.get('enabled'):
             # Never fall back to blind writes after this installation was enabled.
-            return {'enabled': bool(sticky), 'paused': bool(sticky), 'sent': 0, 'received': 0}
+            return {'enabled': bool(sticky), 'paused': bool(sticky), 'sent': 0, 'received': 0,
+                    'message': capabilities.get('message') or
+                        'El servidor no ha habilitado el histórico compartido para este usuario.'}
         owner_id = str(capabilities['owner_id'])
         scopes = [(s['country_code'], s['company_type']) for s in capabilities['scopes']]
-        with con:
-            set_setting(con, 'shared_quote_sync_owner', owner_id)
-            set_setting(con, 'shared_quote_sync_capabilities', repo.encode(capabilities))
+        if not scopes:
+            return {'enabled': True, 'paused': True, 'sent': 0, 'received': 0,
+                    'message': 'El servidor no devolvió países y empresas autorizados para sincronizar.'}
+        encoded_capabilities = repo.encode(capabilities)
+        if sticky != owner_id or get_setting(con, 'shared_quote_sync_capabilities', '') != encoded_capabilities:
+            with con:
+                set_setting(con, 'shared_quote_sync_owner', owner_id)
+                set_setting(con, 'shared_quote_sync_capabilities', encoded_capabilities)
+                set_setting(con, 'shared_quote_inventory_after_id', '0')
         pending_number = con.execute('''SELECT id FROM quotes WHERE quote_no_status IN ('provisional','reserved')
             AND deleted_at IS NULL AND upper(trim(cotizador_username))=upper(trim(?))
             AND id_cotizador=? ORDER BY id LIMIT 1''',
@@ -198,13 +247,8 @@ def run_shared_cycle(db_path, verification):
                                 (str(exc)[:500], pending_number[0]))
             finally:
                 con.close()
-    con = connect(db_path)
-    try:
-        with con:
-            inventory(con, owner_id=owner_id, username=capabilities['username'],
-                      pid=verification['pid'], scopes=scopes)
-    finally:
-        con.close()
+    backfill = inventory_batch(db_path, owner_id=owner_id, username=capabilities['username'],
+                              pid=verification['pid'], scopes=scopes)
     configured = _load_api_identity()
     identity = ServerIdentity(api_username=configured.technical_username,
         functional_username=configured.functional_username, pid=verification['pid'],
@@ -213,4 +257,6 @@ def run_shared_cycle(db_path, verification):
     coordinator = QuoteSyncService(connect=lambda: connect(db_path),
         transport=EfapiQuoteTransport(token), pid=identity.pid, owner_id=owner_id,
         scopes=scopes, materialize=materialize, projection=projection)
-    return dict(coordinator.cycle(), enabled=True)
+    result = dict(coordinator.cycle(), enabled=True)
+    result['more'] = result['more'] or backfill['more']
+    return result

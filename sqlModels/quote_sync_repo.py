@@ -92,7 +92,8 @@ def register_new_quote(con, quote_id):
     pid = con.execute("SELECT value FROM settings WHERE key='cotizador_pid'").fetchone()
     if info.get('enabled') and pid:
         inventory(con, owner_id=info['owner_id'], username=info['username'], pid=pid[0],
-                  scopes=[(scope['country_code'], scope['company_type']) for scope in info['scopes']])
+                  scopes=[(scope['country_code'], scope['company_type']) for scope in info['scopes']],
+                  quote_id=quote_id)
 
 
 def register(con, *, quote_id, owner_id, origin_pid, snapshot, deleted_at=None):

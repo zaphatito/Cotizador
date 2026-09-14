@@ -2,6 +2,11 @@ import copy
 import json
 import sqlite3
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 from sqlModels import quote_sync_repo as repo
 from src.server_identity import validate_functional_identity, validate_server_identity_pair
@@ -24,6 +29,289 @@ def full_snapshot(number=1, installation='001'):
                          descuento_mode=None, descuento_pct=0., descuento_monto=0.,
                          precio_override=38., precio_tier=None, id_precioventa=4)],
         items_shown=[dict(common, precio=10., total=10., subtotal=10., descuento=0.)])
+
+
+@pytest.fixture
+def local_history(tmp_path):
+    from sqlModels.db import connect, ensure_schema
+    from sqlModels.quotes_repo import insert_quote
+    from src.quote_sync_adapter import snapshot_for
+    db_path = str(tmp_path / 'history.db')
+    con = connect(db_path)
+    try:
+        ensure_schema(con)
+        data = full_snapshot()
+        header = dict(data['header'])
+        header.pop('estado')
+        with con:
+            con.execute("INSERT INTO settings VALUES('store_id','001')")
+            qid = insert_quote(con, **header,
+                pdf_path='C-PE-001-0000001_Cliente_de_prueba.pdf',
+                items_base=data['items_base'], items_shown=data['items_shown'])
+        return db_path, qid, snapshot_for(con, qid)
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_ack_preserves_local_pdf_until_its_content_changes(local_history, changed):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    remote = dict(quote_uuid='server-quote', completeness='complete', snapshot=copy.deepcopy(snapshot))
+    if changed:
+        remote['snapshot']['header']['cliente'] = 'Otro cliente de prueba'
+    con = connect(db_path)
+    try:
+        with con:
+            materialize(con, remote, qid)
+        path = con.execute('SELECT pdf_path FROM quotes WHERE id=?', (qid,)).fetchone()[0]
+        assert path == ('' if changed else 'C-PE-001-0000001_Cliente_de_prueba.pdf')
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_actual_delivery_ack_keeps_or_invalidates_pdf_from_stored_content(local_history, monkeypatch, changed):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    from src.quote_sync_service import QuoteSyncService
+    db_path, qid, snapshot = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
+        pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+    def mutate(payload):
+        remote = dict(payload, snapshot=copy.deepcopy(snapshot), owner_id='9', revision='1',
+                      completeness='complete', deleted_at=None)
+        if changed:
+            remote['snapshot']['header']['cliente'] = 'Nombre conciliado'
+        return remote
+    service = QuoteSyncService(connect=lambda: connect(db_path),
+        transport=SimpleNamespace(mutate=mutate, changes=lambda _: dict(events=[], next_cursor='next')),
+        owner_id='9', pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')],
+        materialize=adapter.materialize)
+    assert service.cycle()['sent'] == 1
+    con = connect(db_path)
+    try:
+        path = con.execute('SELECT pdf_path FROM quotes WHERE id=?', (qid,)).fetchone()[0]
+        assert path == ('' if changed else 'C-PE-001-0000001_Cliente_de_prueba.pdf')
+        assert con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('old_name', ['', 'cotizacion_3475.pdf', 'C-PE-001-0000001_3475.pdf'])
+def test_regenerated_pdf_uses_client_name_even_without_a_local_file(local_history, monkeypatch, tmp_path, old_name, qapp):
+    from sqlModels.db import connect
+    from src.widgets_parts import quote_history_dialog as ui
+    db_path, qid, _ = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute('UPDATE quotes SET pdf_path=? WHERE id=?', (old_name, qid))
+    finally:
+        con.close()
+    monkeypatch.setattr(ui, 'COTIZACIONES_DIR', str(tmp_path))
+    monkeypatch.setattr(ui, 'resolve_pdf_path_portable', lambda p: str(tmp_path / p) if p else '')
+    rendered = []
+    def generate(data, **kwargs):
+        rendered.append(data)
+        Path(kwargs['out_path']).write_bytes(b'isolated-pdf-output')
+    monkeypatch.setattr(ui, 'generar_pdf', generate)
+    code, path = ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(
+        SimpleNamespace(_db_path=db_path), qid)
+    assert Path(path).name == 'C-PE-001-0000001_Cliente_de_prueba.pdf'
+    assert code == 'PE-001-0000001'
+    assert rendered[0]['cliente'] == 'Cliente de prueba'
+
+
+def test_shared_delivery_resumes_after_empty_scopes_and_does_not_duplicate_upload(local_history, monkeypatch):
+    from src import quote_sync_adapter as adapter
+    from src.api import controller, presupuesto_client as pc
+    from src.server_identity import ApiIdentity
+    db_path, _, _ = local_history
+    capabilities = dict(enabled=True, owner_id='9', username='TESTUSER', scopes=[])
+    verification = dict(status='ACTIVE', pid='test-installation-001', sync=capabilities)
+    login = Mock(return_value=('test-token', None))
+    monkeypatch.setattr(pc, '_login_api', login)
+    monkeypatch.setattr(pc, '_load_api_identity', lambda: ApiIdentity(1, 'api-test', 'TESTUSER',
+        'PERU', 'LA CASA DEL PERFUME', '001', False))
+    calls = []
+    def post(case, *, json_data, **_):
+        calls.append(case)
+        if case == 8:
+            document = dict(json_data, revision='1', owner_id='9', completeness='complete',
+                            deleted_at=None, id_presupuesto='55')
+            return SimpleNamespace(data={'data': document})
+        assert case == 9
+        return SimpleNamespace(data={'data': {'events': [], 'next_cursor': 'confirmed-cursor'}})
+    monkeypatch.setattr(controller, 'post', post)
+    paused = adapter.run_shared_cycle(db_path, verification)
+    assert paused.get('paused') is True
+    assert paused.get('message')
+    assert not login.called
+    capabilities['scopes'] = [dict(country_code='PE', company_type='LA CASA DEL PERFUME')]
+    assert adapter.run_shared_cycle(db_path, verification)['sent'] == 1
+    assert adapter.run_shared_cycle(db_path, verification)['sent'] == 0
+    assert calls.count(8) == 1
+    assert calls.count(9) == 2
+
+
+def add_history_quote(con, number, **overrides):
+    from sqlModels.quotes_repo import insert_quote
+    data = full_snapshot(number)
+    header = dict(data['header'], **overrides)
+    header.pop('estado')
+    return insert_quote(con, **header, pdf_path='',
+        items_base=data['items_base'], items_shown=data['items_shown'])
+
+
+def test_saving_one_quote_does_not_inventory_the_entire_history(local_history, monkeypatch):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    db_path, old_id, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    con = connect(db_path)
+    try:
+        info = dict(enabled=True, owner_id='9', username='TESTUSER',
+            scopes=[dict(country_code='PE', company_type='LA CASA DEL PERFUME')])
+        with con:
+            con.execute('INSERT INTO settings VALUES (?,?)', ('shared_quote_sync_capabilities', repo.encode(info)))
+            con.execute('INSERT INTO settings VALUES (?,?)', ('cotizador_pid', 'test-installation-001'))
+            new_id = add_history_quote(con, 2)
+            assert con.execute('SELECT quote_id FROM quote_sync_document').fetchone()[0] == new_id
+            assert con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0] == 1
+        assert con.execute('SELECT sync_uuid FROM quotes WHERE id=?', (old_id,)).fetchone()[0]
+    finally:
+        con.close()
+
+
+def test_inventory_releases_each_quote_and_resumes_after_interruption(local_history, monkeypatch):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    db_path, first_id, _ = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            second_id = add_history_quote(con, 2)
+            add_history_quote(con, 3)
+        projection = Mock(side_effect=[None, OSError('Interrupted backfill')])
+        monkeypatch.setattr(adapter, 'projection', projection)
+        args = dict(owner_id='9', username='TESTUSER', pid='test-installation-001',
+                    scopes=[('PE', 'LA CASA DEL PERFUME')])
+        with pytest.raises(OSError, match='Interrupted'):
+            adapter.inventory_batch(db_path, **args)
+        assert [r[0] for r in con.execute('SELECT quote_id FROM quote_sync_document')] == [first_id]
+        assert con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0] == 1
+        # Another writer can delete while the next batch is not holding a transaction.
+        from sqlModels.db import tx
+        from sqlModels.quotes_repo import soft_delete_quote
+        with tx(con, immediate=True):
+            soft_delete_quote(con, second_id, '2026-09-14T15:30:00')
+        monkeypatch.setattr(adapter, 'projection', lambda _: None)
+        assert adapter.inventory_batch(db_path, **args)['registered'] == 2
+        assert con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0] == 3
+        deleted_payload = json.loads(con.execute('''SELECT o.payload FROM quote_sync_outbox o
+            JOIN quote_sync_document d ON d.quote_uuid=o.quote_uuid WHERE d.quote_id=?''', (second_id,)).fetchone()[0])
+        assert deleted_payload['operation'] == 'delete'
+    finally:
+        con.close()
+
+
+def test_inventory_batches_progress_past_unmatched_authors(local_history, monkeypatch):
+    from sqlModels.db import connect
+    from src import quote_sync_adapter as adapter
+    db_path, first_id, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute("UPDATE quotes SET cotizador_username='OTHER' WHERE id=?", (first_id,))
+            for number in range(2, 28):
+                add_history_quote(con, number)
+        args = dict(owner_id='9', username='TESTUSER', pid='test-installation-001',
+                    scopes=[('PE', 'LA CASA DEL PERFUME')])
+        assert adapter.inventory_batch(db_path, **args) == dict(registered=24, pending=1, more=True)
+        assert adapter.inventory_batch(db_path, **args) == dict(registered=2, pending=0, more=False)
+        assert con.execute('SELECT count(*) FROM quote_sync_document').fetchone()[0] == 26
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 27
+    finally:
+        con.close()
+
+
+def test_delete_serializes_with_another_sqlite_writer_and_closes_connection(local_history, monkeypatch, qapp):
+    from sqlModels.db import connect
+    from sqlModels.quotes_repo import soft_delete_quote
+    from src import quote_sync_adapter as adapter
+    from src.widgets_parts import quote_history_dialog as ui
+    db_path, qid, _ = local_history
+    monkeypatch.setattr(adapter, 'projection', lambda _: None)
+    adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
+        pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+    opened = []
+    def open_ui(path):
+        opened.append(connect(path))
+        return opened[-1]
+    def competing_delete(con, quote_id, timestamp):
+        # A sync commit between this read and the update used to invalidate the
+        # deferred transaction, causing SQLITE_BUSY_SNAPSHOT immediately.
+        con.execute('SELECT generation FROM quote_sync_document WHERE quote_id=?', (quote_id,)).fetchone()
+        other = connect(db_path)
+        try:
+            other.execute('PRAGMA busy_timeout=0')
+            try:
+                with other:
+                    other.execute("INSERT OR REPLACE INTO settings VALUES ('competing_sync', '1')")
+            except sqlite3.OperationalError as exc:
+                assert 'locked' in str(exc)
+        finally:
+            other.close()
+        soft_delete_quote(con, quote_id, timestamp)
+    monkeypatch.setattr(ui, 'connect', open_ui)
+    monkeypatch.setattr(ui, 'soft_delete_quote', competing_delete)
+    monkeypatch.setattr(ui.QMessageBox, 'question', lambda *_: ui.QMessageBox.Yes)
+    error = Mock()
+    monkeypatch.setattr(ui.QMessageBox, 'critical', error)
+    window = SimpleNamespace(_db_path=db_path, _selected_quote_id=lambda: qid,
+        _reload_first_page=Mock(), _wake_background_api_sync=Mock())
+    ui.QuoteHistoryWindow._soft_delete(window)
+    assert not error.called
+    window._wake_background_api_sync.assert_called_once()
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        opened[0].execute('SELECT 1')
+    con = connect(db_path)
+    try:
+        assert con.execute('SELECT deleted_at FROM quotes WHERE id=?', (qid,)).fetchone()[0]
+        row = con.execute('SELECT deleted_at,generation FROM quote_sync_document WHERE quote_id=?', (qid,)).fetchone()
+        assert row[0] and row[1] == 2
+        with con:
+            con.execute("INSERT OR REPLACE INTO settings VALUES ('competing_sync', '2')")
+    finally:
+        con.close()
+
+
+def test_delete_refreshes_only_its_client_and_preserves_historical_name(local_history):
+    from sqlModels.db import connect, tx
+    from sqlModels.quotes_repo import soft_delete_quote, get_quote_header
+    db_path, first_id, _ = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            second_id = add_history_quote(con, 2)
+            other_id = add_history_quote(con, 3, cedula='87654321', cliente='Otro cliente')
+            client_id = con.execute('SELECT id_cliente FROM quotes WHERE id=?', (first_id,)).fetchone()[0]
+            other_client = con.execute('SELECT id_cliente FROM quotes WHERE id=?', (other_id,)).fetchone()[0]
+            con.execute("UPDATE clients SET updated_at='unchanged' WHERE id=?", (other_client,))
+        with tx(con, immediate=True):
+            soft_delete_quote(con, second_id, '2026-09-14T15:30:00')
+        assert con.execute('SELECT source_quote_id FROM clients WHERE id=?', (client_id,)).fetchone()[0] == first_id
+        assert con.execute('SELECT updated_at FROM clients WHERE id=?', (other_client,)).fetchone()[0] == 'unchanged'
+        with tx(con, immediate=True):
+            soft_delete_quote(con, first_id, '2026-09-14T15:31:00')
+        assert get_quote_header(con, first_id)['cliente'] == 'Cliente de prueba'
+        assert con.execute('SELECT count(*) FROM clients WHERE id=?', (other_client,)).fetchone()[0] == 1
+    finally:
+        con.close()
 
 
 class FullSQLiteHistoryTests(unittest.TestCase):
