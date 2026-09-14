@@ -79,6 +79,13 @@ a = Analysis(
     noarchive=False,
 )
 
+# Qt usa la API ICU de Windows. Si PyInstaller encuentra las DLL de ICU de
+# Poppler en PATH, puede empaquetarlas y Qt termina cargando una variante con
+# símbolos incompatibles (DLL load failed al importar QtWidgets). Dejamos que
+# Windows resuelva la ICU del sistema, igual que en el build del piloto.
+a.binaries = [entry for entry in a.binaries
+              if Path(entry[0]).name.lower() not in {'icuuc.dll', 'icudt78.dll'}]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
