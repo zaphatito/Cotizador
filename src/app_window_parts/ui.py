@@ -1584,11 +1584,8 @@ class UiMixin:
         self.lbl_context = QLabel(
             f"{self.country_name} · {self.company_type} · Base: {self.base_currency}"
         )
+        self.lbl_context.hide()
         main.addWidget(self.lbl_context)
-        if getattr(self, "_server_catalog_mode", False):
-            self.btn_stock = QPushButton("Stock de tiendas")
-            self.btn_stock.clicked.connect(self.abrir_stock_tiendas)
-            main.addWidget(self.btn_stock)
 
         grp_cli = QGroupBox("Datos del Cliente")
         form_cli = QGridLayout()
@@ -1662,7 +1659,8 @@ class UiMixin:
         self.lbl_moneda.setMinimumWidth(105)
         self.lbl_moneda.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        btn_listado = QPushButton("Listado de productos")
+        btn_listado = QPushButton("Productos")
+        btn_listado.setToolTip("Abrir listado de productos")
         self._apply_btn_responsive(btn_listado, 118, 28)
         btn_listado.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn_listado.clicked.connect(self.abrir_listado_productos)
@@ -1723,6 +1721,14 @@ class UiMixin:
             rate_row.addWidget(self.lbl_moneda, 1)
             actions_row.addStretch(1)
             actions_row.addWidget(btn_listado, 0)
+
+        if getattr(self, "_server_catalog_mode", False):
+            self.btn_stock = QPushButton("Stock")
+            self.btn_stock.setToolTip("Consultar stock por tienda")
+            self._apply_btn_responsive(self.btn_stock, 62, 28)
+            self.btn_stock.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            self.btn_stock.clicked.connect(self.abrir_stock_tiendas)
+            rate_row.addWidget(self.btn_stock, 0)
 
         grp_quick = QGroupBox("Acciones rápidas")
         quick = QVBoxLayout(grp_quick)

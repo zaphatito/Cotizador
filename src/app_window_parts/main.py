@@ -269,6 +269,7 @@ class SistemaCotizaciones(
             f"{self.country_name} · {self.company_type} · Base: {self.base_currency}"
             + ("" if authorized else " · Asignación retirada")
         )
+        self.lbl_context.setVisible(not authorized)
         if not authorized:
             self.productos = []
             self.presentaciones = []

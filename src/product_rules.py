@@ -7,6 +7,7 @@ from .country_rules import normalize_country_name, uses_peru_business_rules
 
 
 PY_UNIT_PRODUCT_CODES = frozenset({"FERO001", "FIJ002"})
+PE_UNIT_PRODUCT_CODES = frozenset({"BASE01"})
 _PERU_EXTRA_GRAM_CATEGORIES = frozenset(
     {"FEROMONA", "FEROMONAS", "FIJADOR", "FIJADORES"}
 )
@@ -51,6 +52,10 @@ def is_py_unit_product(code_or_item: Any, *, country: str | None = None) -> bool
 def uses_gram_quantity(category_or_item: Any, *, country: str | None = None) -> bool:
     """Whether quantity represents a weight-based product for the country."""
     current_country = normalize_country(APP_COUNTRY if country is None else country)
+    # BASE01: Base 1 Litro LCDP x 30 Unidades (Perú). Su departamento
+    # DILUYENTES no convierte este producto en una cantidad por peso.
+    if current_country == "PERU" and normalize_product_code(category_or_item) in PE_UNIT_PRODUCT_CODES:
+        return False
     category = normalize_product_category(category_or_item)
     gram_categories = {
         str(configured_category or "").strip().upper()

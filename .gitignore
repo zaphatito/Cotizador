@@ -50,4 +50,5 @@ skills-lock.json
 !/tests/test_multicountry_windows.py
 !/tests/test_pdf_context_isolation.py
 !/tests/test_window_currency_context.py
+!/tests/test_peru_base_units.py
 !/Utilidades/piloto_historico.spec

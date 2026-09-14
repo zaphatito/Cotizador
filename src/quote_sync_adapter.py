@@ -34,7 +34,9 @@ def snapshot_for(con, quote_id):
     return snapshot
 
 
-def inventory(con, *, owner_id, username, pid, scopes):
+def inventory(con, *, owner_id, username, pid, scopes, id_cotizador=None):
+    from sqlModels.settings_repo import get_setting
+    user_code = str(id_cotizador or get_setting(con, 'store_id', '')).strip().casefold()
     allowed = set(scopes)
     result = dict(registered=0, pending=0)
     # Include sent and deleted records. Never replace the stored historical author.
@@ -46,6 +48,8 @@ def inventory(con, *, owner_id, username, pid, scopes):
             header = snapshot['header']
             if header['cotizador_username'].strip().casefold() != username.strip().casefold():
                 raise ValueError('El autor histórico requiere conciliación; no se sustituye por el usuario actual.')
+            if not user_code or header['id_cotizador'].strip().casefold() != user_code:
+                raise ValueError('El código del usuario histórico no coincide con la configuración actual.')
             if (header['country_code'], header['company_type']) not in allowed:
                 raise ValueError('El ámbito histórico no está autorizado.')
             quote_uuid = repo.register(con, quote_id=raw['id'], owner_id=owner_id, origin_pid=pid,

@@ -101,8 +101,7 @@ def resolve_historical_quote_owner(
     if header.get('sync_owner_id'):
         if str(header['sync_owner_id']) != str(header.get('sync_current_owner_id') or ''):
             return None
-        return str(header.get('cotizador_username') or ''), str(header.get('id_cotizador') or '')
-    if is_legacy_quote_context(header):
+    elif is_legacy_quote_context(header):
         return current_username, current_id
 
     historical_username = str(header.get("cotizador_username") or "").strip()

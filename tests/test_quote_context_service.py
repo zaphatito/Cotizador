@@ -1,3 +1,5 @@
+import pytest
+
 from src.catalog_context import CatalogScope
 from src.quote_context_service import (
     build_quote_context,
@@ -125,6 +127,21 @@ def test_historical_owner_keeps_modern_other_cotizador_blocked():
     assert owner is None
 
 
+@pytest.mark.parametrize('username,code,expected', [
+    ('lcdp5', '005', ('lcdp5', '005')),
+    ('LCDP5', '005', ('lcdp5', '005')),
+    ('lcdp5', '006', None),
+    ('lcdp6', '005', None),
+])
+def test_shared_history_requires_the_same_user_and_code(username, code, expected):
+    owner = resolve_historical_quote_owner(
+        {'cotizador_username': 'lcdp5', 'id_cotizador': '005',
+         'sync_owner_id': '9', 'sync_current_owner_id': '9'},
+        current_username=username, current_id_cotizador=code,
+    )
+    assert owner == expected
+
+
 class _ScopeManagerStub:
     server_mode = True
 
@@ -136,7 +153,7 @@ class _ScopeManagerStub:
         self.selected = scope
 
 
-def test_scope_selector_blocks_zero_and_prompts_for_one(monkeypatch, qapp):
+def test_scope_selector_blocks_zero_and_uses_single_configuration(monkeypatch, qapp):
     warnings = []
     monkeypatch.setattr(catalog_scope_dialog.QMessageBox, "warning", lambda *_: warnings.append(True))
     assert catalog_scope_dialog.select_catalog_scope(None, _ScopeManagerStub([])) is None
@@ -154,7 +171,21 @@ def test_scope_selector_blocks_zero_and_prompts_for_one(monkeypatch, qapp):
 
     monkeypatch.setattr(catalog_scope_dialog.CatalogScopeDialog, "exec", accept)
     assert catalog_scope_dialog.select_catalog_scope(None, manager) == scope
-    assert prompted == [True]
+    assert prompted == []
+    assert manager.selected is None
+
+
+def test_scope_selector_single_configuration_requires_healthy_catalog(monkeypatch, qapp):
+    scope = CatalogScope("PE", "EF PERFUMES")
+    manager = _ScopeManagerStub([scope])
+    manager.catalog_health = lambda _: (False, "Catálogo pendiente de sincronización")
+    manager.stock_matrix = lambda _: {"stores": []}
+    warnings = []
+    monkeypatch.setattr(catalog_scope_dialog.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    monkeypatch.setattr(catalog_scope_dialog.CatalogScopeDialog, "exec", lambda _: pytest.fail("No debe pedir país con una sola configuración"))
+    assert catalog_scope_dialog.select_catalog_scope(None, manager) is None
+    assert warnings == ["Catálogo pendiente de sincronización"]
+    assert catalog_scope_dialog.select_catalog_scope(None, manager, require_catalog=False) == scope
     assert manager.selected is None
 
 

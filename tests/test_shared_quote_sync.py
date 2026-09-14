@@ -27,6 +27,37 @@ def full_snapshot(number=1, installation='001'):
 
 
 class FullSQLiteHistoryTests(unittest.TestCase):
+    def test_inventory_groups_only_the_same_user_and_code(self):
+        from unittest.mock import patch
+        from sqlModels.db import ensure_schema
+        from sqlModels.quotes_repo import insert_quote
+        from src.quote_sync_adapter import inventory
+        con = sqlite3.connect(':memory:')
+        con.row_factory = sqlite3.Row
+        try:
+            ensure_schema(con)
+            with con:
+                con.execute('INSERT INTO settings VALUES (?,?)', ('store_id', '001'))
+                ids = []
+                for number, code, username in [(1, '001', 'TESTUSER'), (2, '001', 'testuser'),
+                                               (3, '002', 'TESTUSER'), (4, '001', 'OTRO')]:
+                    snapshot = full_snapshot(number, installation=code)
+                    snapshot['header']['cotizador_username'] = username
+                    header = dict(snapshot['header'])
+                    header.pop('estado')
+                    ids.append(insert_quote(con, **header, pdf_path='',
+                        items_base=snapshot['items_base'], items_shown=snapshot['items_shown']))
+                with patch('src.quote_sync_adapter.projection', return_value=None):
+                    result = inventory(con, owner_id='9', username=' TESTUSER ',
+                        pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+            self.assertEqual(result, {'registered': 2, 'pending': 2})
+            linked = con.execute('SELECT quote_id FROM quote_sync_document ORDER BY quote_id').fetchall()
+            self.assertEqual([row[0] for row in linked], ids[:2])
+            self.assertEqual(con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0], 2)
+            self.assertEqual(con.execute('SELECT count(*) FROM quotes').fetchone()[0], 4)
+        finally:
+            con.close()
+
     def test_local_quote_and_exact_outbox_rollback_together(self):
         from unittest.mock import patch
         from sqlModels.db import ensure_schema
@@ -40,6 +71,7 @@ class FullSQLiteHistoryTests(unittest.TestCase):
             with con:
                 con.execute('INSERT INTO settings VALUES (?,?)', ('shared_quote_sync_capabilities', repo.encode(capabilities)))
                 con.execute('INSERT INTO settings VALUES (?,?)', ('cotizador_pid', 'test-installation-001'))
+                con.execute('INSERT INTO settings VALUES (?,?)', ('store_id', '001'))
             snapshot = full_snapshot()
             header = dict(snapshot['header']); header.pop('estado')
             with patch('src.quote_sync_adapter.projection', return_value=None):

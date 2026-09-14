@@ -3,7 +3,13 @@ Versión: 2.0.40
 Fecha: 2026-09-14
 
 Resumen
-- Se corrigieron los descuentos del cotizador para Perú para trabajar únicamente con porcentajes enteros.
+- Correcciones de cantidades en Perú, identificación del histórico compartido y presentación del cotizador.
 
 Correcciones
-- [Fix] Los descuentos ingresados por monto se convierten al porcentaje entero más cercano y se recalcula el monto correspondiente.
+- [Fix] BASE01 (Base 1 Litro LCDP x 30 Unidades) se maneja como unidades en Perú y no se incluye en los gramos del editor, PDF, ticket ni etiquetas.
+- [Fix] El histórico compartido identifica al usuario por su código y nombre, evitando mezclar cotizaciones de códigos distintos.
+- [Fix] Se retiró la fila superior añadida y el acceso al stock quedó compacto en Acciones rápidas.
+- [Fix] Con una sola configuración de país se abre la cotización directamente; la selección se muestra cuando existen varias configuraciones.
+
+Compatibilidad
+- Se conservan la configuración y las cotizaciones guardadas.

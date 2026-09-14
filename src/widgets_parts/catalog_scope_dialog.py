@@ -137,6 +137,14 @@ def select_catalog_scope(
             "Este usuario/cotizador no tiene tiendas asignadas ni un catálogo guardado.",
         )
         return None
+    if len(scopes) == 1:
+        scope = scopes[0]
+        if require_catalog:
+            healthy, reason = catalog_manager.catalog_health(scope)
+            if not healthy:
+                QMessageBox.warning(parent, "Catálogo no disponible", reason)
+                return None
+        return scope
     dialog = CatalogScopeDialog(parent, catalog_manager, preferred=preferred, require_catalog=require_catalog)
     try:
         return dialog.selected_scope if dialog.exec() == QDialog.Accepted else None
