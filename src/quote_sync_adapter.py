@@ -157,8 +157,9 @@ def materialize(con, remote, quote_id):
         'tasa_shown', 'subtotal_bruto_base', 'descuento_total_base', 'total_neto_base',
         'subtotal_bruto_shown', 'descuento_total_shown', 'total_neto_shown',
         'cotizador_username', 'id_cotizador', 'created_at']
+    # Estado, pago y origen web son metadata del histórico, no contenido del PDF.
     rendered_fields = stable_columns + ['cliente', 'cedula', 'tipo_documento',
-        'telefono', 'direccion', 'email', 'estado', 'metodo_pago', 'chatbot']
+        'telefono', 'direccion', 'email']
     def rendered_value(header, key):
         value = header.get(key) or ''
         return 'LA CASA DEL PERFUME' if key == 'company_type' and value == 'LCDP' else value

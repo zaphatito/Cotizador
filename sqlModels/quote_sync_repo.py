@@ -159,8 +159,8 @@ def local_metadata(con, quote_id, *, estado=None, pago=None, chatbot=None, delet
     con.execute('''UPDATE quote_sync_document SET snapshot=?,generation=generation+1,
         deleted_at=COALESCE(?,deleted_at),error='' WHERE quote_id=?''',
         (encode(snapshot), deleted_at, quote_id))
-    if 'pdf_path' in {column[1] for column in con.execute('PRAGMA table_info(quotes)')}:
-        con.execute("UPDATE quotes SET pdf_path='' WHERE id=?", (quote_id,))
+    # Estado, pago y origen web no se imprimen en el PDF. Conservar su vínculo
+    # local mientras estos cambios siguen pendientes de sincronización.
     # If a conflict already exists, preserve subsequent edits in its proposal too.
     saved_conflict = _row(con, 'SELECT * FROM quote_sync_conflict WHERE quote_uuid=?', (row['quote_uuid'],))
     if saved_conflict:

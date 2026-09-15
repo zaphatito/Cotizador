@@ -15,13 +15,18 @@ La contraparte de EFAPI incluye `database/1.5.17.sql` y
 - `src/quote_sync_adapter.py`: reconciliación inicial, proyección compatible con
   EFAPI e importación de snapshots sin archivos externos ni actualización de la
   ficha viva del cliente por una cotización histórica.
-- Histórico: país/empresa y moneda visibles, códigos completos, estado de
-  sincronización, informe de parciales/incidencias y resolución explícita de
-  conflictos. Actualizar el listado conserva página y selección.
+- Histórico: moneda visible, sin columnas de país/empresa o sincronización,
+  sin informe ni etiqueta de sincronización. Los conflictos conservan su acción
+  de resolución en el menú contextual. Actualizar el listado conserva página y
+  selección; la sincronización sigue funcionando en segundo plano.
 - «Abrir Cotización» sigue creando una copia con la instalación actual. Los
   documentos originales conservan contexto, importes e items de su snapshot.
 - PDF: un documento descargado puede regenerarse desde el snapshot sin una ruta
-  previa. Cambios de metadata invalidan la ruta anterior. No se transfieren CMD.
+  previa. Estado, pago y origen web conservan la referencia local porque no se
+  imprimen en el PDF. Los cambios de contenido siguen invalidándola. El listado
+  también encuentra archivos locales por país, instalación, número y cliente;
+  una referencia invalidada se regenera al abrir para asegurar contenido actual.
+  No se transfieren CMD.
 
 La activación la decide EFAPI por usuario y está desactivada por defecto. Después
 de habilitarse, una pausa no devuelve la instalación al envío legacy sin revisión.

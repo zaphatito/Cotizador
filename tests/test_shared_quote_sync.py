@@ -71,6 +71,40 @@ def test_ack_preserves_local_pdf_until_its_content_changes(local_history, change
         con.close()
 
 
+@pytest.mark.parametrize('field,value', [
+    ('estado', 'PAGADO'), ('metodo_pago', 'EFECTIVO'), ('chatbot', True)
+])
+@pytest.mark.parametrize('remote_change', [False, True])
+def test_history_metadata_keeps_generated_pdf(local_history, field, value, remote_change):
+    from sqlModels.db import connect
+    from sqlModels import quotes_repo
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            uid = repo.register(con, quote_id=qid, owner_id='9', origin_pid='local', snapshot=snapshot)
+            if remote_change:
+                snapshot['header'][field] = value
+                materialize(con, dict(quote_uuid=uid, completeness='complete', snapshot=snapshot), qid)
+            else:
+                update = {
+                    'estado': quotes_repo.update_quote_status,
+                    'metodo_pago': quotes_repo.update_quote_payment,
+                    'chatbot': quotes_repo.update_quote_chatbot,
+                }[field]
+                update(con, qid, value)
+        row = con.execute('SELECT * FROM quotes WHERE id=?', (qid,)).fetchone()
+        assert row['pdf_path'] == 'C-PE-001-0000001_Cliente_de_prueba.pdf'
+        assert row[field] == value
+        if not remote_change:
+            document = repo.document(con, uid)
+            assert document['generation'] > document['acknowledged_generation']
+            assert json.loads(document['snapshot'])['header'][field] == value
+    finally:
+        con.close()
+
+
 @pytest.mark.parametrize('changed', [False, True])
 def test_actual_delivery_ack_keeps_or_invalidates_pdf_from_stored_content(local_history, monkeypatch, changed):
     from sqlModels.db import connect
@@ -141,6 +175,37 @@ def test_pdf_regeneration_rejects_missing_historical_date(local_history, monkeyp
     with pytest.raises(ValueError, match='fecha de emisión'):
         ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(SimpleNamespace(_db_path=db_path), qid)
     generate.assert_not_called()
+
+
+@pytest.mark.parametrize('stored_path,file_exists', [(True, True), (False, True), (True, False)])
+def test_open_pdf_reuses_current_file_but_regenerates_invalidated_content(
+    local_history, monkeypatch, tmp_path, qapp, stored_path, file_exists
+):
+    from sqlModels.db import connect
+    from src import paths
+    from src.widgets_parts import quote_history_dialog as ui
+    db_path, qid, _ = local_history
+    pdf = tmp_path / 'C-PE-001-0000001_Cliente_de_prueba.pdf'
+    if file_exists:
+        pdf.write_bytes(b'previous-content')
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute('UPDATE quotes SET pdf_path=? WHERE id=?', (pdf.name if stored_path else '', qid))
+    finally:
+        con.close()
+    monkeypatch.setattr(paths, 'COTIZACIONES_DIR', str(tmp_path))
+    monkeypatch.setattr(ui, 'COTIZACIONES_DIR', str(tmp_path))
+    generate = Mock(side_effect=lambda _, **kwargs: Path(kwargs['out_path']).write_bytes(b'current-content'))
+    opened = Mock(return_value=True)
+    monkeypatch.setattr(ui, 'generar_pdf', generate)
+    monkeypatch.setattr(ui.QDesktopServices, 'openUrl', opened)
+    history = SimpleNamespace(_db_path=db_path, _selected_quote_id=lambda: qid)
+    history._regen_pdf_overwrite = lambda: ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(history, qid)
+    ui.QuoteHistoryWindow._open_pdf(history)
+    assert generate.call_count == (0 if stored_path and file_exists else 1)
+    assert pdf.read_bytes() == (b'previous-content' if stored_path and file_exists else b'current-content')
+    assert Path(opened.call_args.args[0].toLocalFile()) == pdf
 
 
 def test_shared_delivery_resumes_after_empty_scopes_and_does_not_duplicate_upload(local_history, monkeypatch):
