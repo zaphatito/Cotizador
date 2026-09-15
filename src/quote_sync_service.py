@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 
@@ -19,7 +20,8 @@ class SyncFailure(RuntimeError):
 
 class QuoteSyncService:
     def __init__(self, *, connect, transport, pid, owner_id, scopes,
-                 materialize, projection=None, clock=time.time, jitter=random.uniform):
+                 materialize, projection=None, clock=time.time, jitter=random.uniform,
+                 functional_username='', id_cotizador=''):
         self.connect = connect
         self.transport = transport
         self.pid = pid
@@ -30,6 +32,19 @@ class QuoteSyncService:
         self.clock = clock
         self.jitter = jitter
         self.offset = 0
+        self.functional_username = str(functional_username).strip().upper()
+        self.id_cotizador = str(id_cotizador).strip().upper()
+
+    def _belongs_to_identity(self, remote):
+        if not self.functional_username and not self.id_cotizador:
+            return True
+        from .quote_code import sync_quote_key
+        h = remote['snapshot']['header']
+        return (str(h.get('cotizador_username') or '').strip().upper() == self.functional_username
+            and str(h.get('id_cotizador') or '').strip().upper() == self.id_cotizador
+            and h.get('country_code') == remote['country_code']
+            and h.get('company_type') == remote['company_type']
+            and sync_quote_key(h.get('quote_no'), remote['country_code'], self.id_cotizador) is not None)
 
     def cycle(self):
         """One upload and one download per scope; bad documents cannot starve peers."""
@@ -50,6 +65,11 @@ class QuoteSyncService:
                     con.close()
                 page = self.transport.changes(dict(pid=self.pid, country_code=country,
                     company_type=company, cursor=cursor[0] if cursor else None, limit=25))
+                allowed = [event for event in page['events'] if self._belongs_to_identity(event)]
+                if len(allowed) != len(page['events']):
+                    logging.getLogger(__name__).warning('Se omitieron %s cotizaciones de otra identidad',
+                        len(page['events']) - len(allowed))
+                page = dict(page, events=allowed)
                 con = self.connect()
                 try:
                     with tx(con, immediate=True):
@@ -86,6 +106,13 @@ class QuoteSyncService:
                     COALESCE(o.retry_at,0),q.id DESC,d.rowid LIMIT 1''',
                     (self.owner_id, country, company, self.clock())).fetchone()
                 budget = None
+                if candidates:
+                    candidate = repo.document(con, candidates[0])
+                    if not self._belongs_to_identity(dict(candidate, snapshot=json.loads(candidate['snapshot']))):
+                        con.execute('UPDATE quote_sync_document SET error=? WHERE quote_uuid=?',
+                            ('La cotización pertenece a otro usuario o código de cotizador.', candidates[0]))
+                        result['failed'] += 1
+                        return
                 prior = con.execute('SELECT 1 FROM quote_sync_outbox WHERE quote_uuid=?',
                                     (candidates[0],)).fetchone() if candidates else None
                 if candidates and self.projection and not prior:
@@ -105,6 +132,9 @@ class QuoteSyncService:
             return
         try:
             remote = self.transport.mutate(json.loads(sent['payload']))
+            if not self._belongs_to_identity(remote):
+                raise SyncFailure('La respuesta pertenece a otro usuario o código de cotizador.',
+                                  status=403, code='QUOTE_OWNER_MISMATCH')
         except (SyncFailure, OSError) as exc:
             result['offline'] = result['offline'] or isinstance(exc, OSError) or (
                 isinstance(exc, SyncFailure) and (exc.status == 0 or exc.status >= 500))
@@ -138,7 +168,13 @@ class QuoteSyncService:
                 if current and acknowledged and not still_pending:
                     self.materialize(con, dict(remote, snapshot=json.loads(acknowledged['snapshot']),
                         deleted_at=acknowledged['deleted_at']), current['quote_id'])
-            result['sent'] += 1
-            result['more'] = True
+                has_conflict = con.execute('SELECT 1 FROM quote_sync_conflict WHERE quote_uuid=?',
+                                           (sent['quote_uuid'],)).fetchone()
+            if still_pending:
+                result['failed'] += 1
+                result['conflicts'] += int(bool(has_conflict))
+            else:
+                result['sent'] += 1
+                result['more'] = True
         finally:
             con.close()

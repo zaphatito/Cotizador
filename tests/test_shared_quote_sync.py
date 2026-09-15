@@ -123,6 +123,24 @@ def test_regenerated_pdf_uses_client_name_even_without_a_local_file(local_histor
     assert Path(path).name == 'C-PE-001-0000001_Cliente_de_prueba.pdf'
     assert code == 'PE-001-0000001'
     assert rendered[0]['cliente'] == 'Cliente de prueba'
+    assert rendered[0]['fecha'].isoformat() == '2026-09-07T10:00:00-05:00'
+
+
+def test_pdf_regeneration_rejects_missing_historical_date(local_history, monkeypatch, qapp):
+    from sqlModels.db import connect
+    from src.widgets_parts import quote_history_dialog as ui
+    db_path, qid, _ = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute("UPDATE quotes SET created_at='' WHERE id=?", (qid,))
+    finally:
+        con.close()
+    generate = Mock()
+    monkeypatch.setattr(ui, 'generar_pdf', generate)
+    with pytest.raises(ValueError, match='fecha de emisión'):
+        ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(SimpleNamespace(_db_path=db_path), qid)
+    generate.assert_not_called()
 
 
 def test_shared_delivery_resumes_after_empty_scopes_and_does_not_duplicate_upload(local_history, monkeypatch):
@@ -164,6 +182,270 @@ def add_history_quote(con, number, **overrides):
     header.pop('estado')
     return insert_quote(con, **header, pdf_path='',
         items_base=data['items_base'], items_shown=data['items_shown'])
+
+
+def downloaded(snapshot, revision='1', uuid='server-quote'):
+    return dict(quote_uuid=uuid, owner_id='9', country_code='PE',
+        company_type='LA CASA DEL PERFUME', origin_pid='another-installation',
+        revision=revision, snapshot=copy.deepcopy(snapshot), deleted_at=None,
+        completeness='complete')
+
+
+@pytest.mark.parametrize('code', ['PE-001-0000001', '001-0000001', '0000001', 'PE-0000001'])
+def test_download_links_existing_history_before_backfill_without_duplicate(local_history, code):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute('UPDATE quotes SET quote_no=?,api_sent_at=? WHERE id=?',
+                        (code, '2026-09-07T10:01:00', qid))
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[downloaded(snapshot)], next_cursor='next'), materialize=materialize)
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+        assert repo.document(con, 'server-quote')['quote_id'] == qid
+        assert con.execute('SELECT created_at FROM quotes WHERE id=?', (qid,)).fetchone()[0] == snapshot['header']['created_at']
+    finally:
+        con.close()
+
+
+def test_download_before_lost_ack_keeps_frozen_upload_and_one_local_row(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            uid = repo.register(con, quote_id=qid, owner_id='9', origin_pid='local', snapshot=snapshot)
+            sent = repo.freeze(con, uid, pid='local')
+            repo.local_metadata(con, qid, pago='EFECTIVO')
+            remote = downloaded(snapshot)
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[remote], next_cursor='next'), materialize=materialize)
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+        assert repo.freeze(con, uid, pid='local')['payload'] == sent['payload']
+        with con:
+            repo.acknowledge(con, sent['mutation_id'], remote)
+        saved = repo.document(con, remote['quote_uuid'])
+        assert saved['quote_id'] == qid
+        assert json.loads(saved['snapshot'])['header']['metodo_pago'] == 'EFECTIVO'
+        assert con.execute('SELECT count(*) FROM quote_sync_conflict').fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_ack_cannot_replace_original_emission_with_retry_time(local_history):
+    from sqlModels.db import connect
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            uid = repo.register(con, quote_id=qid, owner_id='9', origin_pid='local', snapshot=snapshot)
+            sent = repo.freeze(con, uid, pid='local')
+            remote = downloaded(snapshot, uuid=uid)
+            remote['snapshot']['header']['created_at'] = '2026-09-15T12:00:00-05:00'
+            repo.acknowledge(con, sent['mutation_id'], remote)
+        assert json.loads(repo.document(con, uid)['snapshot'])['header']['created_at'] == snapshot['header']['created_at']
+        assert con.execute('SELECT count(*) FROM quote_sync_conflict').fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_sync_reports_date_conflict_without_claiming_delivery(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    from src.quote_sync_service import QuoteSyncService
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            uid = repo.register(con, quote_id=qid, owner_id='9', origin_pid='local', snapshot=snapshot)
+    finally:
+        con.close()
+    remote = downloaded(snapshot, uuid=uid)
+    remote['snapshot']['header']['created_at'] = '2026-09-15T12:00:00-05:00'
+    service = QuoteSyncService(connect=lambda: connect(db_path),
+        transport=SimpleNamespace(mutate=lambda _: remote,
+            changes=lambda _: dict(events=[], next_cursor='1')),
+        owner_id='9', pid='local', scopes=[('PE', 'LA CASA DEL PERFUME')], materialize=materialize,
+        functional_username='TESTUSER', id_cotizador='001')
+    result = service.cycle()
+    assert result['sent'] == 0
+    assert result['conflicts'] == 1
+    assert result['blocked'] == 1
+
+
+@pytest.mark.parametrize('deleted', [False, True])
+def test_download_adoption_preserves_pending_local_metadata_and_deletion(local_history, deleted):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    stamp = '2026-09-08T11:00:00-05:00' if deleted else None
+    try:
+        with con:
+            con.execute('UPDATE quotes SET metodo_pago=?,deleted_at=?,api_sent_at=? WHERE id=?',
+                ('EFECTIVO', stamp, '2026-09-07T10:01:00' if deleted else None, qid))
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[downloaded(snapshot)], next_cursor='1'), materialize=materialize)
+        row = repo.document(con, 'server-quote')
+        assert row['quote_id'] == qid
+        assert row['deleted_at'] == stamp
+        if not deleted:
+            assert json.loads(row['snapshot'])['header']['metodo_pago'] == 'EFECTIVO'
+        payload = json.loads(repo.freeze(con, 'server-quote', pid='local')['payload'])
+        assert payload['operation'] == ('delete' if deleted else 'update_metadata')
+        assert con.execute('SELECT deleted_at FROM quotes WHERE id=?', (qid,)).fetchone()[0] == stamp
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('incoming', ['2026-09-07T15:00:00Z', '2026-09-08T10:00:00-05:00'])
+def test_download_never_replaces_original_issue_timestamp(local_history, incoming):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            remote = downloaded(snapshot)
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[remote], next_cursor='1'), materialize=materialize)
+            remote['revision'] = '2'
+            remote['snapshot']['header']['created_at'] = incoming
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[remote], next_cursor='2'), materialize=materialize)
+        assert con.execute('SELECT created_at FROM quotes WHERE id=?', (qid,)).fetchone()[0] == snapshot['header']['created_at']
+        expected_conflicts = int(incoming.startswith('2026-09-08'))
+        assert con.execute('SELECT count(*) FROM quote_sync_conflict').fetchone()[0] == expected_conflicts
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_partial_event_then_complete_download_links_local_history(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            remote = downloaded(snapshot)
+            remote['completeness'] = 'partial'
+            remote['snapshot'] = dict(version=1, header={key: snapshot['header'][key] for key in
+                ('country_code', 'company_type', 'quote_no', 'cotizador_username', 'id_cotizador')})
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[remote], next_cursor='1'), materialize=materialize)
+            assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[downloaded(snapshot, revision='2')], next_cursor='2'), materialize=materialize)
+        assert repo.document(con, 'server-quote')['quote_id'] == qid
+        assert con.execute('SELECT count(*) FROM quote_sync_document').fetchone()[0] == 1
+        assert con.execute('SELECT count(*) FROM quote_sync_conflict').fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_ack_adopts_previously_downloaded_partial_stub(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            con.execute("UPDATE quotes SET quote_no_status='provisional' WHERE id=?", (qid,))
+            partial = dict(downloaded(snapshot), completeness='partial')
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[partial], next_cursor='1'), materialize=materialize)
+            assert repo.document(con, 'server-quote')['quote_id'] is None
+            con.execute("UPDATE quotes SET quote_no_status='confirmed' WHERE id=?", (qid,))
+            uid = repo.register(con, quote_id=qid, owner_id='9', origin_pid='local', snapshot=snapshot)
+            sent = repo.freeze(con, uid, pid='local')
+            repo.acknowledge(con, sent['mutation_id'], downloaded(snapshot, revision='2'))
+        assert repo.document(con, 'server-quote')['quote_id'] == qid
+        assert con.execute('SELECT count(*) FROM quote_sync_document').fetchone()[0] == 1
+        assert con.execute('SELECT count(*) FROM quote_sync_outbox').fetchone()[0] == 0
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_existing_ambiguous_duplicates_do_not_block_other_downloads(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    db_path, qid, snapshot = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            duplicate_id = add_history_quote(con, 1, created_at='2026-09-08T11:00:00-05:00')
+            other = downloaded(full_snapshot(2), uuid='another-quote')
+            repo.apply_page(con, owner_id='9', country_code='PE', company_type='LA CASA DEL PERFUME',
+                page=dict(events=[downloaded(snapshot), other], next_cursor='2'), materialize=materialize)
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 3
+        assert repo.document(con, 'another-quote')['quote_id'] not in (qid, duplicate_id)
+        assert con.execute('SELECT count(*) FROM quote_sync_conflict').fetchone()[0] == 2
+        assert con.execute('SELECT cursor FROM quote_sync_cursor').fetchone()[0] == '2'
+        assert con.execute('SELECT created_at FROM quotes WHERE id=?', (duplicate_id,)).fetchone()[0] == '2026-09-08T11:00:00-05:00'
+    finally:
+        con.close()
+
+
+def test_history_filters_unregistered_quotes_by_configured_user_and_store(local_history):
+    from sqlModels.db import connect
+    from sqlModels.quotes_repo import list_quotes
+    db_path, qid, _ = local_history
+    con = connect(db_path)
+    try:
+        with con:
+            add_history_quote(con, 2, id_cotizador='004', quote_no='PE-004-0000002')
+            add_history_quote(con, 3, cotizador_username='OTHER')
+            add_history_quote(con, 4, quote_no='PE-004-0000004')
+            caps = dict(enabled=True, owner_id='9', username='TESTUSER',
+                scopes=[dict(country_code='PE', company_type='LA CASA DEL PERFUME')])
+            con.execute('INSERT INTO settings VALUES (?,?)', ('shared_quote_sync_capabilities', repo.encode(caps)))
+        rows, total = list_quotes(con)
+        assert total == 1
+        assert [row['id'] for row in rows] == [qid]
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('value', [None, '', 'fecha inválida', '0', '2026-09-07T10:00:00XYZ'])
+def test_invalid_emission_is_not_replaced_by_current_time(value):
+    from src.api.presupuesto_client import _normalize_issue_timestamp
+    with pytest.raises(ValueError, match='fecha de emisión'):
+        _normalize_issue_timestamp(value)
+
+
+def test_legacy_emission_preserves_its_day_and_time():
+    import datetime
+    from src.api.presupuesto_client import _normalize_issue_timestamp
+    expected = int(datetime.datetime(2026, 9, 7, 10, 23, 45).timestamp() * 1000)
+    assert _normalize_issue_timestamp('07/09/2026 10:23:45') == expected
+
+
+def test_download_omits_other_store_even_if_server_owner_id_matches(local_history):
+    from sqlModels.db import connect
+    from src.quote_sync_adapter import materialize
+    from src.quote_sync_service import QuoteSyncService
+    db_path, _, snapshot = local_history
+    other = downloaded(full_snapshot(2, installation='004'), uuid='other-store')
+    own = downloaded(snapshot)
+    service = QuoteSyncService(connect=lambda: connect(db_path),
+        transport=SimpleNamespace(changes=lambda _: dict(events=[other, own], next_cursor='2')),
+        owner_id='9', pid='local', scopes=[('PE', 'LA CASA DEL PERFUME')], materialize=materialize,
+        functional_username='TESTUSER', id_cotizador='001')
+    result = service.cycle()
+    con = connect(db_path)
+    try:
+        assert result['received'] == 1
+        assert repo.document(con, 'other-store') is None
+        assert con.execute('SELECT count(*) FROM quotes').fetchone()[0] == 1
+        assert con.execute('SELECT cursor FROM quote_sync_cursor').fetchone()[0] == '2'
+    finally:
+        con.close()
 
 
 @pytest.mark.parametrize('server_accepts', [True, False])

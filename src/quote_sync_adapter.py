@@ -284,7 +284,8 @@ def run_shared_cycle(db_path, verification):
     token, _response = _login_api(user_id=configured.technical_user_id, api_username=identity.api_username)
     coordinator = QuoteSyncService(connect=lambda: connect(db_path),
         transport=EfapiQuoteTransport(token), pid=identity.pid, owner_id=owner_id,
-        scopes=scopes, materialize=materialize, projection=projection)
+        scopes=scopes, materialize=materialize, projection=projection,
+        functional_username=identity.functional_username, id_cotizador=identity.id_cotizador)
     result = dict(coordinator.cycle(), enabled=True)
     result['more'] = result['more'] or backfill['more']
     return result

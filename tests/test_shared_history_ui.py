@@ -42,7 +42,7 @@ class HistoryPresentationTests(unittest.TestCase):
             created_at='2026-09-07 10:00', country_code='PE', company_type='LA CASA DEL PERFUME',
             currency_shown='USD', total_shown=10, estado='PAGADO', metodo_pago='EFECTIVO',
             items_count=1, sync_label='Sincronizado')])
-        self.assertEqual(model.data(model.index(0, 1)), 'PE-001-0000001')
+        self.assertEqual(model.data(model.index(0, 1)), '0000001')
         self.assertEqual(model.data(model.index(0, 7)), '10.00 USD')
         self.assertIn('LA CASA DEL PERFUME', model.data(model.index(0, model.columnCount()-2)))
         self.assertEqual(model.data(model.index(0, model.columnCount()-1)), 'Sincronizado')

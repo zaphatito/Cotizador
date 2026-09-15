@@ -231,6 +231,20 @@ def conflict(con, quote_uuid, remote, reason):
                 (reason, quote_uuid))
 
 
+def _discard_partial_stub(con, row, owner_id):
+    """Only an unedited remote placeholder can yield its UUID to a local quote."""
+    if (row['quote_id'] is not None or row['completeness'] != 'partial'
+            or row['owner_id'] != str(owner_id)
+            or row['generation'] != row['acknowledged_generation']):
+        return False
+    if con.execute('SELECT 1 FROM quote_sync_outbox WHERE quote_uuid=? UNION ALL '
+                   'SELECT 1 FROM quote_sync_conflict WHERE quote_uuid=?',
+                   (row['quote_uuid'], row['quote_uuid'])).fetchone():
+        return False
+    con.execute('DELETE FROM quote_sync_document WHERE quote_uuid=?', (row['quote_uuid'],))
+    return True
+
+
 def acknowledge(con, mutation_id, remote):
     sent = _row(con, 'SELECT * FROM quote_sync_outbox WHERE mutation_id=?', (mutation_id,))
     if not sent:
@@ -238,10 +252,16 @@ def acknowledge(con, mutation_id, remote):
     row = document(con, sent['quote_uuid'])
     if str(remote['owner_id']) != row['owner_id']:
         raise ValueError('El ACK pertenece a otro propietario.')
+    remote = _preserve_emission(con, row, remote)
+    if remote is None:
+        return
     # UUID adoption is explicit. Preserve all local relationships and pending edits.
     target = remote['quote_uuid']
     if target != row['quote_uuid']:
-        if document(con, target):
+        target_row = document(con, target)
+        if target_row and _discard_partial_stub(con, target_row, row['owner_id']):
+            target_row = None
+        if target_row:
             conflict(con, row['quote_uuid'], remote, 'Correspondencia local duplicada')
             return
         con.execute('DELETE FROM quote_sync_outbox WHERE mutation_id=?', (mutation_id,))
@@ -277,6 +297,78 @@ def acknowledge(con, mutation_id, remote):
         conflict(con, target, deferred, 'El servidor cambió después de confirmar el envío')
 
 
+def _preserve_emission(con, row, remote):
+    if row['completeness'] != 'complete' or remote['completeness'] != 'complete':
+        return remote
+    from src.quote_dates import same_issue_datetime
+    local = json.loads(row['snapshot'])['header'].get('created_at')
+    incoming = remote['snapshot']['header'].get('created_at')
+    if local is not None and incoming is not None and local != incoming:
+        if not same_issue_datetime(local, incoming):
+            conflict(con, row['quote_uuid'], remote, 'La fecha de emisión difiere del documento original')
+            return None
+        remote = json.loads(encode(remote))
+        remote['snapshot']['header']['created_at'] = local
+    return remote
+
+
+def _matching_local_document(con, remote):
+    """The local inventory may still be pending when its server copy arrives."""
+    from src.quote_code import sync_quote_key
+    required = {'quote_no', 'country_code', 'company_type', 'cotizador_username', 'id_cotizador'}
+    if not required.issubset({c[1] for c in con.execute('PRAGMA table_info(quotes)')}):
+        return None
+    header = remote['snapshot']['header']
+    country, company = remote['country_code'], remote['company_type']
+    username = str(header.get('cotizador_username') or '').strip().upper()
+    installation = str(header.get('id_cotizador') or '').strip().upper()
+    code = sync_quote_key(header.get('quote_no'), country, installation)
+    if not username or code is None:
+        return None
+    con.create_function('cotizador_quote_key', 3, sync_quote_key, deterministic=True)
+    matches = con.execute('''SELECT id,api_sent_at FROM quotes
+        WHERE country_code=? AND (company_type=? OR (company_type='LCDP' AND ?='LA CASA DEL PERFUME'))
+        AND upper(trim(cotizador_username))=? AND upper(trim(id_cotizador))=?
+        AND COALESCE(quote_no_status,'confirmed')='confirmed'
+        AND cotizador_quote_key(quote_no,country_code,id_cotizador)=?''',
+        (country, company, company, username, installation, code)).fetchall()
+    if not matches:
+        return None
+    for quote_id, sent_at in matches:
+        row = _row(con, 'SELECT * FROM quote_sync_document WHERE quote_id=?', (quote_id,))
+        if row and row['owner_id'] != str(remote['owner_id']):
+            raise ValueError('La cotización local pertenece a otro usuario.')
+        if not row:
+            from src.quote_sync_adapter import snapshot_for
+            deleted = con.execute('SELECT deleted_at FROM quotes WHERE id=?', (quote_id,)).fetchone()[0]
+            uid = register(con, quote_id=quote_id, owner_id=remote['owner_id'], origin_pid='',
+                           snapshot=snapshot_for(con, quote_id), deleted_at=deleted)
+            row = document(con, uid)
+        row['_unsent_local'] = not sent_at
+        if len(matches) > 1:
+            conflict(con, row['quote_uuid'], remote, 'Hay varias cotizaciones locales con la misma identidad')
+            row['_identity_ambiguous'] = True
+    return row
+
+
+def _same_content(left, right):
+    from src.quote_code import sync_quote_key
+    from src.quote_dates import same_issue_datetime
+    left, right = json.loads(encode(left)), json.loads(encode(right))
+    if not same_issue_datetime(left['header'].get('created_at'), right['header'].get('created_at')):
+        return False
+    for snapshot in (left, right):
+        h = snapshot['header']
+        for key in ('estado', 'metodo_pago', 'chatbot', 'created_at'):
+            h.pop(key, None)
+        h['quote_no'] = sync_quote_key(h.get('quote_no'), h.get('country_code'), h.get('id_cotizador'))
+        h['cotizador_username'] = str(h.get('cotizador_username') or '').strip().upper()
+        h['id_cotizador'] = str(h.get('id_cotizador') or '').strip().upper()
+        if h.get('company_type') == 'LCDP':
+            h['company_type'] = 'LA CASA DEL PERFUME'
+    return left == right
+
+
 def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
     """Caller commits all events plus cursor together; materialize must not commit."""
     for remote in page['events']:
@@ -284,11 +376,44 @@ def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
                 str(owner_id), country_code, company_type):
             raise ValueError('Documento fuera del ámbito solicitado.')
         row = document(con, remote['quote_uuid'])
+        if not row or row['quote_id'] is None:
+            local = _matching_local_document(con, remote)
+            if local:
+                if local.get('_identity_ambiguous'):
+                    continue
+                if row and row['quote_uuid'] != local['quote_uuid']:
+                    if not _discard_partial_stub(con, row, owner_id):
+                        conflict(con, local['quote_uuid'], remote, 'Correspondencia local duplicada')
+                        continue
+                row = local
+        if row and row['revision'] != '0' and row['quote_uuid'] != remote['quote_uuid']:
+            conflict(con, row['quote_uuid'], remote, 'El número ya está vinculado a otra cotización compartida')
+            continue
         if row and int(row['revision']) >= int(remote['revision']):
             continue
+        if row:
+            remote = _preserve_emission(con, row, remote)
+            if remote is None:
+                continue
+        pending_metadata = None
+        if row and row['revision'] == '0' and remote['completeness'] == 'complete':
+            sending = _row(con, 'SELECT * FROM quote_sync_outbox WHERE quote_uuid=?', (row['quote_uuid'],))
+            saved_conflict = _row(con, 'SELECT 1 FROM quote_sync_conflict WHERE quote_uuid=?', (row['quote_uuid'],))
+            local_snapshot = json.loads(row['snapshot'])
+            if not sending and not saved_conflict and _same_content(local_snapshot, remote['snapshot']):
+                if row.get('_unsent_local') or row['generation'] > 1 or row['deleted_at']:
+                    pending_metadata = {key: local_snapshot['header'].get(key)
+                        for key in ('estado', 'metodo_pago', 'chatbot')
+                        if local_snapshot['header'].get(key) != remote['snapshot']['header'].get(key)}
+                pending_delete = row['deleted_at']
+                target = remote['quote_uuid']
+                con.execute('''UPDATE quote_sync_document SET quote_uuid=?,
+                    acknowledged_generation=generation WHERE quote_uuid=?''', (target, row['quote_uuid']))
+                con.execute('UPDATE quotes SET sync_uuid=? WHERE id=?', (target, row['quote_id']))
+                row = document(con, target)
         if row and row['generation'] > row['acknowledged_generation']:
             sending = _row(con, 'SELECT * FROM quote_sync_outbox WHERE quote_uuid=?', (row['quote_uuid'],))
-            if sending and not sending['blocked']:
+            if (sending and not sending['blocked']) or remote['completeness'] == 'partial':
                 # An uncertain ACK is resolved by retrying its immutable mutation.
                 # Retain later events so advancing the cursor cannot lose them.
                 con.execute('UPDATE quote_sync_document SET deferred_document=? WHERE quote_uuid=?',
@@ -310,6 +435,13 @@ def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
                 (remote['quote_uuid'], quote_id, str(owner_id), country_code, company_type,
                  remote.get('origin_pid') or '', str(remote['revision']), encode(remote['snapshot']),
                  encode(remote), remote.get('deleted_at'), remote['completeness']))
+        if pending_metadata is not None and (pending_metadata or pending_delete):
+            local_metadata(con, quote_id, estado=pending_metadata.get('estado'),
+                pago=pending_metadata.get('metodo_pago'), chatbot=pending_metadata.get('chatbot'),
+                deleted_at=pending_delete)
+            updated = document(con, remote['quote_uuid'])
+            materialize(con, dict(remote, snapshot=json.loads(updated['snapshot']),
+                                  deleted_at=updated['deleted_at']), quote_id)
     con.execute('''INSERT INTO quote_sync_cursor VALUES (?,?,?,?)
         ON CONFLICT(owner_id,country_code,company_type) DO UPDATE SET cursor=excluded.cursor''',
         (str(owner_id), country_code, company_type, page['next_cursor']))

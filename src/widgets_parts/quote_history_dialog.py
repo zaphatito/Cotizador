@@ -1044,8 +1044,6 @@ class QuotesTableModel(QAbstractTableModel):
                 qn_text = qn_digits
         else:
             qn_text = qn_raw
-        if '-' in qn_raw:
-            qn_text = qn_raw
         quote_no_status = str(row.get("quote_no_status") or "confirmed").strip().lower()
         row["_cache_quote_no_is_provisional"] = quote_no_status in ("provisional", "reserved")
         row["_cache_quote_no_txt"] = (
@@ -3008,8 +3006,9 @@ class QuoteHistoryWindow(QMainWindow):
             if not metodo_pago:
                 metodo_pago = "Transferencia"
 
+        from ..quote_dates import issue_datetime
         datos = {
-            "fecha": (header.get("created_at", "") or "")[:10],
+            "fecha": issue_datetime(header.get("created_at")),
             "cliente": header.get("cliente", ""),
             "cedula": header.get("cedula", ""),
             "tipo_documento": header.get("tipo_documento", ""),

@@ -1260,6 +1260,14 @@ def list_quotes(
         caps_row = con.execute("SELECT value FROM settings WHERE key='shared_quote_sync_capabilities'").fetchone()
         if caps_row:
             caps = json.loads(caps_row[0])
+            username = str(caps.get('username') or '').strip().upper()
+            installation = _setting_value(con, 'store_id').strip().upper()
+            if username and installation and _has_column(con, 'quotes', 'id_cotizador'):
+                from src.quote_code import sync_quote_key
+                con.create_function('cotizador_quote_key', 3, sync_quote_key, deterministic=True)
+                where.extend(['upper(trim(q.cotizador_username))=?', 'upper(trim(q.id_cotizador))=?',
+                    'cotizador_quote_key(q.quote_no,q.country_code,q.id_cotizador) IS NOT NULL'])
+                params.extend([username, installation])
             scopes = caps.get('scopes', [])
             scope_sql = ' OR '.join('(sd.country_code=? AND sd.company_type=?)' for _ in scopes) or '0'
             where.append(f'''(NOT EXISTS(SELECT 1 FROM quote_sync_document sd WHERE sd.quote_id=q.id)

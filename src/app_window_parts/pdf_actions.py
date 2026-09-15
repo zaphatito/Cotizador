@@ -376,7 +376,7 @@ class PdfActionsMixin:
             else ""
         )
 
-        emission_dt = datetime.datetime.now()
+        emission_dt = datetime.datetime.now().astimezone()
 
         datos = {
             "fecha": emission_dt,

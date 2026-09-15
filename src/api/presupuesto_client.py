@@ -1935,48 +1935,8 @@ def _normalize_error_message(value: Any, *, max_len: int = 1800) -> str:
 
 
 def _normalize_issue_timestamp(value: Any) -> int:
-    raw = str(value or "").strip()
-    if not raw:
-        return int(datetime.datetime.now().timestamp() * 1000)
-
-    if re.fullmatch(r"\d+(\.\d+)?", raw):
-        try:
-            n = float(raw)
-            if n <= 0:
-                return int(datetime.datetime.now().timestamp() * 1000)
-            # Heuristica: segundos vs milisegundos.
-            if n < 10_000_000_000:
-                return int(round(n * 1000.0))
-            return int(round(n))
-        except Exception:
-            pass
-
-    s = raw
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.datetime.fromisoformat(s)
-        return int(dt.timestamp() * 1000)
-    except Exception:
-        pass
-
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            dt = datetime.datetime.strptime(raw, fmt)
-            return int(dt.timestamp() * 1000)
-        except Exception:
-            continue
-
-    if len(raw) >= 19:
-        core = raw[:19].replace(" ", "T")
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", core):
-            try:
-                dt = datetime.datetime.fromisoformat(core)
-                return int(dt.timestamp() * 1000)
-            except Exception:
-                pass
-
-    return int(datetime.datetime.now().timestamp() * 1000)
+    from ..quote_dates import issue_datetime
+    return int(round(issue_datetime(value).timestamp() * 1000))
 
 
 def _mark_quote_api_sent(quote_id: int, *, sent_at_iso: str) -> None:

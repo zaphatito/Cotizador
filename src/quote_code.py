@@ -67,6 +67,22 @@ def quote_match_key(value: object) -> str:
     return key if key else "0"
 
 
+def sync_quote_key(value: object, country: object, installation: object) -> str | None:
+    """Compare legacy codes only when their explicit country/series agree."""
+    code = str(value or '').strip().upper().removeprefix('C-')
+    country = str(country or '').strip().upper()
+    installation = str(installation or '').strip().upper()
+    if not country or not re.fullmatch(r'[A-Z0-9]+', installation):
+        return None
+    if code.startswith(country + '-'):
+        code = code[len(country) + 1:]
+    if code.startswith(installation + '-'):
+        code = code[len(installation) + 1:]
+    if not re.fullmatch(r'\d+', code):
+        return None
+    return str(int(code))
+
+
 def format_quote_code(
     *,
     country_code: str | None,

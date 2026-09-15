@@ -3,14 +3,16 @@ Versión: 2.0.43
 Fecha: 2026-09-14
 
 Resumen
-- Recuperación de cotizaciones locales pendientes y compatibilidad con números antiguos.
+- Corrección de fechas, duplicados y separación del histórico por usuario y código de cotizador.
 
 Correcciones
-- [Fix] Las cotizaciones recientes sin enviar entran en sincronización antes de completar la incorporación del histórico antiguo.
-- [Fix] El envío da prioridad a cotizaciones pendientes y cambios locales, conservando el procesamiento del histórico por lotes cortos.
-- [Fix] Al detectar el API 1.6.5 compatible, se reintentan una vez los envíos bloqueados por «Código de cotización inválido», con el mismo número y sin perder cambios posteriores.
-- [Fix] El histórico muestra cuántos envíos están pendientes o requieren revisión; una conexión activa ya no oculta esos bloqueos.
+- [Fix] La columna N° muestra solo el correlativo, sin país ni código de usuario.
+- [Fix] El histórico y las descargas excluyen cotizaciones de otro usuario o código de cotizador.
+- [Fix] Descargar una cotización que ya existe localmente conserva la misma fila, incluso si su envío perdió la confirmación o aún no se había incorporado al histórico compartido.
+- [Fix] Los reintentos conservan la fecha y hora originales, los cambios de pago y las cotizaciones eliminadas.
+- [Fix] Regenerar el PDF conserva la fecha guardada; una fecha inválida se informa y ya no se reemplaza por la fecha de hoy.
+- [Fix] Las coincidencias ambiguas se conservan para revisión sin bloquear la descarga de otras cotizaciones.
 
 Compatibilidad
+- Actualizar y reiniciar primero el API 1.6.7. No requiere otra migración SQL.
 - Se conservan la configuración, las cotizaciones guardadas y los cambios pendientes.
-- La recuperación de códigos antiguos requiere actualizar y reiniciar primero el API 1.6.5. No requiere otra migración SQL.
