@@ -49,6 +49,11 @@ def is_py_unit_product(code_or_item: Any, *, country: str | None = None) -> bool
     return normalize_product_code(code_or_item) in PY_UNIT_PRODUCT_CODES
 
 
+def uses_liter_labels(code_or_item: Any, *, country: str) -> bool:
+    """BASE01 in Bolivia has one liter of label content per quoted unit."""
+    return normalize_country(country) == "BOLIVIA" and normalize_product_code(code_or_item) == "BASE01"
+
+
 def uses_gram_quantity(category_or_item: Any, *, country: str | None = None) -> bool:
     """Whether quantity represents a weight-based product for the country."""
     current_country = normalize_country(APP_COUNTRY if country is None else country)

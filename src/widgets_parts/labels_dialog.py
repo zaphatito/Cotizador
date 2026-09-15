@@ -26,7 +26,7 @@ from ..country_rules import normalize_country_name
 from ..db_path import resolve_db_path
 from ..logging_setup import get_logger
 from ..pricing import quantity_in_grams
-from ..product_rules import uses_gram_quantity
+from ..product_rules import uses_gram_quantity, uses_liter_labels
 from ..utils import nz
 from .bounded_table_columns import install_bounded_columns
 from sqlModels.db import connect, tx
@@ -170,11 +170,18 @@ class LabelsDialog(QDialog):
         self.resize(860, 500)
 
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("Define los gramos por etiqueta separados por coma, espacio o '+'."))
+        has_liters = any(uses_liter_labels(it, country=self._country) for it in (items or []))
+        instructions = (
+            "Define la cantidad por etiqueta separada por coma, espacio o '+'. BASE01 usa litros (1 L por unidad); los demás productos, gramos."
+            if has_liters else "Define los gramos por etiqueta separados por coma, espacio o '+'."
+        )
+        instruction_label = QLabel(instructions)
+        instruction_label.setWordWrap(True)
+        v.addWidget(instruction_label)
 
         self.table = QTableWidget(0, 4, self)
         self.table.setObjectName("labelsTable")
-        self.table.setHorizontalHeaderLabels(["Codigo", "Gramos Totales", "Numero Etiq.", "Etiquetas"])
+        self.table.setHorizontalHeaderLabels(["Codigo", "Total (g / L)" if has_liters else "Gramos Totales", "Numero Etiq.", "Etiquetas"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -206,7 +213,7 @@ class LabelsDialog(QDialog):
     def _load_rows(self, items: list[dict]) -> None:
         esencia_items: list[dict] = []
         for it in items:
-            if uses_gram_quantity(it, country=self._country):
+            if uses_liter_labels(it, country=self._country) or uses_gram_quantity(it, country=self._country):
                 esencia_items.append(it)
 
         for it in esencia_items:
@@ -216,22 +223,26 @@ class LabelsDialog(QDialog):
             codigo = str(it.get("codigo") or "").strip()
             nombre = str(it.get("producto") or "").strip()
             qty = float(nz(it.get("cantidad"), 0.0))
-            gramos_tot = _esencia_a_gramos(it, qty, self._country)
+            liters = uses_liter_labels(it, country=self._country)
+            gramos_tot = qty if liters else _esencia_a_gramos(it, qty, self._country)
 
             it_code = QTableWidgetItem(codigo)
             it_code.setData(Qt.UserRole, nombre)
+            it_code.setData(Qt.UserRole + 1, " L" if liters else "g")
             it_code.setFlags(it_code.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(r, 0, it_code)
 
-            it_grams = QTableWidgetItem(_fmt_num(gramos_tot))
+            it_grams = QTableWidgetItem(_fmt_num(gramos_tot) + (" L" if liters else ""))
             it_grams.setData(Qt.UserRole, float(gramos_tot))
             it_grams.setFlags(it_grams.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(r, 1, it_grams)
 
-            it_n = QTableWidgetItem("1")
+            count = max(1, math.ceil(qty)) if liters and math.isfinite(qty) and qty > 0 else 1
+            it_n = QTableWidgetItem(str(count))
             self.table.setItem(r, 2, it_n)
 
-            self.table.setItem(r, 3, QTableWidgetItem(_fmt_num(gramos_tot)))
+            amounts = ([1.0] * (count - 1) + [qty - count + 1]) if liters and qty > 0 else [gramos_tot]
+            self.table.setItem(r, 3, QTableWidgetItem(" ".join(_fmt_num(value) for value in amounts)))
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if item is None or self._updating_table:
@@ -426,8 +437,9 @@ class LabelsDialog(QDialog):
                 codigo = str(code_item.text() or "").strip()
                 nombre = str(code_item.data(Qt.UserRole) or codigo).strip()
                 grams_list = _parse_labels_grams(raw_item.text() or "")
+                unit = code_item.data(Qt.UserRole + 1) or "g"
                 for g in grams_list:
-                    labels.append(ZplEtiqueta(nombre=nombre, codigo=codigo, gramos=f"{_fmt_num(g)}g", copias=1))
+                    labels.append(ZplEtiqueta(nombre=nombre, codigo=codigo, gramos=f"{_fmt_num(g)}{unit}", copias=1))
 
             if not labels:
                 QMessageBox.information(self, "Etiquetas", "No hay etiquetas para imprimir.")

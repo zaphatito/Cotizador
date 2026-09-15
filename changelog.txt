@@ -1,18 +1,15 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
 Versión: 2.0.44
 Fecha: 2026-09-15
 
 Resumen
-- Corrección de fechas, duplicados y separación del histórico por usuario y código de cotizador.
+- Etiquetas de BASE01 en Bolivia con 1 litro por unidad cotizada.
 
-Correcciones
-- [Fix] La columna N° muestra solo el correlativo, sin país ni código de usuario.
-- [Fix] El histórico y las descargas excluyen cotizaciones de otro usuario o código de cotizador.
-- [Fix] Descargar una cotización que ya existe localmente conserva la misma fila, incluso si su envío perdió la confirmación o aún no se había incorporado al histórico compartido.
-- [Fix] Los reintentos conservan la fecha y hora originales, los cambios de pago y las cotizaciones eliminadas.
-- [Fix] Regenerar el PDF conserva la fecha guardada; una fecha inválida se informa y ya no se reemplaza por la fecha de hoy.
-- [Fix] Las coincidencias ambiguas se conservan para revisión sin bloquear la descarga de otras cotizaciones.
+Mejoras
+- BASE01 aparece en la ventana de etiquetas de Bolivia, incluso si el catálogo lo clasifica como producto unitario.
+- Cada unidad genera por defecto una etiqueta de 1 L; dos unidades generan dos etiquetas de 1 L.
+- Las cantidades de BASE01 se muestran e imprimen en litros. Los demás productos conservan sus etiquetas en gramos.
 
 Compatibilidad
-- Actualizar y reiniciar primero el API 1.6.7. No requiere otra migración SQL.
-- Se conservan la configuración, las cotizaciones guardadas y los cambios pendientes.
+- No requiere cambios de API ni migraciones de base de datos.
+- Se conservan las reglas de precios y cantidades de las cotizaciones y el comportamiento de otros países.
