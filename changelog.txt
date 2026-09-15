@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.43
-Fecha: 2026-09-14
+Versión: 2.0.44
+Fecha: 2026-09-15
 
 Resumen
 - Corrección de fechas, duplicados y separación del histórico por usuario y código de cotizador.
