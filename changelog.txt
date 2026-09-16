@@ -3,11 +3,12 @@ Versión: 2.0.48
 Fecha: 2026-09-16
 
 Resumen
-- Cantidades directas para productos CATS en Bolivia, sin dividir entre 1000.
+- Cantidades enteras para productos CATS en Bolivia, sin decimales ni división entre 1000.
 
 Mejoras
 - En Bolivia, ingresar 50 conserva una cantidad de 50 y calcula cantidad por precio unitario.
-- Se admiten cantidades decimales y los productos comienzan con cantidad 1.
+- Bolivia muestra y edita cantidades enteras: 200 en lugar de 200.000; rechaza fracciones sin cambiar el subtotal.
+- Los productos comienzan con cantidad 1 y las recomendaciones conservan cantidades enteras.
 - Editor, asistente, vista previa, PDF, ticket, etiquetas y envío conservan la misma cantidad.
 - Perú mantiene su conversión de gramos a kilos; Paraguay y Venezuela conservan sus reglas.
 - El histórico reconoce BO y BOL como el mismo país al validar el número de cotización.
