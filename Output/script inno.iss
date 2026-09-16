@@ -6,14 +6,14 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.0.46"
+#define MyAppVersion "2.0.47"
 
 ; === Manifiesto publico para el updater (GitHub Releases) ===
 #define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
 
 ; Rutas locales de build
-#define ProjectRoot  "C:\ProyectosEF\Cotizador"
-#define BuildDir     "C:\ProyectosEF\Cotizador\dist\SistemaCotizaciones"
+#define ProjectRoot  "C:\ProyectosEF\Cotizador-release-2.0.46"
+#define BuildDir     "C:\ProyectosEF\Cotizador-release-2.0.46\dist\SistemaCotizaciones"
 
 [Setup]
 AppId={{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}}
@@ -838,6 +838,7 @@ begin
 
   end;
 end;
+
 
 
 
