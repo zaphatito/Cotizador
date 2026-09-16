@@ -1,6 +1,8 @@
 # src/pricing.py
 import math
 
+from .lcdp_pricing import money, line_discount
+
 from .config import APP_COUNTRY
 from .product_rules import (
     normalize_country,
@@ -115,18 +117,8 @@ def round_discount_percentage(value, country: str | None = None) -> float:
 
 
 def discount_from_amount(subtotal, amount, country: str | None = None) -> tuple[float, float]:
-    subtotal_value = max(0.0, float(nz(subtotal, 0.0)))
-    amount_value = max(0.0, min(float(nz(amount, 0.0)), subtotal_value))
-    if subtotal_value <= 0:
-        return 0.0, 0.0
-
-    percentage = round_discount_percentage(
-        amount_value / subtotal_value * 100.0,
-        country,
-    )
-    percentage = max(0.0, min(percentage, 100.0))
-    recalculated_amount = subtotal_value * percentage / 100.0
-    return percentage, recalculated_amount
+    percentage, discount, _ = line_discount(subtotal, "amount", amount=amount, country=country)
+    return percentage, discount
 
 
 def normalize_price_id(value, default: int = 1) -> int:
@@ -157,24 +149,25 @@ def default_price_id_for_product(prod: dict) -> int:
     return 1
 
 
-def price_for_price_id(prod: dict, price_id: int) -> float:
+def price_for_price_id(prod: dict, price_id: int, *, rounded: bool = True) -> float:
     if not isinstance(prod, dict):
         return 0.0
+    convert = money if rounded else float
     pid = normalize_price_id(price_id, 1)
     p_max = _first_nonzero(prod, "p_max", "P_MAX")
     p_min = _first_nonzero(prod, "p_min", "P_MIN")
     p_oferta = _first_nonzero(prod, "p_oferta", "P_OFERTA")
 
     if pid == 2 and p_min > 0:
-        return float(p_min)
+        return convert(p_min)
     if pid == 3 and p_oferta > 0:
-        return float(p_oferta)
+        return convert(p_oferta)
     if p_max > 0:
-        return float(p_max)
+        return convert(p_max)
     if p_oferta > 0:
-        return float(p_oferta)
+        return convert(p_oferta)
     if p_min > 0:
-        return float(p_min)
+        return convert(p_min)
     return 0.0
 
 

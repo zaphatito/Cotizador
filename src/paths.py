@@ -210,6 +210,27 @@ def resolve_pdf_path_portable(stored: str) -> str:
     return os.path.join(COTIZACIONES_DIR, os.path.basename(p))
 
 
+def find_quote_pdf_path(header: dict) -> str:
+    """Localiza el PDF para mostrarlo sin validar ni modificar su contenido.
+
+    Una ruta vacía puede indicar contenido invalidado: encontrar el archivo no
+    lo marca como actualizado. Abrir PDF conserva la regeneración en ese caso.
+    """
+    from .quote_code import format_quote_code, quote_pdf_filename, sync_quote_key
+
+    stored = resolve_pdf_path_portable(header.get("pdf_path"))
+    if stored and os.path.isfile(stored):
+        return stored
+    country = str(header.get("country_code") or "").strip().upper()
+    store = str(header.get("id_cotizador") or "").strip().upper()
+    number = sync_quote_key(header.get("quote_no"), country, store)
+    if number is None:
+        return ""
+    code = format_quote_code(country_code=country, store_id=store, quote_no=number)
+    candidate = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(code, header.get("cliente")))
+    return candidate if os.path.isfile(candidate) else ""
+
+
 
 def resolve_font_asset(font_family: str, base_name: str, exts: tuple[str, ...] = ("otf", "ttf")) -> str | None:
     """

@@ -1,379 +1,107 @@
-# src/widgets_parts/discount_item_dialog.py
+"""Editor de descuentos sobre el importe comercial de la línea."""
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import QObject, QEvent, QTimer, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
-    QVBoxLayout,
-    QLabel,
-    QGroupBox,
-    QFormLayout,
-    QDoubleSpinBox,
+    QDialog, QVBoxLayout, QFormLayout, QLabel, QDoubleSpinBox,
     QDialogButtonBox,
-    QWidget,
 )
 
-from ..config import convert_from_base, get_currency_context
-from ..currency import normalize_currency_code
-from ..pricing import (
-    discount_from_amount,
-    discount_percentage_decimals,
-    round_discount_percentage,
-)
-from ..utils import fmt_money_ui, nz
-
-MAX_DISCOUNT_PCT = 99.0
-_EPS = 1e-9
-
-# ✅ máximos "soft" (para que el validador no bloquee teclas)
-SOFT_MAX_PCT = 9999999.0
-SOFT_MAX_AMT = 1e15
-
-
-def _clamp(v: float, lo: float, hi: float) -> float:
-    try:
-        v = float(v)
-    except Exception:
-        v = lo
-    if v < lo:
-        return lo
-    if v > hi:
-        return hi
-    return v
-
-
-def _parse_float_from_text(txt: str) -> float:
-    s = (txt or "").strip().replace(",", ".")
-    out = []
-    for ch in s:
-        if ch.isdigit() or ch in ".-":
-            out.append(ch)
-    try:
-        return float("".join(out)) if out else 0.0
-    except Exception:
-        return 0.0
-
-
-def _cursor_end_no_select(le):
-    """Deja el cursor al final y sin selección."""
-    try:
-        le.deselect()
-    except Exception:
-        try:
-            le.setSelection(0, 0)
-        except Exception:
-            pass
-    try:
-        le.setCursorPosition(len(le.text()))
-    except Exception:
-        pass
-
-
-class _SelectAllOnKeyboardFocus(QObject):
-    """
-    Selecciona todo SOLO si el foco llega por teclado (Tab/Backtab).
-    Si el foco llega por mouse, NO selecciona (para permitir poner cursor entre dígitos).
-    """
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.FocusIn:
-            try:
-                reason = event.reason()
-            except Exception:
-                reason = None
-
-            if reason in (Qt.TabFocusReason, Qt.BacktabFocusReason):
-                QTimer.singleShot(0, obj.selectAll)
-
-        return super().eventFilter(obj, event)
+from ..config import convert_from_base
+from ..pricing import discount_percentage_decimals
+from ..lcdp_pricing import line_discount, line_subtotal, money, percentage_from_entered_amount
+from ..utils import fmt_money_ui
 
 
 def show_discount_dialog_for_item(
-    parent: QWidget,
-    app_icon: QIcon,
-    item: dict,
-    base_currency: str,
-    *,
-    converter=None,
-    current_currency: str | None = None,
-    country: str | None = None,
-) -> Optional[dict]:
-    it = item
+    parent, app_icon, item, base_currency, *, converter=None,
+    current_currency=None, country=None,
+):
     convert = converter if callable(converter) else convert_from_base
-    explicit_currency = normalize_currency_code(current_currency or "")
-    discount_decimals = discount_percentage_decimals(country)
-    integer_discount = discount_decimals == 0
-
-    try:
-        precio_base = float(nz(it.get("precio"), 0.0))
-    except Exception:
-        precio_base = 0.0
-
-    qty = float(nz(it.get("cantidad"), 0.0))
-    subtotal_base = float(nz(it.get("subtotal_base"), round(precio_base * qty, 2)))
-
-    d_pct = float(nz(it.get("descuento_pct"), 0.0))
-    d_monto_base = float(nz(it.get("descuento_monto"), 0.0))
-    if integer_discount:
-        if d_monto_base > 0:
-            d_pct, d_monto_base = discount_from_amount(subtotal_base, d_monto_base, country)
-        else:
-            d_pct = round_discount_percentage(d_pct, country)
-            d_monto_base = subtotal_base * d_pct / 100.0
-
-    precio_ui = convert(precio_base)
-    subtotal_ui = convert(subtotal_base)
-
-    # ✅ hard max monto = 99% del subtotal (calculado en BASE y convertido a UI)
-    max_amt_base = round(max(0.0, subtotal_base) * (MAX_DISCOUNT_PCT / 100.0), 2)
-    max_amt_ui = float(convert(max_amt_base))
-
-    d_monto_ui = float(convert(d_monto_base))
-
-    # clamp inicial a hard max (solo para valor inicial)
-    d_pct = _clamp(d_pct, 0.0, MAX_DISCOUNT_PCT)
-    d_monto_ui = _clamp(d_monto_ui, 0.0, max_amt_ui)
-
+    rate = float(convert(1.0))
+    if rate <= 0:
+        raise ValueError("Configura una tasa positiva para convertir entre monedas")
+    subtotal = float(item.get("subtotal_base", line_subtotal(
+        item.get("precio", 0), item.get("cantidad", 0), item.get("factor_total", 1)
+    )))
+    currency = current_currency or base_currency
     dlg = QDialog(parent)
     dlg.setWindowTitle("Editar descuento")
-    dlg.setMinimumWidth(400)
+    dlg.setMinimumWidth(420)
     if not app_icon.isNull():
         dlg.setWindowIcon(app_icon)
+    layout = QVBoxLayout(dlg)
+    label = QLabel(str(item.get("codigo", "")) + " — " + str(item.get("producto", "")))
+    label.setTextFormat(Qt.PlainText)
+    layout.addWidget(label)
+    layout.addWidget(QLabel("Subtotal: " + fmt_money_ui(convert(subtotal), currency=currency)))
+    form = QFormLayout()
+    pct = QDoubleSpinBox()
+    pct.setObjectName("discount_percent")
+    pct.setDecimals(discount_percentage_decimals(country))
+    pct.setRange(0, 99)
+    pct.setSuffix(" %")
+    amount = QDoubleSpinBox()
+    amount.setObjectName("discount_amount")
+    final = QDoubleSpinBox()
+    final.setObjectName("discount_final")
+    for field in (amount, final):
+        field.setDecimals(2)
+        field.setRange(0, max(0, money(convert(subtotal))))
+    for field in (pct, amount, final):
+        field.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        field.setKeyboardTracking(False)
+    form.addRow("Porcentaje:", pct)
+    form.addRow("Importe descontado:", amount)
+    form.addRow("Total después del descuento:", final)
+    layout.addLayout(form)
+    preview = QLabel()
+    preview.setWordWrap(True)
+    layout.addWidget(preview)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    layout.addWidget(buttons)
+    mode = {"value": item.get("descuento_mode") or "percent", "locked": False}
+    payload = {}
 
-    v = QVBoxLayout(dlg)
-    v.addWidget(QLabel(f"<b>{it.get('codigo','')}</b> — {it.get('producto','')}"))
-
-    info = QGroupBox("Resumen de línea")
-    info_layout = QFormLayout(info)
-    info_layout.addRow("Cantidad:", QLabel(str(qty)))
-    info_layout.addRow(
-        "Precio unitario:",
-        QLabel(fmt_money_ui(precio_ui, currency=explicit_currency or None)),
-    )
-    info_layout.addRow(
-        "Subtotal:",
-        QLabel(fmt_money_ui(subtotal_ui, currency=explicit_currency or None)),
-    )
-    v.addWidget(info)
-
-    grp = QGroupBox("Descuento")
-    form = QFormLayout(grp)
-
-    sp_pct = QDoubleSpinBox()
-    sp_pct.setDecimals(discount_decimals)
-    sp_pct.setSingleStep(1.0 if integer_discount else 0.0001)
-    sp_pct.setMinimum(0.0)
-    sp_pct.setMaximum(SOFT_MAX_PCT)      # ✅ soft max (deja teclear 190/888)
-    sp_pct.setKeyboardTracking(True)
-    sp_pct.setValue(d_pct if d_pct > 0 else 0.0)
-
-    sp_amt = QDoubleSpinBox()
-    sp_amt.setDecimals(2)
-    sp_amt.setMinimum(0.0)
-    sp_amt.setMaximum(SOFT_MAX_AMT)      # ✅ soft max
-    sp_amt.setKeyboardTracking(True)
-    sp_amt.setValue(d_monto_ui if d_monto_ui > 0 else 0.0)
-
-    # ✅ Selección inteligente solo con Tab/Shift+Tab (no con mouse)
-    filt = _SelectAllOnKeyboardFocus(dlg)
-    sp_pct.lineEdit().installEventFilter(filt)
-    sp_amt.lineEdit().installEventFilter(filt)
-
-    form.addRow("Porcentaje (%):", sp_pct)
-    form.addRow("Monto:", sp_amt)
-    v.addWidget(grp)
-
-    lbl_preview = QLabel()
-    v.addWidget(lbl_preview)
-
-    updating = {"lock": False}
-    last_edit = {"who": None}  # "pct" | "amt" | None
-
-    def _preview(pct_raw: float, amt_raw: float):
-        pct = _clamp(pct_raw, 0.0, MAX_DISCOUNT_PCT)
-        amt = _clamp(amt_raw, 0.0, max_amt_ui)
-        if integer_discount:
-            pct = round_discount_percentage(pct, country)
-            amt = _clamp(float(subtotal_ui) * pct / 100.0, 0.0, max_amt_ui)
-        total_ui = float(subtotal_ui) - amt
-        if pct <= 0 and amt <= 0:
-            lbl_preview.setText("Sin descuento aplicado.")
-        else:
-            lbl_preview.setText(
-                f"Descuento: {fmt_money_ui(amt, currency=explicit_currency or None)} "
-                f"({pct:.4f}%) → "
-                f"Total: {fmt_money_ui(total_ui, currency=explicit_currency or None)}"
-            )
-
-    def _update_preview_live():
-        pct_txt = sp_pct.lineEdit().text()
-        amt_txt = sp_amt.lineEdit().text()
-        pct_raw = _parse_float_from_text(pct_txt)
-        amt_raw = _parse_float_from_text(amt_txt)
-
-        if last_edit["who"] == "pct":
-            amt_calc = (float(subtotal_ui) * pct_raw / 100.0) if float(subtotal_ui) > 0 else 0.0
-            _preview(pct_raw, amt_calc)
-        elif last_edit["who"] == "amt":
-            if integer_discount:
-                pct_calc, amt_calc = discount_from_amount(subtotal_ui, amt_raw, country)
-                _preview(pct_calc, amt_calc)
-            else:
-                pct_calc = (amt_raw / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
-                _preview(pct_calc, amt_raw)
-        else:
-            _preview(float(sp_pct.value()), float(sp_amt.value()))
-
-    # ============================
-    # ✅ Clamp inmediato EN EL INPUT (hard max) SIN seleccionar todo
-    # ============================
-    def clamp_pct_now():
-        if updating["lock"]:
+    def recalculate(source):
+        if mode["locked"]:
             return
-        raw = _parse_float_from_text(sp_pct.lineEdit().text())
-        if raw > MAX_DISCOUNT_PCT + _EPS:
-            updating["lock"] = True
-            try:
-                sp_pct.setValue(MAX_DISCOUNT_PCT)  # se verá en el input
-                QTimer.singleShot(0, lambda: _cursor_end_no_select(sp_pct.lineEdit()))
-            finally:
-                updating["lock"] = False
-            last_edit["who"] = None
-
-    def clamp_amt_now():
-        if updating["lock"]:
-            return
-        raw = _parse_float_from_text(sp_amt.lineEdit().text())
-        if raw > max_amt_ui + _EPS:
-            updating["lock"] = True
-            try:
-                sp_amt.setValue(max_amt_ui)        # se verá en el input
-                QTimer.singleShot(0, lambda: _cursor_end_no_select(sp_amt.lineEdit()))
-            finally:
-                updating["lock"] = False
-            last_edit["who"] = None
-
-    def on_pct_text_edited(_t: str):
-        last_edit["who"] = "pct"
-        clamp_pct_now()
-        _update_preview_live()
-
-    def on_amt_text_edited(_t: str):
-        last_edit["who"] = "amt"
-        clamp_amt_now()
-        _update_preview_live()
-
-    sp_pct.lineEdit().textEdited.connect(on_pct_text_edited)
-    sp_amt.lineEdit().textEdited.connect(on_amt_text_edited)
-
-    # confirmación: sincroniza el otro campo (aquí sí “cuadra” ambos)
-    def commit_from_pct():
-        if updating["lock"]:
-            return
-        updating["lock"] = True
+        mode["locked"] = True
         try:
-            sp_pct.interpretText()
-            pct = _clamp(float(sp_pct.value()), 0.0, MAX_DISCOUNT_PCT)
-            if integer_discount:
-                pct = round_discount_percentage(pct, country)
-            amt = round(float(subtotal_ui) * pct / 100.0, 2) if float(subtotal_ui) > 0 else 0.0
-            amt = _clamp(amt, 0.0, max_amt_ui)
-            sp_pct.setValue(pct)
-            sp_amt.setValue(amt)
-        finally:
-            updating["lock"] = False
-        last_edit["who"] = None
-        _update_preview_live()
-
-    def commit_from_amt():
-        if updating["lock"]:
-            return
-        updating["lock"] = True
-        try:
-            sp_amt.interpretText()
-            amt = _clamp(float(sp_amt.value()), 0.0, max_amt_ui)
-            if integer_discount:
-                pct, amt = discount_from_amount(subtotal_ui, amt, country)
+            if source == "pct":
+                method, percent, amt = "percent", pct.value(), 0
             else:
-                pct = (amt / float(subtotal_ui) * 100.0) if float(subtotal_ui) > 0 else 0.0
-            pct = _clamp(pct, 0.0, MAX_DISCOUNT_PCT)
-            sp_amt.setValue(amt)
-            sp_pct.setValue(pct)
-        finally:
-            updating["lock"] = False
-        last_edit["who"] = None
-        _update_preview_live()
-
-    sp_pct.editingFinished.connect(commit_from_pct)
-    sp_amt.editingFinished.connect(commit_from_amt)
-
-    _update_preview_live()
-
-    bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    ok_btn = bb.button(QDialogButtonBox.Ok)
-    if ok_btn is not None:
-        ok_btn.setProperty("variant", "primary")
-    v.addWidget(bb)
-
-    payload: dict = {}
-
-    def on_accept():
-        sp_pct.interpretText()
-        sp_amt.interpretText()
-
-        pct = _clamp(float(sp_pct.value()), 0.0, MAX_DISCOUNT_PCT)
-        amt_ui = _clamp(float(sp_amt.value()), 0.0, max_amt_ui)
-        if integer_discount:
-            if last_edit["who"] == "amt":
-                pct, amt_ui = discount_from_amount(subtotal_ui, amt_ui, country)
-                amt_ui = _clamp(amt_ui, 0.0, max_amt_ui)
-            else:
-                pct = round_discount_percentage(pct, country)
-                amt_ui = _clamp(float(subtotal_ui) * pct / 100.0, 0.0, max_amt_ui)
-
-        updating["lock"] = True
-        try:
-            sp_pct.setValue(pct)
-            sp_amt.setValue(amt_ui)
-        finally:
-            updating["lock"] = False
-
-        if subtotal_base <= 0 or (pct <= 0 and amt_ui <= 0):
+                method = "percent"
+                amt = amount.value() / rate if source == "amt" else subtotal - final.value() / rate
+                percent = percentage_from_entered_amount(subtotal, amt)
+            percentage, discount, total = line_discount(subtotal, method, percent, amt, country)
+            mode["value"] = method
+            # El porcentaje redondeado determina el importe disponible.
+            for field in (pct, amount, final):
+                field.blockSignals(True)
+            pct.setValue(percentage)
+            amount.setValue(convert(discount))
+            final.setValue(convert(total))
+            for field in (pct, amount, final):
+                field.blockSignals(False)
             payload.clear()
-            payload.update({"mode": "clear"})
-        else:
-            base = normalize_currency_code(base_currency or "")
-            if explicit_currency:
-                cur = explicit_currency
-                try:
-                    rate = float(convert(1.0))
-                except Exception:
-                    rate = 1.0
-            else:
-                cur, _, rate = get_currency_context()
-                cur = normalize_currency_code(cur or "")
+            payload.update({"mode": method, "percent": percentage, "amount": discount})
+            preview.setText("Total: " + fmt_money_ui(convert(total), currency=currency))
+            buttons.button(QDialogButtonBox.Ok).setEnabled(True)
+        except ValueError as exc:
+            preview.setText(str(exc))
+            buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        finally:
+            mode["locked"] = False
 
-            if cur == base or not rate:
-                amt_base = amt_ui
-            else:
-                amt_base = amt_ui / float(rate)
-
-            if pct > 0:
-                payload.clear()
-                payload.update({"mode": "percent", "percent": pct})
-            else:
-                payload.clear()
-                payload.update({"mode": "amount", "amount": amt_base})
-
-        dlg.accept()
-
-    bb.accepted.connect(on_accept)
-    bb.rejected.connect(dlg.reject)
-
-    dlg.adjustSize()
-
+    pct.setValue(float(item.get("descuento_pct", 0)))
+    amount.setValue(convert(float(item.get("descuento_monto", 0))))
+    pct.valueChanged.connect(lambda _: recalculate("pct"))
+    amount.valueChanged.connect(lambda _: recalculate("amt"))
+    final.valueChanged.connect(lambda _: recalculate("final"))
+    recalculate("amt" if mode["value"] == "amount" else "pct")
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
     if dlg.exec() != QDialog.Accepted:
         return None
     return payload

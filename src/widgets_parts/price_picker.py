@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..pricing import default_price_id_for_product
+from ..lcdp_pricing import money
 from ..config import convert_from_base
 from ..utils import fmt_money_ui
 from .helpers import _first_nonzero
@@ -95,6 +96,8 @@ def show_price_picker(
             "P_MIN",
         ],
     )
+
+    p_max, p_min, p_oferta = map(money, (p_max, p_min, p_oferta))
 
     def _format_tier_value(val_base: float) -> str:
         return (

@@ -42,7 +42,6 @@ from sqlModels.settings_repo import get_setting, set_setting
 from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, currency_for_country
 from ..country_rules import country_code_for, country_profile
-from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import uses_gram_quantity
@@ -242,8 +241,6 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
 
 def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[dict]:
     out: list[dict] = []
-    discount_country = str(cod_pais or "").strip().upper()
-    integer_discount = discount_percentage_decimals(discount_country) == 0
     for it in (items_base or []):
         tipo_prod = _tipo_prod_from_item(it)
         nombre = str(it.get("nombre") or it.get("producto") or "").strip()
@@ -254,24 +251,8 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
             nombre = "ITEM"
         descuento_pct = float(nz(it.get("descuento_pct"), 0.0))
         descuento_monto = float(nz(it.get("descuento_monto"), 0.0))
-        if integer_discount:
-            subtotal_base = float(nz(it.get("subtotal_base"), 0.0))
-            if subtotal_base <= 0:
-                precio_base = float(nz(it.get("precio"), 0.0))
-                cantidad_base = float(nz(it.get("cantidad"), 0.0))
-                factor_total = float(nz(it.get("factor_total"), 1.0))
-                subtotal_base = max(0.0, precio_base * cantidad_base * factor_total)
-            discount_mode = str(it.get("descuento_mode") or "").strip().lower()
-            if discount_mode == "amount" or (descuento_monto > 0 and descuento_pct <= 0):
-                descuento_pct, descuento_monto = discount_from_amount(
-                    subtotal_base,
-                    descuento_monto,
-                    discount_country,
-                )
-            else:
-                descuento_pct = round_discount_percentage(descuento_pct, discount_country)
-                if subtotal_base > 0:
-                    descuento_monto = subtotal_base * descuento_pct / 100.0
+        # El snapshot comercial ya fue calculado por el editor. Recalcular
+        # desde el porcentaje pierde importes y altera cotizaciones históricas.
         out.append(
             {
                 "codigo": str(it.get("codigo") or ""),

@@ -13,7 +13,9 @@
 
 ; Rutas locales de build
 #define ProjectRoot  "C:\ProyectosEF\Cotizador"
+#ifndef BuildDir
 #define BuildDir     "C:\ProyectosEF\Cotizador\dist\SistemaCotizaciones"
+#endif
 
 [Setup]
 AppId={{9C0761F5-6555-4FA3-ACF5-9E9F968C7A10}}
@@ -31,8 +33,8 @@ UsePreviousPrivileges=no
 DefaultDirName={localappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 
-OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}
-OutputDir={#ProjectRoot}\Output
+OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}_precios_sin_actualizacion_r2
+OutputDir={#ProjectRoot}\Output\precios
 Compression=lzma
 SolidCompression=yes
 
@@ -789,8 +791,8 @@ begin
         '  "username": "' + JsonEscape(UsernameSel) + '",' + #13#10 +
         '  "telemarketing": ' + TiendaStr + ',' + #13#10 +
         '  "allow_no_stock": ' + AllowStr + ',' + #13#10 +
-        '  "update_mode": "SILENT",' + #13#10 +
-        '  "update_check_on_startup": true,' + #13#10 +
+        '  "update_mode": "OFF",' + #13#10 +
+        '  "update_check_on_startup": false,' + #13#10 +
         '  "update_manifest_url": "' + '{#UpdateManifestUrl}' + '",' + #13#10 +
         '  "update_apply_exe": "updater\\apply_update.exe",' + #13#10 +
         '  "update_ignore_paths": ["sqlModels/app.sqlite3"],' + #13#10 +

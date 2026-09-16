@@ -1,4 +1,4 @@
-﻿# src/widgets_parts/quote_history_dialog.py
+# src/widgets_parts/quote_history_dialog.py
 from __future__ import annotations
 
 import os
@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
     QApplication, QDialog, QInputDialog, QCheckBox, QComboBox, QFormLayout, QGroupBox,
     QStyledItemDelegate, QStyleOptionViewItem, QStyle,
-    QPlainTextEdit,
 )
 
 from sqlModels.db import connect, tx
@@ -30,7 +29,7 @@ from sqlModels.rates_repo import load_rates
 
 from ..logging_setup import get_logger
 from ..utils import nz
-from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
+from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable, find_quote_pdf_path
 
 from ..db_path import resolve_db_path
 from ..api.presupuesto_client import (
@@ -927,7 +926,6 @@ class QuotesTableModel(QAbstractTableModel):
             ]
 
         self._today_font = QFont()
-        self.HEADERS.extend(['País / empresa', 'Sincronización'])
         self._today_font.setBold(True)
         self._centered_cols = {
             self._idx_no(),
@@ -1028,7 +1026,7 @@ class QuotesTableModel(QAbstractTableModel):
         row["_cache_items_num"] = items_num
         row["_cache_items_txt"] = str(items_num)
 
-        pdf_path = str(row.get("pdf_path") or "")
+        pdf_path = find_quote_pdf_path(row) or str(row.get("pdf_path") or "")
         pdf_name = os.path.basename(pdf_path)
         row["_cache_pdf_path"] = pdf_path
         row["_cache_pdf_name"] = pdf_name
@@ -1079,10 +1077,6 @@ class QuotesTableModel(QAbstractTableModel):
             return r.get("_cache_fg_brush")
 
         if role == Qt.DisplayRole:
-            if c == len(self.HEADERS) - 2:
-                return f"{r.get('country_code') or ''} / {r.get('company_type') or ''}"
-            if c == len(self.HEADERS) - 1:
-                return r.get('sync_label', '')
             if c == 0:
                 return r.get("_cache_created_display", "")
             if c == 1:
@@ -1230,7 +1224,6 @@ class QuotesTableModel(QAbstractTableModel):
 class QuoteHistoryWindow(QMainWindow):
     lockdown_requested = Signal(str)
     history_refresh_requested = Signal()
-    shared_sync_status = Signal(str)
     _DEFAULT_SIZE = (1300, 720)
     _MIN_REASONABLE = (980, 620)
     _WIN_KEY_PREFIX = "ui_window_history"
@@ -1310,7 +1303,6 @@ class QuoteHistoryWindow(QMainWindow):
         self._stock_matrix_dialog: StockMatrixDialog | None = None
         self.lockdown_requested.connect(self._apply_admin_lockdown)
         self.history_refresh_requested.connect(self._refresh_shared_history)
-        self.shared_sync_status.connect(lambda message: self.statusBar().showMessage(message))
         self._shared_sync_active = True
         self._shared_sync_enabled = False
 
@@ -1444,9 +1436,6 @@ class QuoteHistoryWindow(QMainWindow):
         nav.addWidget(self.lbl_page)
         nav.addWidget(btn_prev)
         nav.addWidget(btn_next)
-        btn_sync_report = QPushButton('Sincronización…')
-        btn_sync_report.clicked.connect(self._show_sync_report)
-        nav.addWidget(btn_sync_report)
         nav.addStretch(1)
         nav.addWidget(self.btn_pdf)
         nav.addWidget(self.btn_dup)
@@ -1855,14 +1844,6 @@ class QuoteHistoryWindow(QMainWindow):
                 shared = run_shared_cycle(self._db_path, verification)
                 self._shared_sync_enabled = bool(shared.get('enabled'))
                 if shared.get('enabled'):
-                    self.shared_sync_status.emit(
-                        shared.get('message') or 'Sincronización pausada; los cambios locales se conservan.' if shared.get('paused') else
-                        'Sin conexión; los cambios locales se conservan.' if shared.get('offline') else
-                        f"{shared['blocked']} cotizaciones requieren revisión en Sincronización…" if shared.get('blocked') else
-                        'Hay incidencias pendientes. Consulte Sincronización…' if shared.get('failed') or shared.get('conflicts') else
-                        f"Enviando cotizaciones pendientes: {shared['pending']}." if shared.get('pending') else
-                        'Histórico compartido conectado.'
-                    )
                     if shared.get('received') or shared.get('sent') or shared.get('conflicts'):
                         self.history_refresh_requested.emit()
                     if shared.get('offline') or shared.get('failed'):
@@ -2149,16 +2130,6 @@ class QuoteHistoryWindow(QMainWindow):
                     == Qt.DescendingOrder
                 ),
             )
-            for row in rows:
-                state = con.execute('''SELECT d.generation,d.acknowledged_generation,
-                    d.error,c.quote_uuid,o.error FROM quote_sync_document d
-                    LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
-                    LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid
-                    WHERE d.quote_id=?''', (row['id'],)).fetchone()
-                if state:
-                    row['sync_label'] = ('Conflicto' if state[3] else
-                        ('Pendiente: ' + str(state[2] or state[4])) if state[2] or state[4] else
-                        'Pendiente' if state[0] > state[1] else 'Sincronizado')
         except Exception as e:
             log.exception("Error listando cotizaciones")
             QMessageBox.critical(self, "Error", f"No se pudo cargar el histórico:\n{e}")
@@ -2562,40 +2533,6 @@ class QuoteHistoryWindow(QMainWindow):
         dlg.exec()
         self.refresh_ai_controls()
         self.refresh_recommendations_controls()
-
-    def _show_sync_report(self):
-        import json
-        con = connect(self._db_path)
-        try:
-            rows = con.execute('''SELECT d.*,c.reason AS conflict_reason,o.error AS send_error
-                FROM quote_sync_document d LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
-                LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid ORDER BY d.country_code,d.company_type,d.rowid''').fetchall()
-            lines = []
-            for row in rows:
-                header = json.loads(row['snapshot'])['header']
-                status = row['conflict_reason'] or row['error'] or row['send_error']
-                if not status:
-                    status = ('Histórico incompleto: falta el snapshot de origen'
-                        if row['completeness'] != 'complete' else
-                        'Pendiente' if row['generation'] > row['acknowledged_generation'] else 'Sincronizado')
-                lines.append(f"{header.get('quote_no')} · {row['country_code']} · {row['company_type']}\n"
-                    f"Origen: {header.get('id_cotizador')} · Revisión: {row['revision']} · "
-                    f"{'Eliminada · ' if row['deleted_at'] else ''}{status}")
-            for row in con.execute('''SELECT q.quote_no,q.api_error_message FROM quotes q
-                LEFT JOIN quote_sync_document d ON d.quote_id=q.id
-                WHERE d.quote_id IS NULL AND COALESCE(q.api_error_message,'')<>'' '''):
-                lines.append(f"{row['quote_no']} · Pendiente de conciliación: {row['api_error_message']}")
-        finally:
-            con.close()
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Estado del histórico compartido')
-        dialog.resize(800, 500)
-        layout = QVBoxLayout(dialog)
-        view = QPlainTextEdit()
-        view.setReadOnly(True)
-        view.setPlainText('\n\n'.join(lines) or 'No hay documentos registrados en la sincronización compartida.')
-        layout.addWidget(view)
-        dialog.exec()
 
     def _resolve_shared_conflict(self):
         import json

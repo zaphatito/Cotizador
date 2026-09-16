@@ -1,6 +1,8 @@
 # src/models.py
 import re
 
+from ..lcdp_pricing import money, line_subtotal, line_discount, validate_line_minimum, percentage_from_entered_amount
+
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush, QFont
 
@@ -8,7 +10,6 @@ from ..config import APP_COUNTRY, convert_from_base
 from ..product_rules import uses_gram_quantity
 from ..country_rules import normalize_country_name, uses_peru_business_rules
 from ..pricing import precio_unitario_por_categoria, factor_total_por_categoria
-from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..stock_policy import has_insufficient_stock
 from ..utils import fmt_money_ui, nz
 from ..logging_setup import get_logger
@@ -133,7 +134,7 @@ def _first_price(d: dict, *keys):
     for k in keys:
         v = float(nz(d.get(k), 0.0))
         if v > 0:
-            return v
+            return money(v)
     return 0.0
 
 
@@ -142,7 +143,7 @@ def _first_from_aliases(d: dict, aliases: list[str]) -> float:
         try:
             v = float(nz(d.get(k), 0.0))
             if v > 0:
-                return v
+                return money(v)
         except Exception:
             continue
     return 0.0
@@ -436,8 +437,9 @@ class ItemsModel(QAbstractTableModel):
             if subtotal > 0 and (cur_total_pct + _PCT_EPS) < PY_CASH_BASE_PCT:
                 it["descuento_mode"] = "percent"
                 it["descuento_pct"] = PY_CASH_BASE_PCT
-                it["descuento_monto"] = round(subtotal * PY_CASH_BASE_PCT / 100.0, 2)
+                it["descuento_monto"] = money(subtotal - money(subtotal * (1 - PY_CASH_BASE_PCT / 100.0)))
                 it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+                self._enforce_cash_minimum(it, subtotal)
                 changed = True
 
         return changed
@@ -490,7 +492,7 @@ class ItemsModel(QAbstractTableModel):
             unit_price = float(nz(it.get("precio"), 0.0))
         qty = float(nz(it.get("cantidad"), 0.0))
         factor = self._get_factor_total(it)
-        return round(float(unit_price) * qty * factor, 2)
+        return line_subtotal(unit_price, qty, factor)
 
     def _effective_discount_pct(self, subtotal: float, mode: str, d_pct: float, d_monto: float) -> float:
         if subtotal <= 0:
@@ -573,6 +575,14 @@ class ItemsModel(QAbstractTableModel):
         p_base = _price_from_tier(prod, "unitario")
         return float(p_base if p_base > 0 else 0.0)
 
+    def _enforce_cash_minimum(self, item: dict, subtotal: float):
+        try:
+            validate_line_minimum(subtotal, item["total"], item["descuento_monto"], self.country)
+        except ValueError as exc:
+            self.toast_requested.emit(str(exc))
+            item.update(descuento_mode=None, descuento_pct=0.0,
+                        descuento_monto=0.0, total=subtotal, _py_user_disc_pct=0.0)
+
     def _apply_cash_base_to_all(self) -> bool:
         changed = False
         for it in self._items:
@@ -590,10 +600,11 @@ class ItemsModel(QAbstractTableModel):
             total_pct = self._clamp_pct(user_pct + PY_CASH_BASE_PCT)
             it["descuento_mode"] = "percent"
             it["descuento_pct"] = total_pct
-            it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+            it["descuento_monto"] = money(subtotal - money(subtotal * (1 - total_pct / 100.0)))
 
             it["subtotal_base"] = subtotal
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+            self._enforce_cash_minimum(it, subtotal)
 
             changed = True
         return changed
@@ -621,17 +632,18 @@ class ItemsModel(QAbstractTableModel):
             else:
                 it["descuento_mode"] = "percent"
                 it["descuento_pct"] = user_pct
-                it["descuento_monto"] = round(subtotal * user_pct / 100.0, 2)
+                it["descuento_monto"] = money(subtotal - money(subtotal * (1 - user_pct / 100.0)))
 
             it["subtotal_base"] = subtotal
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+            self._enforce_cash_minimum(it, subtotal)
 
             changed = True
         return changed
 
     def _normalize_discount_and_totals(self, it: dict, unit_price: float):
         unit_price = float(nz(unit_price, 0.0))
-        unit_price = self._maybe_snap_override_to_tier(it, unit_price)
+        unit_price = money(self._maybe_snap_override_to_tier(it, unit_price))
         it["precio"] = unit_price
 
         factor = self._get_factor_total(it)
@@ -668,8 +680,9 @@ class ItemsModel(QAbstractTableModel):
 
             it["descuento_mode"] = "percent"
             it["descuento_pct"] = total_pct
-            it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+            it["descuento_monto"] = money(subtotal - money(subtotal * (1 - total_pct / 100.0)))
             it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+            self._enforce_cash_minimum(it, subtotal)
             return
 
         if not mode:
@@ -678,27 +691,17 @@ class ItemsModel(QAbstractTableModel):
             elif d_monto > 0:
                 mode = "amount"
 
-        if mode == "percent":
-            d_pct = self._clamp_pct(d_pct)
-            if discount_percentage_decimals(self.country) == 0:
-                d_pct = round_discount_percentage(d_pct, self.country)
-            d_monto = round(subtotal * d_pct / 100.0, 2)
-        elif mode == "amount":
-            if discount_percentage_decimals(self.country) == 0:
-                d_pct, d_monto = discount_from_amount(subtotal, d_monto, self.country)
-                mode = "percent"
-            else:
-                d_monto = max(0.0, min(d_monto, subtotal))
-                d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
-        else:
-            d_pct = 0.0
-            d_monto = 0.0
-            mode = ""
-
+        try:
+            d_pct, d_monto, total = line_discount(subtotal, mode, d_pct, d_monto, self.country)
+        except ValueError as exc:
+            # Como LCDP al reducir cantidad: retirar el descuento inválido.
+            self.toast_requested.emit(str(exc))
+            mode = None
+            d_pct, d_monto, total = line_discount(subtotal)
         it["descuento_mode"] = mode or None
         it["descuento_pct"] = d_pct
         it["descuento_monto"] = d_monto
-        it["total"] = round(subtotal - d_monto, 2)
+        it["total"] = total
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._items) + len(self._recs_preview)
@@ -958,6 +961,16 @@ class ItemsModel(QAbstractTableModel):
 
             mode = (value.get("mode") or "").lower()
 
+            if mode == "amount":
+                try:
+                    value = {"mode": "percent", "percent": percentage_from_entered_amount(
+                        subtotal, value.get("amount", 0)
+                    )}
+                except (ValueError, TypeError) as exc:
+                    self.toast_requested.emit(str(exc))
+                    return False
+                mode = "percent"
+
             if self.is_py_cash_mode():
                 if mode == "clear":
                     total_pct = 0.0
@@ -982,57 +995,41 @@ class ItemsModel(QAbstractTableModel):
 
                 total_pct = self._clamp_pct(total_pct)
 
+                candidate_total = money(subtotal * (1 - total_pct / 100.0))
+                try:
+                    validate_line_minimum(subtotal, candidate_total, money(subtotal - candidate_total), self.country)
+                except ValueError as exc:
+                    self.toast_requested.emit(str(exc))
+                    return False
+
                 user_pct = max(0.0, total_pct - PY_CASH_BASE_PCT)
                 user_pct = self._clamp_pct(user_pct)
                 it["_py_user_disc_pct"] = user_pct
 
                 it["descuento_mode"] = "percent"
                 it["descuento_pct"] = total_pct
-                it["descuento_monto"] = round(subtotal * total_pct / 100.0, 2)
+                it["descuento_monto"] = money(subtotal - money(subtotal * (1 - total_pct / 100.0)))
                 it["total"] = round(subtotal - float(nz(it.get("descuento_monto"), 0.0)), 2)
+                self._enforce_cash_minimum(it, subtotal)
 
                 top = self.index(row, 0)
                 bottom = self.index(row, self.columnCount() - 1)
                 self.dataChanged.emit(top, bottom, [Qt.DisplayRole, Qt.EditRole])
                 return True
 
-            d_pct = 0.0
-            d_monto = 0.0
-            d_mode = None
-
-            if mode == "clear":
-                d_mode = None
-            elif mode == "percent":
-                try:
-                    d_pct = float(nz(value.get("percent"), 0.0))
-                except Exception:
-                    d_pct = 0.0
-                d_pct = max(0.0, min(d_pct, 100.0))
-                if discount_percentage_decimals(self.country) == 0:
-                    d_pct = round_discount_percentage(d_pct, self.country)
-                d_monto = round(subtotal * d_pct / 100.0, 2)
-                d_mode = "percent"
-            elif mode == "amount":
-                try:
-                    d_monto = float(nz(value.get("amount"), 0.0))
-                except Exception:
-                    d_monto = 0.0
-                if d_monto < 0:
-                    d_monto = 0.0
-                if d_monto > subtotal:
-                    d_monto = subtotal
-                d_pct = (d_monto / subtotal) * 100.0 if subtotal > 0 else 0.0
-                d_mode = "amount"
-                if discount_percentage_decimals(self.country) == 0:
-                    d_pct, d_monto = discount_from_amount(subtotal, d_monto, self.country)
-                    d_mode = "percent"
-            else:
+            if mode not in ("clear", "percent", "amount"):
                 return False
-
-            it["descuento_mode"] = d_mode
+            try:
+                d_pct, d_monto, total = line_discount(
+                    subtotal, mode, value.get("percent", 0), value.get("amount", 0), self.country
+                )
+            except (ValueError, TypeError) as exc:
+                self.toast_requested.emit(str(exc))
+                return False
+            it["descuento_mode"] = None if mode == "clear" else mode
             it["descuento_pct"] = d_pct
             it["descuento_monto"] = d_monto
-            it["total"] = round(subtotal - d_monto, 2)
+            it["total"] = total
 
             top = self.index(row, 0)
             bottom = self.index(row, self.columnCount() - 1)

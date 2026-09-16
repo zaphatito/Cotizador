@@ -54,3 +54,7 @@ skills-lock.json
 !/tests/test_bolivia_base_labels.py
 !/tests/test_api_polling.py
 !/Utilidades/piloto_historico.spec
+
+!/tests/test_lcdp_pricing.py
+
+/Output/precios/

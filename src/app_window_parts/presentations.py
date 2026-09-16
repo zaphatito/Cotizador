@@ -344,7 +344,7 @@ class PresentationsMixin:
         )
         precio_pres = precio_max if precio_max > 0 else 0.0
         precio_bot = (
-            float(price_for_price_id(botella, default_price_id_for_product(botella))) if botella else 0.0
+            float(price_for_price_id(botella, default_price_id_for_product(botella), rounded=False)) if botella else 0.0
         )
         unit_price = precio_pres + precio_bot
         precio_oferta_total = (precio_oferta if precio_oferta > 0 else precio_pres) + precio_bot
@@ -527,7 +527,7 @@ class PresentationsMixin:
         precio_pres_min = float(
             nz(pres_final.get("P_MIN", pres_final.get("p_min", 0.0)), 0.0)
         )
-        precio_pc = float(price_for_price_id(pc, default_price_id_for_product(pc)))
+        precio_pc = float(price_for_price_id(pc, default_price_id_for_product(pc), rounded=False))
         unit_price = precio_pres + precio_pc
         oferta_price = (
             (precio_pres_oferta if precio_pres_oferta > 0 else precio_pres) + precio_pc
