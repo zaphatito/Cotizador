@@ -3,9 +3,13 @@ Versión: 2.0.49
 Fecha: 2026-09-16
 
 Resumen
-- Cantidades enteras para productos CATS en Bolivia, sin decimales ni división entre 1000.
+- Ajustes de sincronización del histórico y recuperación de PDF para reimprimir tickets.
 
 Mejoras
+- La sincronización automática espera un minuto entre ciclos; los cambios locales mantienen el despertar inmediato.
+- Activar la ventana no dispara consultas adicionales; los fallos conservan la espera progresiva.
+- Reimprimir un ticket recupera el PDF ausente y usa país, empresa e instalación de la cotización histórica.
+- Las conexiones se cierran incluso si falla la lectura del histórico o la generación del ticket.
 - En Bolivia, ingresar 50 conserva una cantidad de 50 y calcula cantidad por precio unitario.
 - Bolivia muestra y edita cantidades enteras: 200 en lugar de 200.000; rechaza fracciones sin cambiar el subtotal.
 - Los productos comienzan con cantidad 1 y las recomendaciones conservan cantidades enteras.
