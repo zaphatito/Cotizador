@@ -53,6 +53,7 @@ skills-lock.json
 !/tests/test_peru_base_units.py
 !/tests/test_bolivia_base_labels.py
 !/tests/test_api_polling.py
+!/tests/test_history_country_aliases.py
 !/Utilidades/piloto_historico.spec
 
 !/tests/test_lcdp_pricing.py

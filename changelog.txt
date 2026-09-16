@@ -1,15 +1,19 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.45
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+Versión: 2.0.46
 Fecha: 2026-09-15
 
 Resumen
-- Etiquetas de BASE01 en Bolivia con 1 litro por unidad cotizada.
+- Corrección de cotizaciones de Bolivia que quedaban ocultas en el histórico.
 
 Mejoras
-- BASE01 aparece en la ventana de etiquetas de Bolivia, incluso si el catálogo lo clasifica como producto unitario.
-- Cada unidad genera por defecto una etiqueta de 1 L; dos unidades generan dos etiquetas de 1 L.
-- Las cantidades de BASE01 se muestran e imprimen en litros. Los demás productos conservan sus etiquetas en gramos.
+- El histórico reconoce BO y BOL como el mismo país al validar el número de cotización.
+- Las cotizaciones existentes vuelven a mostrarse sin modificar sus datos ni los filtros de usuario e instalación.
+- El histórico muestra los PDF locales cuya referencia quedó vacía, identificándolos por país, instalación, número y cliente.
+- Cambiar estado, pago u origen de la cotización conserva la referencia al PDF.
+- Los cambios de contenido siguen regenerando el documento al abrirlo.
+- Se retiran las columnas de país/empresa y sincronización, el informe y la etiqueta inferior de sincronización.
+- La sincronización en segundo plano conserva su funcionamiento.
 
 Compatibilidad
 - No requiere cambios de API ni migraciones de base de datos.
-- Se conservan las reglas de precios y cantidades de las cotizaciones y el comportamiento de otros países.
+- Esta versión pública conserva las reglas de precios vigentes.
