@@ -114,17 +114,24 @@ def test_actual_delivery_ack_keeps_or_invalidates_pdf_from_stored_content(local_
     monkeypatch.setattr(adapter, 'projection', lambda _: None)
     adapter.inventory_batch(db_path, owner_id='9', username='TESTUSER',
         pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')])
+    requests = []
     def mutate(payload):
+        requests.append('upload')
         remote = dict(payload, snapshot=copy.deepcopy(snapshot), owner_id='9', revision='1',
                       completeness='complete', deleted_at=None)
         if changed:
             remote['snapshot']['header']['cliente'] = 'Nombre conciliado'
         return remote
+    def changes(payload):
+        requests.append('download')
+        return dict(events=[], next_cursor='next')
+
     service = QuoteSyncService(connect=lambda: connect(db_path),
-        transport=SimpleNamespace(mutate=mutate, changes=lambda _: dict(events=[], next_cursor='next')),
+        transport=SimpleNamespace(mutate=mutate, changes=changes),
         owner_id='9', pid='test-installation-001', scopes=[('PE', 'LA CASA DEL PERFUME')],
         materialize=adapter.materialize)
     assert service.cycle()['sent'] == 1
+    assert requests == ['upload', 'download']
     con = connect(db_path)
     try:
         path = con.execute('SELECT pdf_path FROM quotes WHERE id=?', (qid,)).fetchone()[0]
