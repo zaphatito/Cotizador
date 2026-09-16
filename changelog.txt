@@ -1,5 +1,5 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.47
+Versión: 2.0.48
 Fecha: 2026-09-16
 
 Resumen
