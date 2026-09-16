@@ -61,11 +61,11 @@ La conexión y sincronización normales del sistema se mantienen.
 Compilación del instalador completo de pruebas, separada del release público:
 
 ```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --distpath dist/precios-2.0.49 --workpath build/precios-2.0.49 Utilidades/sistema_cotizaciones.spec
-& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' '/DBuildDir=C:\ProyectosEF\Cotizador\dist\precios-2.0.49\SistemaCotizaciones' 'Output/script inno.iss'
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --distpath dist/precios-2.0.50 --workpath build/precios-2.0.50 Utilidades/sistema_cotizaciones.spec
+& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' '/DBuildDir=C:\ProyectosEF\Cotizador\dist\precios-2.0.50\SistemaCotizaciones' 'Output/script inno.iss'
 ```
 
-Salida: `Output/precios/Setup_SistemaCotizaciones_2.0.49_precios_sin_actualizacion.exe`.
+Salida: `Output/precios/Setup_SistemaCotizaciones_2.0.50_precios_sin_actualizacion.exe`.
 Mantiene la identidad del instalador normal: instalarlo actualiza el sistema completo,
 no crea una segunda instalación aislada. No incluye bases de datos de este equipo.
 
