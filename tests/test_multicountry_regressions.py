@@ -113,3 +113,85 @@ def test_rates_dialog_rejects_invalid_rates_without_writes(qapp, tmp_path, monke
         con.close()
     finally:
         dialog.deleteLater()
+
+
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from src.widgets_parts import quote_history_dialog as history
+
+
+@pytest.fixture
+def ticket_history(monkeypatch, tmp_path):
+    connection = Mock()
+    header = dict(country_code='PE', company_type='LA CASA DEL PERFUME',
+                  id_cotizador='002', quote_no='PE-002-0000001',
+                  base_currency='PEN', currency_shown='PEN', tasa_shown=1,
+                  cliente='Prueba', pdf_path=str(tmp_path / 'quote.pdf'))
+    pdf = tmp_path / 'quote.pdf'
+    cmd = tmp_path / 'ticket.cmd'
+    pdf.touch()
+    cmd.touch()
+    generator = Mock(return_value={'ticket_cmd': str(cmd)})
+    monkeypatch.setattr(history, 'connect', lambda _: connection)
+    monkeypatch.setattr(history, 'get_quote_header', lambda *_: header)
+    monkeypatch.setattr(history, 'get_quote_items', lambda *_: ([], [{'cantidad': 1}]))
+    monkeypatch.setattr(history, 'resolve_pdf_path_portable', lambda path: path)
+    monkeypatch.setattr(history, 'generar_ticket_para_cotizacion', generator)
+    messages = SimpleNamespace(information=Mock(), warning=Mock(), critical=Mock())
+    monkeypatch.setattr(history, 'QMessageBox', messages)
+    monkeypatch.setattr(history, 'QDesktopServices', SimpleNamespace(openUrl=Mock()))
+    window = SimpleNamespace(_db_path='unused', _selected_quote_id=lambda: 1,
+        _regen_pdf_overwrite_for_quote_id=lambda _: ('PE-002-0000001', str(pdf)))
+    return window, connection, generator, messages, str(cmd)
+
+
+@pytest.mark.parametrize('operation', ['reprint', 'regenerate'])
+def test_ticket_uses_historical_context_and_closes_connection(ticket_history, operation):
+    window, connection, generator, messages, cmd = ticket_history
+    if operation == 'reprint':
+        history.QuoteHistoryWindow._reprint_ticket(window)
+    else:
+        result = history.QuoteHistoryWindow._regen_pdf_and_cmd_for_quote_id(window, 1)
+        assert result[2] == cmd
+    generator.assert_called_once()
+    payload = generator.call_args.kwargs
+    assert payload['country'] == payload['context'].scope.country_code == 'PE'
+    assert payload['company_type'] == 'LA CASA DEL PERFUME'
+    assert payload['store_id'] == '002'
+    messages.critical.assert_not_called()
+    connection.close.assert_called_once()
+
+
+def test_reprint_closes_connection_when_ticket_generation_fails(ticket_history):
+    window, connection, generator, messages, _ = ticket_history
+    generator.side_effect = RuntimeError('Fallo simulado')
+    history.QuoteHistoryWindow._reprint_ticket(window)
+    generator.assert_called_once()
+    messages.critical.assert_called_once()
+    connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize('stored_path', ['', 'missing-historical.pdf'])
+def test_reprint_recovers_pdf_path_for_synchronized_quotes(ticket_history, stored_path):
+    window, connection, generator, messages, _ = ticket_history
+    header = history.get_quote_header(None, 1)
+    expected_path = header['pdf_path']
+    header['pdf_path'] = stored_path
+    regenerate = Mock(return_value=('PE-002-0000001', expected_path))
+    window._regen_pdf_overwrite_for_quote_id = regenerate
+    history.QuoteHistoryWindow._reprint_ticket(window)
+    regenerate.assert_called_once_with(1)
+    assert generator.call_args.kwargs['pdf_path'] == expected_path
+    connection.close.assert_called_once()
+    messages.critical.assert_not_called()
+
+
+def test_open_pdf_closes_connection_when_header_read_fails(ticket_history, monkeypatch):
+    window, connection, _, messages, _ = ticket_history
+    monkeypatch.setattr(history, 'get_quote_header', Mock(side_effect=RuntimeError('Fallo simulado')))
+    history.QuoteHistoryWindow._open_pdf(window)
+    connection.close.assert_called_once()
+    messages.critical.assert_called_once()

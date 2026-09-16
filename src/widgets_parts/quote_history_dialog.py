@@ -2579,11 +2579,11 @@ class QuoteHistoryWindow(QMainWindow):
             return
         try:
             con = connect(self._db_path)
-
-            q = get_quote_header(con, qid)
-
-            pdf = resolve_pdf_path_portable(q.get("pdf_path"))
-            con.close()
+            try:
+                q = get_quote_header(con, qid)
+                pdf = resolve_pdf_path_portable(q.get("pdf_path"))
+            finally:
+                con.close()
             if not pdf or not os.path.exists(pdf):
                 self._regen_pdf_overwrite()
                 con = connect(self._db_path)
@@ -2785,9 +2785,11 @@ class QuoteHistoryWindow(QMainWindow):
 
         try:
             con = connect(self._db_path)
-
-            header = get_quote_header(con, qid)
-            _items_base, items_shown = get_quote_items(con, qid)
+            try:
+                header = get_quote_header(con, qid)
+                _items_base, items_shown = get_quote_items(con, qid)
+            finally:
+                con.close()
 
             pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
             cliente = header.get("cliente", "")
@@ -2800,11 +2802,18 @@ class QuoteHistoryWindow(QMainWindow):
                 width=7,
             )
 
+            # El histórico remoto no incluye archivos locales. Una ruta vacía
+            # también puede indicar que el contenido del PDF fue invalidado.
+            if not pdf_path or not os.path.isfile(pdf_path):
+                quote_code, pdf_path = self._regen_pdf_overwrite_for_quote_id(qid)
+                if not pdf_path or not os.path.isfile(pdf_path):
+                    raise RuntimeError("No se pudo regenerar el PDF para el ticket.")
+
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=pdf_path,
                 items_pdf=items_shown,
                 quote_code=quote_code,
-                country=label_quote_context.scope.country_code,
+                country=ticket_context.scope.country_code,
                 store_id=historical_store_id,
                 company_type=ticket_context.scope.company_type,
                 context=ticket_context,
@@ -3007,7 +3016,7 @@ class QuoteHistoryWindow(QMainWindow):
             pdf_path=new_pdf_path,
             items_pdf=items_shown,
             quote_code=quote_code,
-            country=label_quote_context.scope.country_code,
+            country=ticket_context.scope.country_code,
             store_id=str(header.get("id_cotizador") or STORE_ID).strip(),
             company_type=ticket_context.scope.company_type,
             context=ticket_context,
