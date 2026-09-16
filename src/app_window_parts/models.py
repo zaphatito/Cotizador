@@ -325,7 +325,7 @@ class ItemsModel(QAbstractTableModel):
                 cat = str(r.get("categoria") or "").strip()
 
                 qty_in = float(nz(r.get("qty"), 0.0))
-                if uses_peru_business_rules(self.country) and uses_gram_quantity(r, country=self.country):
+                if self.country == "PERU" and uses_gram_quantity(r, country=self.country):
                     qty = round(qty_in, 3)
                     if qty < 0.001:
                         qty = 0.001
@@ -805,7 +805,7 @@ class ItemsModel(QAbstractTableModel):
                     return f"-{self._format_money(float(nz(shown_discount, 0.0)))}"
                 return "—"
             elif col == 3:
-                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
+                if self.country == "PERU" and uses_gram_quantity(it, country=self.country):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -854,7 +854,7 @@ class ItemsModel(QAbstractTableModel):
                 return ""
 
             if col == 3:
-                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
+                if self.country == "PERU" and uses_gram_quantity(it, country=self.country):
                     try:
                         return f"{float(nz(it.get('cantidad'), 0.0)):.3f}"
                     except Exception:
@@ -1048,7 +1048,11 @@ class ItemsModel(QAbstractTableModel):
                 if self.country == "PERU" and uses_gram_quantity(it, country=self.country):
                     new_qty = _parse_qty_peru_cats(txt_raw)
                 elif self.country == "BOLIVIA" and uses_gram_quantity(it, country=self.country):
-                    new_qty = max(0.001, round(float(txt_raw.replace(",", ".")), 3))
+                    parsed_qty = float(txt_raw.replace(",", "."))
+                    if not parsed_qty.is_integer():
+                        self.toast_requested.emit("En Bolivia la cantidad debe ser un número entero")
+                        return False
+                    new_qty = max(1, int(parsed_qty))
                 else:
                     txt = txt_raw.lower().replace(",", ".")
                     txt = re.sub(r"[^\d\.\-]", "", txt)
