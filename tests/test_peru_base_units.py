@@ -41,7 +41,7 @@ def test_other_peru_products_keep_their_weight_rule(code):
     assert quantity_in_grams(item, country="PE") == 25
 
 
-@pytest.mark.parametrize("country,grams", [("PY", 100), ("VE", 100), ("BO", 2000)])
+@pytest.mark.parametrize("country,grams", [("PY", 100), ("VE", 100), ("BO", 2)])
 def test_base01_exception_is_only_for_peru(country, grams):
     assert quantity_in_grams(base_item(), country=country) == grams
 

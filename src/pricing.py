@@ -28,8 +28,10 @@ def quantity_in_grams(
         else:
             qty = 0
     quantity = nz(qty, 0.0)
-    if uses_peru_business_rules(current_country):
+    if current_country == "PERU":
         return quantity * 1000.0
+    if current_country == "BOLIVIA":
+        return quantity
     if current_country in {"PARAGUAY", "VENEZUELA"}:
         return quantity * 50.0
     return 0.0
@@ -71,8 +73,9 @@ def factor_total_por_categoria(
     Factor que SOLO afecta el calculo de subtotal/total (no el precio unitario mostrado).
 
     - Categorías por peso (CATS, incluyendo diluyentes):
-        * PERU: qty ya viene en otra unidad, NO aplica x50 aqui.
-        * NO-PERU: qty representa unidades de 50g => total = unit * qty * 50
+        * PERU: qty interna en kilos; total = unit * qty.
+        * BOLIVIA: cantidad directa; total = unit * qty, sin conversión.
+        * PY/VE: qty representa unidades de 50g => total = unit * qty * 50
         * Excepcion PY: FERO001/FIJ002 se comportan como unidades => NO aplica x50
     """
     rule_item = dict(prod_or_item or {})
