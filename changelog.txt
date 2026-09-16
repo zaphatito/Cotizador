@@ -1,6 +1,6 @@
-SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.46
-Fecha: 2026-09-15
+﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+Versión: 2.0.47
+Fecha: 2026-09-16
 
 Resumen
 - Corrección de cotizaciones de Bolivia que quedaban ocultas en el histórico.
