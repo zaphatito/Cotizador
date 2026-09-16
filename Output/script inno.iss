@@ -6,7 +6,7 @@
 
 
 ; === Versionado (lo sobrescribe release.ps1) ===
-#define MyAppVersion "2.0.46"
+#define MyAppVersion "2.0.47"
 
 ; === Manifiesto publico para el updater (GitHub Releases) ===
 #define UpdateManifestUrl "https://github.com/zaphatito/CotizadorReleases/releases/latest/download/cotizador.json"
@@ -33,7 +33,7 @@ UsePreviousPrivileges=no
 DefaultDirName={localappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 
-OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}_precios_sin_actualizacion_r2
+OutputBaseFilename=Setup_SistemaCotizaciones_{#MyAppVersion}_precios_sin_actualizacion
 OutputDir={#ProjectRoot}\Output\precios
 Compression=lzma
 SolidCompression=yes

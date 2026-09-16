@@ -58,14 +58,14 @@ retorna `False` incluso si SQLite o la configuración remota habilitan actualiza
 El instalador también siembra `update_mode=OFF` y `update_check_on_startup=false`.
 La conexión y sincronización normales del sistema se mantienen.
 
-Compilación manual, sin release, commit, push ni publicación:
+Compilación del instalador completo de pruebas, separada del release público:
 
 ```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --distpath dist/precios-r2 --workpath build/precios-r2 Utilidades/sistema_cotizaciones.spec
-& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' '/DBuildDir=C:\ProyectosEF\Cotizador\dist\precios-r2\SistemaCotizaciones' 'Output/script inno.iss'
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --distpath dist/precios-2.0.47 --workpath build/precios-2.0.47 Utilidades/sistema_cotizaciones.spec
+& 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' '/DBuildDir=C:\ProyectosEF\Cotizador\dist\precios-2.0.47\SistemaCotizaciones' 'Output/script inno.iss'
 ```
 
-Salida: `Output/precios/Setup_SistemaCotizaciones_2.0.45_precios_sin_actualizacion_r2.exe`.
+Salida: `Output/precios/Setup_SistemaCotizaciones_2.0.47_precios_sin_actualizacion.exe`.
 Mantiene la identidad del instalador normal: instalarlo actualiza el sistema completo,
 no crea una segunda instalación aislada. No incluye bases de datos de este equipo.
 
