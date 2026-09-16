@@ -3,9 +3,13 @@ Versión: 2.0.47
 Fecha: 2026-09-16
 
 Resumen
-- Corrección de cotizaciones de Bolivia que quedaban ocultas en el histórico.
+- Cantidades directas para productos CATS en Bolivia, sin dividir entre 1000.
 
 Mejoras
+- En Bolivia, ingresar 50 conserva una cantidad de 50 y calcula cantidad por precio unitario.
+- Se admiten cantidades decimales y los productos comienzan con cantidad 1.
+- Editor, asistente, vista previa, PDF, ticket, etiquetas y envío conservan la misma cantidad.
+- Perú mantiene su conversión de gramos a kilos; Paraguay y Venezuela conservan sus reglas.
 - El histórico reconoce BO y BOL como el mismo país al validar el número de cotización.
 - Las cotizaciones existentes vuelven a mostrarse sin modificar sus datos ni los filtros de usuario e instalación.
 - El histórico muestra los PDF locales cuya referencia quedó vacía, identificándolos por país, instalación, número y cliente.
