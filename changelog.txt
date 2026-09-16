@@ -3,9 +3,11 @@ Versión: 2.0.46
 Fecha: 2026-09-15
 
 Resumen
-- Corrección de los PDF del histórico y simplificación de la pantalla.
+- Corrección de cotizaciones de Bolivia que quedaban ocultas en el histórico.
 
 Mejoras
+- El histórico reconoce BO y BOL como el mismo país al validar el número de cotización.
+- Las cotizaciones existentes vuelven a mostrarse sin modificar sus datos ni los filtros de usuario e instalación.
 - El histórico muestra los PDF locales cuya referencia quedó vacía, identificándolos por país, instalación, número y cliente.
 - Cambiar estado, pago u origen de la cotización conserva la referencia al PDF.
 - Los cambios de contenido siguen regenerando el documento al abrirlo.
