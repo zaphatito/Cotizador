@@ -450,7 +450,7 @@ def is_cats_code(window, code: str) -> bool:
 
 def normalize_qty_for_code(window, code: str, kind: str, qty_raw) -> float:
     country = _country_for_window(window)
-    if is_cats_code(window, code):
+    if is_cats_code(window, code) and country != "BOLIVIA":
         if country == "PERU":
             return float(_parse_qty_peru_cats(qty_raw))
         if country in ("PARAGUAY", "VENEZUELA"):

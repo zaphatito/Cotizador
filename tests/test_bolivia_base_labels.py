@@ -22,8 +22,8 @@ def test_bolivia_cats_keep_entered_quantity_and_unit_price(qapp, country, catego
     assert model.setData(index, '50', Qt.EditRole)
     assert item['cantidad'] == 50
     assert item['total'] == 100
-    assert model.data(index, Qt.DisplayRole) == '50.000'
-    assert model.data(index, Qt.EditRole) == '50.000'
+    assert model.data(index, Qt.DisplayRole) == '50'
+    assert model.data(index, Qt.EditRole) == '50'
     assert quantity_in_grams(item, country=country) == 50
     assert cantidad_para_mostrar(item, country=country) == '50 g'
     assert _build_presupuesto_items([item], cod_pais=country)[0]['cantidad'] == 50
@@ -31,9 +31,13 @@ def test_bolivia_cats_keep_entered_quantity_and_unit_price(qapp, country, catego
     from src.widgets_parts.preview_dialog import _esencia_a_gramos
     assert _peru_header_extra_lines([item], country=country) == ['Total de Esencias: 50 g']
     assert _esencia_a_gramos(item, 50, country=country) == 50
-    assert model.setData(index, '2,5', Qt.EditRole)
-    assert item['cantidad'] == 2.5
-    assert item['total'] == 5
+    before = deepcopy(item)
+    assert not model.setData(index, '2,5', Qt.EditRole)
+    assert item == before
+    assert model.setData(index, '200.000', Qt.EditRole)
+    assert item['cantidad'] == 200
+    assert model.data(index, Qt.DisplayRole) == '200'
+    assert model.data(index, Qt.EditRole) == '200'
 
 
 @pytest.mark.parametrize('country,expected', [('BO', 1), ('BOL', 1), ('PE', 0.001)])
