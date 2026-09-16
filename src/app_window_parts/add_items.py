@@ -17,7 +17,7 @@ from ..pricing import (
     default_price_id_for_product,
 )
 from ..product_rules import uses_gram_quantity
-from ..country_rules import uses_peru_business_rules
+from ..country_rules import normalize_country_name, uses_peru_business_rules
 from ..presentations import map_pc_to_bottle_code
 from ..logging_setup import get_logger
 from ..stock_policy import stock_enforcement_enabled
@@ -371,7 +371,7 @@ class AddItemsMixin:
 
             qty_default = (
                 0.001
-                if uses_peru_business_rules(getattr(self, "country_name", APP_COUNTRY))
+                if normalize_country_name(getattr(self, "country_name", APP_COUNTRY)) == "PERU"
                 and uses_gram_quantity(prod, country=getattr(self, "country_name", APP_COUNTRY))
                 else 1.0
             )

@@ -1045,8 +1045,10 @@ class ItemsModel(QAbstractTableModel):
             txt_raw = str(value).strip()
 
             try:
-                if uses_peru_business_rules(self.country) and uses_gram_quantity(it, country=self.country):
+                if self.country == "PERU" and uses_gram_quantity(it, country=self.country):
                     new_qty = _parse_qty_peru_cats(txt_raw)
+                elif self.country == "BOLIVIA" and uses_gram_quantity(it, country=self.country):
+                    new_qty = max(0.001, round(float(txt_raw.replace(",", ".")), 3))
                 else:
                     txt = txt_raw.lower().replace(",", ".")
                     txt = re.sub(r"[^\d\.\-]", "", txt)
