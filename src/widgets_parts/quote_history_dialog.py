@@ -1303,7 +1303,6 @@ class QuoteHistoryWindow(QMainWindow):
         self._stock_matrix_dialog: StockMatrixDialog | None = None
         self.lockdown_requested.connect(self._apply_admin_lockdown)
         self.history_refresh_requested.connect(self._refresh_shared_history)
-        self._shared_sync_active = True
         self._shared_sync_enabled = False
 
         central = QWidget()
@@ -1795,7 +1794,7 @@ class QuoteHistoryWindow(QMainWindow):
         interval_error_s = 300.0
         interval_disabled_s = 900.0
         batch_limit = 25
-        wait_s = 25.0
+        wait_s = 60.0
         disabled_logged = False
         consecutive_errors = 0
 
@@ -1850,8 +1849,10 @@ class QuoteHistoryWindow(QMainWindow):
                         wait_s = _error_wait()
                     else:
                         consecutive_errors = 0
-                        wait_s = (180.0 if shared.get('paused') else 1.0 if shared.get('more')
-                                  else 30.0 if self._shared_sync_active else 120.0)
+                        # Un minuto entre ciclos automáticos, incluso con más
+                        # páginas/pendientes. Los cambios locales despiertan el
+                        # único worker y cada envío consulta cambios al terminar.
+                        wait_s = 180.0 if shared.get('paused') else 60.0
                     continue
 
                 res = sync_pending_history_quotes_once(limit=batch_limit)
@@ -2099,13 +2100,6 @@ class QuoteHistoryWindow(QMainWindow):
         self._reload_current_page()
         if selected:
             self._select_row_by_quote_id(selected)
-
-    def changeEvent(self, event):
-        if event.type() == QEvent.ActivationChange:
-            self._shared_sync_active = self.isActiveWindow()
-            if self._shared_sync_active and time.monotonic() - getattr(self, '_last_api_sync_at', 0) >= 30.0:
-                self._wake_background_api_sync()
-        super().changeEvent(event)
 
     def _reload_first_page(self):
         self.offset = 0
