@@ -45,6 +45,16 @@ DDL = [
         quote_id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL,
         FOREIGN KEY(quote_id) REFERENCES quotes(id) ON DELETE CASCADE
     )""",
+    """CREATE TABLE IF NOT EXISTS quote_sync_recipient (
+        quote_uuid TEXT NOT NULL, recipient_owner_id TEXT NOT NULL,
+        PRIMARY KEY(quote_uuid,recipient_owner_id),
+        FOREIGN KEY(quote_uuid) REFERENCES quote_sync_document(quote_uuid) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS quote_sync_receipt (
+        quote_uuid TEXT NOT NULL, owner_id TEXT NOT NULL, revision TEXT NOT NULL,
+        PRIMARY KEY(quote_uuid,owner_id),
+        FOREIGN KEY(quote_uuid) REFERENCES quote_sync_document(quote_uuid) ON DELETE CASCADE
+    )""",
 ]
 
 
@@ -148,10 +158,18 @@ def register(con, *, quote_id, owner_id, origin_pid, snapshot, deleted_at=None):
     return quote_uuid
 
 
+def _require_owner(con, row):
+    has_settings = con.execute("SELECT 1 FROM sqlite_master WHERE name='settings'").fetchone()
+    current = con.execute("SELECT value FROM settings WHERE key='shared_quote_sync_owner'").fetchone() if has_settings else None
+    if current and row['owner_id'] != current[0]:
+        raise ValueError('La cotización compartida pertenece a otro usuario; abre una copia para editarla.')
+
+
 def local_metadata(con, quote_id, *, estado=None, pago=None, chatbot=None, deleted_at=None):
     row = _row(con, 'SELECT * FROM quote_sync_document WHERE quote_id=?', (quote_id,))
     if not row:
         return
+    _require_owner(con, row)
     snapshot = json.loads(row['snapshot'])
     for key, value in [('estado', estado), ('metodo_pago', pago), ('chatbot', chatbot)]:
         if value is not None:
@@ -173,10 +191,11 @@ def local_metadata(con, quote_id, *, estado=None, pago=None, chatbot=None, delet
 
 def freeze(con, quote_uuid, *, pid, presupuesto=None):
     """Return the same bytes until ACK, conflict resolution, or explicit rejection."""
+    row = document(con, quote_uuid)
+    _require_owner(con, row)
     prior = _row(con, 'SELECT * FROM quote_sync_outbox WHERE quote_uuid=?', (quote_uuid,))
     if prior:
         return prior
-    row = document(con, quote_uuid)
     if row['generation'] <= row['acknowledged_generation']:
         return None
     if _row(con, 'SELECT 1 FROM quote_sync_conflict WHERE quote_uuid=?', (quote_uuid,)):
@@ -270,11 +289,13 @@ def acknowledge(con, mutation_id, remote):
         con.execute('UPDATE quotes SET sync_uuid=? WHERE id=?', (target, row['quote_id']))
     if int(remote['revision']) < int(row['revision']):
         raise ValueError('El ACK retrocede la revisión.')
+    local_header = json.loads(row['snapshot'])['header']
+    if (local_header.get('observations') or '') != (remote['snapshot']['header'].get('observations') or ''):
+        con.execute("UPDATE quotes SET pdf_path='' WHERE id=?", (row['quote_id'],))
     newer = row['generation'] > sent['generation']
     acknowledged_snapshot = remote['snapshot']
     if newer:
         acknowledged_snapshot = json.loads(encode(remote['snapshot']))
-        local_header = json.loads(row['snapshot'])['header']
         sent_payload = json.loads(sent['payload'])
         sent_header = (sent_payload.get('snapshot') or {}).get('header', {})
         sent_metadata = sent_payload.get('metadata') or {}
@@ -359,6 +380,7 @@ def _same_content(left, right):
         return False
     for snapshot in (left, right):
         h = snapshot['header']
+        h['observations'] = h.get('observations') or ''
         for key in ('estado', 'metodo_pago', 'chatbot', 'created_at'):
             h.pop(key, None)
         h['quote_no'] = sync_quote_key(h.get('quote_no'), h.get('country_code'), h.get('id_cotizador'))
@@ -372,11 +394,17 @@ def _same_content(left, right):
 def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
     """Caller commits all events plus cursor together; materialize must not commit."""
     for remote in page['events']:
-        if (str(remote['owner_id']), remote['country_code'], remote['company_type']) != (
-                str(owner_id), country_code, company_type):
+        access = remote.get('access') or {}
+        recipient = (access.get('relation') == 'recipient'
+            and str(access.get('recipient_owner_id')) == str(owner_id)
+            and access.get('can_edit') is False)
+        if ((remote['country_code'], remote['company_type']) != (country_code, company_type)
+                or (str(remote['owner_id']) != str(owner_id) and not recipient)):
             raise ValueError('Documento fuera del ámbito solicitado.')
         row = document(con, remote['quote_uuid'])
-        if not row or row['quote_id'] is None:
+        if row and row['owner_id'] != str(remote['owner_id']):
+            raise ValueError('El propietario original de la cotización cambió.')
+        if not recipient and (not row or row['quote_id'] is None):
             local = _matching_local_document(con, remote)
             if local:
                 if local.get('_identity_ambiguous'):
@@ -390,6 +418,9 @@ def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
             conflict(con, row['quote_uuid'], remote, 'El número ya está vinculado a otra cotización compartida')
             continue
         if row and int(row['revision']) >= int(remote['revision']):
+            if recipient:
+                con.execute('INSERT OR IGNORE INTO quote_sync_recipient VALUES (?,?)',
+                            (remote['quote_uuid'], str(owner_id)))
             continue
         if row:
             remote = _preserve_emission(con, row, remote)
@@ -432,9 +463,16 @@ def apply_page(con, *, owner_id, country_code, company_type, page, materialize):
                 (quote_uuid,quote_id,owner_id,country_code,company_type,origin_pid,
                  revision,generation,acknowledged_generation,snapshot,remote_document,
                  deleted_at,completeness) VALUES (?,?,?,?,?,?,?,0,0,?,?,?,?)''',
-                (remote['quote_uuid'], quote_id, str(owner_id), country_code, company_type,
+                (remote['quote_uuid'], quote_id, str(remote['owner_id']), country_code, company_type,
                  remote.get('origin_pid') or '', str(remote['revision']), encode(remote['snapshot']),
                  encode(remote), remote.get('deleted_at'), remote['completeness']))
+        if recipient:
+            con.execute('INSERT OR IGNORE INTO quote_sync_recipient VALUES (?,?)',
+                        (remote['quote_uuid'], str(owner_id)))
+        if remote.get('origin') == 'catalogue' and quote_id is not None:
+            con.execute('''INSERT INTO quote_sync_receipt VALUES (?,?,?)
+                ON CONFLICT(quote_uuid,owner_id) DO UPDATE SET revision=excluded.revision''',
+                (remote['quote_uuid'], str(owner_id), str(remote['revision'])))
         if pending_metadata is not None and (pending_metadata or pending_delete):
             local_metadata(con, quote_id, estado=pending_metadata.get('estado'),
                 pago=pending_metadata.get('metodo_pago'), chatbot=pending_metadata.get('chatbot'),
@@ -453,6 +491,8 @@ def resolve(con, quote_uuid, *, reapply, materialize):
         raise ValueError('No existe un conflicto pendiente.')
     remote = json.loads(saved['remote_document'])
     row = document(con, quote_uuid)
+    if reapply:
+        _require_owner(con, row)
     if remote['quote_uuid'] != quote_uuid and document(con, remote['quote_uuid']):
         raise ValueError('La correspondencia duplicada requiere conciliación individual.')
     if reapply and remote.get('deleted_at'):

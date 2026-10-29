@@ -6,6 +6,7 @@ import datetime
 import re
 import threading
 import time
+import tempfile
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent, Signal
 from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont, QPen
@@ -62,6 +63,7 @@ from ..quote_context_service import (
     build_quote_context,
     resolve_historical_quote_owner,
     resolve_historical_quote_scope,
+    require_quote_read_access,
 )
 from ..country_rules import country_code_for, normalize_country_name, uses_peru_business_rules
 from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits, quote_pdf_filename
@@ -1224,6 +1226,7 @@ class QuotesTableModel(QAbstractTableModel):
 class QuoteHistoryWindow(QMainWindow):
     lockdown_requested = Signal(str)
     history_refresh_requested = Signal()
+    local_pdf_finished = Signal(object)
     _DEFAULT_SIZE = (1300, 720)
     _MIN_REASONABLE = (980, 620)
     _WIN_KEY_PREFIX = "ui_window_history"
@@ -1446,6 +1449,8 @@ class QuoteHistoryWindow(QMainWindow):
         self._apply_catalog_gate()
         self.refresh_recommendations_controls()
         self._reload_first_page()
+        self.local_pdf_finished.connect(self._finish_local_pdf)
+        self._local_pdf_jobs = set()
         QTimer.singleShot(350, self._preload_status_catalog)
         QTimer.singleShot(350, self._start_background_api_sync)
         QTimer.singleShot(3000, self._start_catalog_stock_sync)
@@ -2178,6 +2183,15 @@ class QuoteHistoryWindow(QMainWindow):
 
         has_sel = self._selected_quote_id() is not None
         has_catalog = self._has_products()
+        selected_header = {}
+        if has_sel:
+            con = connect(self._db_path)
+            try:
+                selected_header = get_quote_header(con, self._selected_quote_id())
+            finally:
+                con.close()
+        can_edit = not (selected_header.get('sync_owner_id') and
+            str(selected_header['sync_owner_id']) != str(selected_header.get('sync_current_owner_id')))
 
         menu = QMenu(self)
 
@@ -2194,16 +2208,16 @@ class QuoteHistoryWindow(QMainWindow):
         act_edit_pay = None
         if uses_peru_business_rules(self._selected_quote_country()):
             act_edit_pay = QAction("💳 Editar pago…", self)
-            act_edit_pay.setEnabled(has_sel)
+            act_edit_pay.setEnabled(has_sel and can_edit)
 
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
-        act_state.setEnabled(has_sel)
-        act_edit_quote_type.setEnabled(has_sel)
+        act_state.setEnabled(has_sel and can_edit)
+        act_edit_quote_type.setEnabled(has_sel and can_edit)
         act_labels.setEnabled(has_sel)
         act_ticket.setEnabled(has_sel)
         act_regen.setEnabled(has_sel)
-        act_hide.setEnabled(has_sel)
+        act_hide.setEnabled(has_sel and can_edit)
 
 
         menu.addAction(act_dup)
@@ -2572,6 +2586,31 @@ class QuoteHistoryWindow(QMainWindow):
         finally:
             con.close()
 
+    def _request_local_pdf(self, qid, continuation):
+        if qid in self._local_pdf_jobs:
+            return
+        self._local_pdf_jobs.add(qid)
+        def generate():
+            try:
+                result = (self._regen_pdf_overwrite_for_quote_id(qid), None)
+            except Exception as exc:
+                result = (None, exc)
+            try:
+                self.local_pdf_finished.emit((qid, continuation, result))
+            except RuntimeError:
+                log.debug('El histórico se cerró durante la generación local del PDF.')
+        threading.Thread(target=generate, name='local-quote-pdf', daemon=True).start()
+
+    def _finish_local_pdf(self, result):
+        qid, continuation, (document, error) = result
+        self._local_pdf_jobs.discard(qid)
+        if error:
+            QMessageBox.warning(self, 'PDF local pendiente',
+                f'No se pudo generar el PDF en este dispositivo. Reintenta con Abrir PDF.\n{error}')
+            return
+        self._reload_current_page()
+        continuation(document)
+
     def _open_pdf(self):
         qid = self._selected_quote_id()
         if not qid:
@@ -2580,36 +2619,19 @@ class QuoteHistoryWindow(QMainWindow):
         try:
             con = connect(self._db_path)
             try:
-                q = get_quote_header(con, qid)
-                pdf = resolve_pdf_path_portable(q.get("pdf_path"))
+                header = get_quote_header(con, qid)
             finally:
                 con.close()
-            if not pdf or not os.path.exists(pdf):
-                self._regen_pdf_overwrite()
-                con = connect(self._db_path)
-                try:
-                    pdf = resolve_pdf_path_portable(get_quote_header(con, qid).get('pdf_path'))
-                finally:
-                    con.close()
-            if not pdf or not os.path.exists(pdf):
-                pdf_name = os.path.basename(pdf) if pdf else "(sin ruta)"
-                pdf_dir = os.path.dirname(pdf) if pdf else ""
-                mb = QMessageBox(self)
-                mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("PDF no encontrado")
-                mb.setText("No se encontró el archivo PDF.")
-                mb.setInformativeText(
-                    f"Archivo: {pdf_name}"
-                    + (f"\nUbicación: {pdf_dir}" if pdf_dir else "")
-                )
-                if pdf:
-                    mb.setDetailedText(pdf)
-                mb.exec()
-                return
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(pdf)))
-        except Exception as e:
-            log.exception("Error abriendo PDF")
-            QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{e}")
+            require_quote_read_access(header)
+            pdf = resolve_pdf_path_portable(header.get("pdf_path"))
+            if pdf and os.path.isfile(pdf):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(pdf)))
+            else:
+                self._request_local_pdf(qid,
+                    lambda document: QDesktopServices.openUrl(QUrl.fromLocalFile(document[1])))
+        except Exception as exc:
+            log.exception("Error abriendo PDF local")
+            QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{exc}")
 
     def _duplicate(self):
         qid = self._selected_quote_id()
@@ -2886,7 +2908,7 @@ class QuoteHistoryWindow(QMainWindow):
             return
 
         try:
-            quote_code, new_out_path = self._regen_pdf_overwrite_for_quote_id(qid)
+            quote_code, new_out_path = self._regen_pdf_overwrite_for_quote_id(qid, overwrite=True)
 
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -2901,9 +2923,9 @@ class QuoteHistoryWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
         except Exception as e:
             log.exception("Error regenerando PDF")
-            QMessageBox.critical(self, "Error", f"No se pudo regenerar el PDF:\n{e}")
+            QMessageBox.critical(self, "Error", f"No se pudo generar el PDF local:\n{e}")
 
-    def _regen_pdf_overwrite_for_quote_id(self, qid: int) -> tuple[str, str]:
+    def _regen_pdf_overwrite_for_quote_id(self, qid: int, *, overwrite=False) -> tuple[str, str]:
         con = None
         try:
             con = connect(self._db_path)
@@ -2916,12 +2938,7 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-        old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
-        if not old_out_path:
-            os.makedirs(COTIZACIONES_DIR, exist_ok=True)
-            old_out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(
-                str(header.get("quote_no") or ""), header.get("cliente")))
-
+        require_quote_read_access(header)
         context = _quote_context_from_header(header)
         historical_country_code = context.scope.country_code
         historical_country = normalize_country_name(historical_country_code)
@@ -2932,6 +2949,13 @@ class QuoteHistoryWindow(QMainWindow):
             quote_no=header.get("quote_no"),
             width=7,
         )
+        old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
+        if old_out_path and os.path.isfile(old_out_path) and not overwrite:
+            return quote_code, old_out_path
+        if not old_out_path:
+            os.makedirs(COTIZACIONES_DIR, exist_ok=True)
+            old_out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(
+                str(header.get("quote_no") or ""), header.get("cliente")))
 
         new_filename = quote_pdf_filename(quote_code, header.get("cliente"))
         new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
@@ -2958,17 +2982,27 @@ class QuoteHistoryWindow(QMainWindow):
             "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
             "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
             "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
+            "observations": header.get("observations") or "",
         }
 
-        generar_pdf(
-            datos,
-            fixed_quote_no=quote_code,
-            out_path=new_out_path,
-            country_code=historical_country_code,
-            store_id=historical_store_id,
-            company_type=str(header.get("company_type") or "").strip(),
-            currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
-        )
+        os.makedirs(os.path.dirname(new_out_path), exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(new_out_path),
+                prefix=".quote-", suffix=".pdf", delete=False) as temporary:
+            temporary_path = temporary.name
+        try:
+            generar_pdf(
+                datos,
+                fixed_quote_no=quote_code,
+                out_path=temporary_path,
+                country_code=historical_country_code,
+                store_id=historical_store_id,
+                company_type=str(header.get("company_type") or "").strip(),
+                currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
+            )
+            os.replace(temporary_path, new_out_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
         con = None
         try:

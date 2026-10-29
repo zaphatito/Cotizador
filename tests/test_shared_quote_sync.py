@@ -208,8 +208,16 @@ def test_open_pdf_reuses_current_file_but_regenerates_invalidated_content(
     monkeypatch.setattr(ui, 'generar_pdf', generate)
     monkeypatch.setattr(ui.QDesktopServices, 'openUrl', opened)
     history = SimpleNamespace(_db_path=db_path, _selected_quote_id=lambda: qid)
-    history._regen_pdf_overwrite = lambda: ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(history, qid)
+    pending = []
+    history._request_local_pdf = lambda selected_id, continuation: pending.append((selected_id, continuation))
     ui.QuoteHistoryWindow._open_pdf(history)
+    needs_generation = not (stored_path and file_exists)
+    assert len(pending) == int(needs_generation)
+    if needs_generation:
+        selected_id, continuation = pending.pop()
+        assert selected_id == qid
+        assert not opened.called
+        continuation(ui.QuoteHistoryWindow._regen_pdf_overwrite_for_quote_id(history, selected_id))
     assert generate.call_count == (0 if stored_path and file_exists else 1)
     assert pdf.read_bytes() == (b'previous-content' if stored_path and file_exists else b'current-content')
     assert Path(opened.call_args.args[0].toLocalFile()) == pdf
