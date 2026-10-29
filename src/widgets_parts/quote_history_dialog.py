@@ -1,4 +1,4 @@
-﻿# src/widgets_parts/quote_history_dialog.py
+# src/widgets_parts/quote_history_dialog.py
 from __future__ import annotations
 
 import os
@@ -6,6 +6,7 @@ import datetime
 import re
 import threading
 import time
+import tempfile
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QEvent, Signal
 from PySide6.QtGui import QDesktopServices, QAction, QCloseEvent, QBrush, QColor, QFont, QPen
@@ -14,7 +15,6 @@ from PySide6.QtWidgets import (
     QTableView, QLabel, QMessageBox, QHeaderView, QMenu,
     QApplication, QDialog, QInputDialog, QCheckBox, QComboBox, QFormLayout, QGroupBox,
     QStyledItemDelegate, QStyleOptionViewItem, QStyle,
-    QPlainTextEdit,
 )
 
 from sqlModels.db import connect, tx
@@ -30,7 +30,7 @@ from sqlModels.rates_repo import load_rates
 
 from ..logging_setup import get_logger
 from ..utils import nz
-from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable
+from ..paths import BASE_APP_TITLE, DATA_DIR, COTIZACIONES_DIR, resolve_pdf_path_portable, find_quote_pdf_path
 
 from ..db_path import resolve_db_path
 from ..api.presupuesto_client import (
@@ -63,6 +63,7 @@ from ..quote_context_service import (
     build_quote_context,
     resolve_historical_quote_owner,
     resolve_historical_quote_scope,
+    require_quote_read_access,
 )
 from ..country_rules import country_code_for, normalize_country_name, uses_peru_business_rules
 from ..quote_code import format_quote_code, quote_match_key, extract_quote_digits, quote_pdf_filename
@@ -927,7 +928,6 @@ class QuotesTableModel(QAbstractTableModel):
             ]
 
         self._today_font = QFont()
-        self.HEADERS.extend(['País / empresa', 'Sincronización'])
         self._today_font.setBold(True)
         self._centered_cols = {
             self._idx_no(),
@@ -1028,7 +1028,7 @@ class QuotesTableModel(QAbstractTableModel):
         row["_cache_items_num"] = items_num
         row["_cache_items_txt"] = str(items_num)
 
-        pdf_path = str(row.get("pdf_path") or "")
+        pdf_path = find_quote_pdf_path(row) or str(row.get("pdf_path") or "")
         pdf_name = os.path.basename(pdf_path)
         row["_cache_pdf_path"] = pdf_path
         row["_cache_pdf_name"] = pdf_name
@@ -1079,10 +1079,6 @@ class QuotesTableModel(QAbstractTableModel):
             return r.get("_cache_fg_brush")
 
         if role == Qt.DisplayRole:
-            if c == len(self.HEADERS) - 2:
-                return f"{r.get('country_code') or ''} / {r.get('company_type') or ''}"
-            if c == len(self.HEADERS) - 1:
-                return r.get('sync_label', '')
             if c == 0:
                 return r.get("_cache_created_display", "")
             if c == 1:
@@ -1230,7 +1226,7 @@ class QuotesTableModel(QAbstractTableModel):
 class QuoteHistoryWindow(QMainWindow):
     lockdown_requested = Signal(str)
     history_refresh_requested = Signal()
-    shared_sync_status = Signal(str)
+    local_pdf_finished = Signal(object)
     _DEFAULT_SIZE = (1300, 720)
     _MIN_REASONABLE = (980, 620)
     _WIN_KEY_PREFIX = "ui_window_history"
@@ -1310,8 +1306,6 @@ class QuoteHistoryWindow(QMainWindow):
         self._stock_matrix_dialog: StockMatrixDialog | None = None
         self.lockdown_requested.connect(self._apply_admin_lockdown)
         self.history_refresh_requested.connect(self._refresh_shared_history)
-        self.shared_sync_status.connect(lambda message: self.statusBar().showMessage(message))
-        self._shared_sync_active = True
         self._shared_sync_enabled = False
 
         central = QWidget()
@@ -1444,9 +1438,6 @@ class QuoteHistoryWindow(QMainWindow):
         nav.addWidget(self.lbl_page)
         nav.addWidget(btn_prev)
         nav.addWidget(btn_next)
-        btn_sync_report = QPushButton('Sincronización…')
-        btn_sync_report.clicked.connect(self._show_sync_report)
-        nav.addWidget(btn_sync_report)
         nav.addStretch(1)
         nav.addWidget(self.btn_pdf)
         nav.addWidget(self.btn_dup)
@@ -1458,6 +1449,8 @@ class QuoteHistoryWindow(QMainWindow):
         self._apply_catalog_gate()
         self.refresh_recommendations_controls()
         self._reload_first_page()
+        self.local_pdf_finished.connect(self._finish_local_pdf)
+        self._local_pdf_jobs = set()
         QTimer.singleShot(350, self._preload_status_catalog)
         QTimer.singleShot(350, self._start_background_api_sync)
         QTimer.singleShot(3000, self._start_catalog_stock_sync)
@@ -1806,7 +1799,7 @@ class QuoteHistoryWindow(QMainWindow):
         interval_error_s = 300.0
         interval_disabled_s = 900.0
         batch_limit = 25
-        wait_s = 25.0
+        wait_s = 60.0
         disabled_logged = False
         consecutive_errors = 0
 
@@ -1855,22 +1848,16 @@ class QuoteHistoryWindow(QMainWindow):
                 shared = run_shared_cycle(self._db_path, verification)
                 self._shared_sync_enabled = bool(shared.get('enabled'))
                 if shared.get('enabled'):
-                    self.shared_sync_status.emit(
-                        shared.get('message') or 'Sincronización pausada; los cambios locales se conservan.' if shared.get('paused') else
-                        'Sin conexión; los cambios locales se conservan.' if shared.get('offline') else
-                        f"{shared['blocked']} cotizaciones requieren revisión en Sincronización…" if shared.get('blocked') else
-                        'Hay incidencias pendientes. Consulte Sincronización…' if shared.get('failed') or shared.get('conflicts') else
-                        f"Enviando cotizaciones pendientes: {shared['pending']}." if shared.get('pending') else
-                        'Histórico compartido conectado.'
-                    )
                     if shared.get('received') or shared.get('sent') or shared.get('conflicts'):
                         self.history_refresh_requested.emit()
                     if shared.get('offline') or shared.get('failed'):
                         wait_s = _error_wait()
                     else:
                         consecutive_errors = 0
-                        wait_s = (180.0 if shared.get('paused') else 1.0 if shared.get('more')
-                                  else 30.0 if self._shared_sync_active else 120.0)
+                        # Un minuto entre ciclos automáticos, incluso con más
+                        # páginas/pendientes. Los cambios locales despiertan el
+                        # único worker y cada envío consulta cambios al terminar.
+                        wait_s = 180.0 if shared.get('paused') else 60.0
                     continue
 
                 res = sync_pending_history_quotes_once(limit=batch_limit)
@@ -2119,13 +2106,6 @@ class QuoteHistoryWindow(QMainWindow):
         if selected:
             self._select_row_by_quote_id(selected)
 
-    def changeEvent(self, event):
-        if event.type() == QEvent.ActivationChange:
-            self._shared_sync_active = self.isActiveWindow()
-            if self._shared_sync_active and time.monotonic() - getattr(self, '_last_api_sync_at', 0) >= 30.0:
-                self._wake_background_api_sync()
-        super().changeEvent(event)
-
     def _reload_first_page(self):
         self.offset = 0
         self._reload_current_page()
@@ -2149,16 +2129,6 @@ class QuoteHistoryWindow(QMainWindow):
                     == Qt.DescendingOrder
                 ),
             )
-            for row in rows:
-                state = con.execute('''SELECT d.generation,d.acknowledged_generation,
-                    d.error,c.quote_uuid,o.error FROM quote_sync_document d
-                    LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
-                    LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid
-                    WHERE d.quote_id=?''', (row['id'],)).fetchone()
-                if state:
-                    row['sync_label'] = ('Conflicto' if state[3] else
-                        ('Pendiente: ' + str(state[2] or state[4])) if state[2] or state[4] else
-                        'Pendiente' if state[0] > state[1] else 'Sincronizado')
         except Exception as e:
             log.exception("Error listando cotizaciones")
             QMessageBox.critical(self, "Error", f"No se pudo cargar el histórico:\n{e}")
@@ -2213,6 +2183,15 @@ class QuoteHistoryWindow(QMainWindow):
 
         has_sel = self._selected_quote_id() is not None
         has_catalog = self._has_products()
+        selected_header = {}
+        if has_sel:
+            con = connect(self._db_path)
+            try:
+                selected_header = get_quote_header(con, self._selected_quote_id())
+            finally:
+                con.close()
+        can_edit = not (selected_header.get('sync_owner_id') and
+            str(selected_header['sync_owner_id']) != str(selected_header.get('sync_current_owner_id')))
 
         menu = QMenu(self)
 
@@ -2229,16 +2208,16 @@ class QuoteHistoryWindow(QMainWindow):
         act_edit_pay = None
         if uses_peru_business_rules(self._selected_quote_country()):
             act_edit_pay = QAction("💳 Editar pago…", self)
-            act_edit_pay.setEnabled(has_sel)
+            act_edit_pay.setEnabled(has_sel and can_edit)
 
         act_dup.setEnabled(has_sel and has_catalog)
         act_pdf.setEnabled(has_sel)
-        act_state.setEnabled(has_sel)
-        act_edit_quote_type.setEnabled(has_sel)
+        act_state.setEnabled(has_sel and can_edit)
+        act_edit_quote_type.setEnabled(has_sel and can_edit)
         act_labels.setEnabled(has_sel)
         act_ticket.setEnabled(has_sel)
         act_regen.setEnabled(has_sel)
-        act_hide.setEnabled(has_sel)
+        act_hide.setEnabled(has_sel and can_edit)
 
 
         menu.addAction(act_dup)
@@ -2563,40 +2542,6 @@ class QuoteHistoryWindow(QMainWindow):
         self.refresh_ai_controls()
         self.refresh_recommendations_controls()
 
-    def _show_sync_report(self):
-        import json
-        con = connect(self._db_path)
-        try:
-            rows = con.execute('''SELECT d.*,c.reason AS conflict_reason,o.error AS send_error
-                FROM quote_sync_document d LEFT JOIN quote_sync_conflict c ON c.quote_uuid=d.quote_uuid
-                LEFT JOIN quote_sync_outbox o ON o.quote_uuid=d.quote_uuid ORDER BY d.country_code,d.company_type,d.rowid''').fetchall()
-            lines = []
-            for row in rows:
-                header = json.loads(row['snapshot'])['header']
-                status = row['conflict_reason'] or row['error'] or row['send_error']
-                if not status:
-                    status = ('Histórico incompleto: falta el snapshot de origen'
-                        if row['completeness'] != 'complete' else
-                        'Pendiente' if row['generation'] > row['acknowledged_generation'] else 'Sincronizado')
-                lines.append(f"{header.get('quote_no')} · {row['country_code']} · {row['company_type']}\n"
-                    f"Origen: {header.get('id_cotizador')} · Revisión: {row['revision']} · "
-                    f"{'Eliminada · ' if row['deleted_at'] else ''}{status}")
-            for row in con.execute('''SELECT q.quote_no,q.api_error_message FROM quotes q
-                LEFT JOIN quote_sync_document d ON d.quote_id=q.id
-                WHERE d.quote_id IS NULL AND COALESCE(q.api_error_message,'')<>'' '''):
-                lines.append(f"{row['quote_no']} · Pendiente de conciliación: {row['api_error_message']}")
-        finally:
-            con.close()
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Estado del histórico compartido')
-        dialog.resize(800, 500)
-        layout = QVBoxLayout(dialog)
-        view = QPlainTextEdit()
-        view.setReadOnly(True)
-        view.setPlainText('\n\n'.join(lines) or 'No hay documentos registrados en la sincronización compartida.')
-        layout.addWidget(view)
-        dialog.exec()
-
     def _resolve_shared_conflict(self):
         import json
         from sqlModels import quote_sync_repo
@@ -2641,6 +2586,31 @@ class QuoteHistoryWindow(QMainWindow):
         finally:
             con.close()
 
+    def _request_local_pdf(self, qid, continuation):
+        if qid in self._local_pdf_jobs:
+            return
+        self._local_pdf_jobs.add(qid)
+        def generate():
+            try:
+                result = (self._regen_pdf_overwrite_for_quote_id(qid), None)
+            except Exception as exc:
+                result = (None, exc)
+            try:
+                self.local_pdf_finished.emit((qid, continuation, result))
+            except RuntimeError:
+                log.debug('El histórico se cerró durante la generación local del PDF.')
+        threading.Thread(target=generate, name='local-quote-pdf', daemon=True).start()
+
+    def _finish_local_pdf(self, result):
+        qid, continuation, (document, error) = result
+        self._local_pdf_jobs.discard(qid)
+        if error:
+            QMessageBox.warning(self, 'PDF local pendiente',
+                f'No se pudo generar el PDF en este dispositivo. Reintenta con Abrir PDF.\n{error}')
+            return
+        self._reload_current_page()
+        continuation(document)
+
     def _open_pdf(self):
         qid = self._selected_quote_id()
         if not qid:
@@ -2648,37 +2618,20 @@ class QuoteHistoryWindow(QMainWindow):
             return
         try:
             con = connect(self._db_path)
-
-            q = get_quote_header(con, qid)
-
-            pdf = resolve_pdf_path_portable(q.get("pdf_path"))
-            con.close()
-            if not pdf or not os.path.exists(pdf):
-                self._regen_pdf_overwrite()
-                con = connect(self._db_path)
-                try:
-                    pdf = resolve_pdf_path_portable(get_quote_header(con, qid).get('pdf_path'))
-                finally:
-                    con.close()
-            if not pdf or not os.path.exists(pdf):
-                pdf_name = os.path.basename(pdf) if pdf else "(sin ruta)"
-                pdf_dir = os.path.dirname(pdf) if pdf else ""
-                mb = QMessageBox(self)
-                mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("PDF no encontrado")
-                mb.setText("No se encontró el archivo PDF.")
-                mb.setInformativeText(
-                    f"Archivo: {pdf_name}"
-                    + (f"\nUbicación: {pdf_dir}" if pdf_dir else "")
-                )
-                if pdf:
-                    mb.setDetailedText(pdf)
-                mb.exec()
-                return
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(pdf)))
-        except Exception as e:
-            log.exception("Error abriendo PDF")
-            QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{e}")
+            try:
+                header = get_quote_header(con, qid)
+            finally:
+                con.close()
+            require_quote_read_access(header)
+            pdf = resolve_pdf_path_portable(header.get("pdf_path"))
+            if pdf and os.path.isfile(pdf):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(pdf)))
+            else:
+                self._request_local_pdf(qid,
+                    lambda document: QDesktopServices.openUrl(QUrl.fromLocalFile(document[1])))
+        except Exception as exc:
+            log.exception("Error abriendo PDF local")
+            QMessageBox.critical(self, "Error", f"No se pudo abrir el PDF:\n{exc}")
 
     def _duplicate(self):
         qid = self._selected_quote_id()
@@ -2854,9 +2807,11 @@ class QuoteHistoryWindow(QMainWindow):
 
         try:
             con = connect(self._db_path)
-
-            header = get_quote_header(con, qid)
-            _items_base, items_shown = get_quote_items(con, qid)
+            try:
+                header = get_quote_header(con, qid)
+                _items_base, items_shown = get_quote_items(con, qid)
+            finally:
+                con.close()
 
             pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
             cliente = header.get("cliente", "")
@@ -2869,11 +2824,18 @@ class QuoteHistoryWindow(QMainWindow):
                 width=7,
             )
 
+            # El histórico remoto no incluye archivos locales. Una ruta vacía
+            # también puede indicar que el contenido del PDF fue invalidado.
+            if not pdf_path or not os.path.isfile(pdf_path):
+                quote_code, pdf_path = self._regen_pdf_overwrite_for_quote_id(qid)
+                if not pdf_path or not os.path.isfile(pdf_path):
+                    raise RuntimeError("No se pudo regenerar el PDF para el ticket.")
+
             ticket_paths = generar_ticket_para_cotizacion(
                 pdf_path=pdf_path,
                 items_pdf=items_shown,
                 quote_code=quote_code,
-                country=label_quote_context.scope.country_code,
+                country=ticket_context.scope.country_code,
                 store_id=historical_store_id,
                 company_type=ticket_context.scope.company_type,
                 context=ticket_context,
@@ -2946,7 +2908,7 @@ class QuoteHistoryWindow(QMainWindow):
             return
 
         try:
-            quote_code, new_out_path = self._regen_pdf_overwrite_for_quote_id(qid)
+            quote_code, new_out_path = self._regen_pdf_overwrite_for_quote_id(qid, overwrite=True)
 
             self._reload_current_page()
             self._select_row_by_quote_id(qid)
@@ -2961,9 +2923,9 @@ class QuoteHistoryWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(COTIZACIONES_DIR)))
         except Exception as e:
             log.exception("Error regenerando PDF")
-            QMessageBox.critical(self, "Error", f"No se pudo regenerar el PDF:\n{e}")
+            QMessageBox.critical(self, "Error", f"No se pudo generar el PDF local:\n{e}")
 
-    def _regen_pdf_overwrite_for_quote_id(self, qid: int) -> tuple[str, str]:
+    def _regen_pdf_overwrite_for_quote_id(self, qid: int, *, overwrite=False) -> tuple[str, str]:
         con = None
         try:
             con = connect(self._db_path)
@@ -2976,12 +2938,7 @@ class QuoteHistoryWindow(QMainWindow):
                 except Exception:
                     pass
 
-        old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
-        if not old_out_path:
-            os.makedirs(COTIZACIONES_DIR, exist_ok=True)
-            old_out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(
-                str(header.get("quote_no") or ""), header.get("cliente")))
-
+        require_quote_read_access(header)
         context = _quote_context_from_header(header)
         historical_country_code = context.scope.country_code
         historical_country = normalize_country_name(historical_country_code)
@@ -2992,6 +2949,13 @@ class QuoteHistoryWindow(QMainWindow):
             quote_no=header.get("quote_no"),
             width=7,
         )
+        old_out_path = resolve_pdf_path_portable(header.get("pdf_path"))
+        if old_out_path and os.path.isfile(old_out_path) and not overwrite:
+            return quote_code, old_out_path
+        if not old_out_path:
+            os.makedirs(COTIZACIONES_DIR, exist_ok=True)
+            old_out_path = os.path.join(COTIZACIONES_DIR, quote_pdf_filename(
+                str(header.get("quote_no") or ""), header.get("cliente")))
 
         new_filename = quote_pdf_filename(quote_code, header.get("cliente"))
         new_out_path = os.path.join(os.path.dirname(old_out_path), new_filename)
@@ -3018,17 +2982,27 @@ class QuoteHistoryWindow(QMainWindow):
             "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
             "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
             "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
+            "observations": header.get("observations") or "",
         }
 
-        generar_pdf(
-            datos,
-            fixed_quote_no=quote_code,
-            out_path=new_out_path,
-            country_code=historical_country_code,
-            store_id=historical_store_id,
-            company_type=str(header.get("company_type") or "").strip(),
-            currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
-        )
+        os.makedirs(os.path.dirname(new_out_path), exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(new_out_path),
+                prefix=".quote-", suffix=".pdf", delete=False) as temporary:
+            temporary_path = temporary.name
+        try:
+            generar_pdf(
+                datos,
+                fixed_quote_no=quote_code,
+                out_path=temporary_path,
+                country_code=historical_country_code,
+                store_id=historical_store_id,
+                company_type=str(header.get("company_type") or "").strip(),
+                currency_code=str(header.get("currency_shown") or header.get("base_currency") or "").strip(),
+            )
+            os.replace(temporary_path, new_out_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
         con = None
         try:
@@ -3076,7 +3050,7 @@ class QuoteHistoryWindow(QMainWindow):
             pdf_path=new_pdf_path,
             items_pdf=items_shown,
             quote_code=quote_code,
-            country=label_quote_context.scope.country_code,
+            country=ticket_context.scope.country_code,
             store_id=str(header.get("id_cotizador") or STORE_ID).strip(),
             company_type=ticket_context.scope.company_type,
             context=ticket_context,

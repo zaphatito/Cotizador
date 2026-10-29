@@ -1,4 +1,46 @@
-# Histórico compartido: preparación de integración
+# Histórico compartido
+
+## Cotizaciones del catálogo
+
+El Sync puede entregar documentos de otro autor únicamente con el permiso
+`access: {relation: 'recipient', recipient_owner_id, can_edit: false}` para el
+usuario conectado. SQLite conserva ese destinatario y el propietario original;
+el cursor continúa perteneciendo al receptor. El histórico filtra por permisos
+y ámbito. «Abrir Cotización» crea una copia con la identidad del usuario actual;
+el destinatario no puede cambiar estado, pago, origen ni eliminar el original.
+
+`origin: 'catalogue'` identifica la procedencia del documento. El protocolo
+sincroniza únicamente datos comerciales, permisos y recibos. No incluye PDF,
+estado de un PDF remoto, hashes de archivos, rutas, bytes ni Base64; tampoco
+existen operaciones para subir o descargar esos archivos desde EFAPI.
+
+Cada dispositivo genera y conserva su PDF con la plantilla y el generador local,
+usando exclusivamente el snapshot confirmado: autor, código, fecha, cliente,
+moneda, importes y observaciones generales y por línea. No consulta precios,
+productos ni fotografías vivos para reconstruirlo. Si ya hay un archivo local
+vigente, «Abrir PDF» lo reutiliza. Si falta, la generación ocurre en un worker;
+un reemplazo atómico evita publicar archivos incompletos. Los errores muestran
+«PDF local pendiente» y permiten reintentar con «Abrir PDF», sin emitir otra
+cotización, reservar otro correlativo ni modificar el documento sincronizado.
+El generador original del Cotizador es la referencia del PDF, también para Perú.
+Las adaptaciones para lograr paridad se realizan en el catálogo nuevo; la
+integración no cambia el diseño, la paginación ni los cálculos del Cotizador.
+
+La confirmación `postCatalogueQuoteReceipt` se envía después de persistir
+documento y cursor. Una cola SQLite conserva el recibo si falla la red y lo
+reintenta de forma idempotente. El esquema local 47 añade las tablas de
+destinatarios y recibos; no cambia los snapshots existentes.
+
+Pruebas dirigidas, con SQLite temporal y red simulada:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_catalogue_shared_quotes.py tests/test_shared_quote_sync.py tests/test_shared_history_ui.py tests/test_quote_context_service.py -q
+```
+
+La validación de estos contratos no implica una migración de la base operacional,
+una publicación del servidor ni una distribución del instalador.
+
+## Antecedentes de integración
 
 Worktree independiente desde `main` (`b30ba7d`). La base SQLite pasa de 45 a 46.
 La contraparte de EFAPI incluye `database/1.5.17.sql` y
@@ -15,13 +57,18 @@ La contraparte de EFAPI incluye `database/1.5.17.sql` y
 - `src/quote_sync_adapter.py`: reconciliación inicial, proyección compatible con
   EFAPI e importación de snapshots sin archivos externos ni actualización de la
   ficha viva del cliente por una cotización histórica.
-- Histórico: país/empresa y moneda visibles, códigos completos, estado de
-  sincronización, informe de parciales/incidencias y resolución explícita de
-  conflictos. Actualizar el listado conserva página y selección.
+- Histórico: moneda visible, sin columnas de país/empresa o sincronización,
+  sin informe ni etiqueta de sincronización. Los conflictos conservan su acción
+  de resolución en el menú contextual. Actualizar el listado conserva página y
+  selección; la sincronización sigue funcionando en segundo plano.
 - «Abrir Cotización» sigue creando una copia con la instalación actual. Los
   documentos originales conservan contexto, importes e items de su snapshot.
-- PDF: un documento descargado puede regenerarse desde el snapshot sin una ruta
-  previa. Cambios de metadata invalidan la ruta anterior. No se transfieren CMD.
+- PDF local de cualquier origen: un documento recibido puede generarse desde el snapshot sin una ruta
+  previa. Estado, pago y origen web conservan la referencia local porque no se
+  imprimen en el PDF. Los cambios de contenido siguen invalidándola. El listado
+  también encuentra archivos locales por país, instalación, número y cliente;
+  una referencia invalidada se regenera al abrir para asegurar contenido actual.
+  No se transfieren CMD.
 
 La activación la decide EFAPI por usuario y está desactivada por defecto. Después
 de habilitarse, una pausa no devuelve la instalación al envío legacy sin revisión.

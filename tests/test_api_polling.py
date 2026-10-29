@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -173,30 +174,54 @@ def test_verification_failure_backs_off_and_keeps_the_existing_grace_limit(verif
     assert result['blocked'] is True
 
 
-@pytest.mark.parametrize('active,expected', [(True, 30.0), (False, 120.0)])
+@pytest.mark.parametrize('active,expected', [(True, 60.0), (False, 60.0)])
 def test_history_polls_less_often_while_keeping_the_wake_event(monkeypatch, active, expected):
     waits = run_loop(monkeypatch, [{'enabled': True}] * 3, active=active)
-    assert waits == [25.0, expected, expected]
+    assert waits == [60.0, expected, expected]
 
 
 def test_history_errors_use_backoff_and_reset_after_success(monkeypatch):
     outcomes = [{'enabled': True, 'offline': True}] * 3 + [{'enabled': True}] * 2
-    assert run_loop(monkeypatch, outcomes) == [25.0, 60.0, 120.0, 300.0, 30.0]
+    assert run_loop(monkeypatch, outcomes) == [60.0, 60.0, 120.0, 300.0, 60.0]
 
 
-def test_pending_history_drains_promptly_then_returns_to_idle_polling(monkeypatch):
+def test_pending_history_does_not_poll_every_second(monkeypatch):
     outcomes = [{'enabled': True, 'more': True}, {'enabled': True}, {'enabled': True}]
-    assert run_loop(monkeypatch, outcomes) == [25.0, 1.0, 30.0]
+    assert run_loop(monkeypatch, outcomes) == [60.0, 60.0, 60.0]
 
 
 def test_history_exceptions_do_not_retry_every_five_seconds(monkeypatch):
-    assert run_loop(monkeypatch, [RuntimeError('offline')] * 4) == [25.0, 60.0, 120.0, 300.0]
+    assert run_loop(monkeypatch, [RuntimeError('offline')] * 4) == [60.0, 60.0, 120.0, 300.0]
 
 
-def run_loop(monkeypatch, outcomes, active=True):
+def test_local_changes_wake_immediately_and_coalesce_during_a_cycle(monkeypatch):
+    event = threading.Event()
+    elapsed = []
+
+    def wait(timeout):
+        elapsed.append(0.0 if event.is_set() else timeout)
+        return event.is_set()
+
+    wake = SimpleNamespace(wait=wait, clear=event.clear, set=event.set)
+    window = SimpleNamespace(_api_sync_wake_event=wake, _rt_timer=Mock())
+    window._wake_background_api_sync = lambda: history.QuoteHistoryWindow._wake_background_api_sync(window)
+    history.QuoteHistoryWindow._on_quote_saved(window)
+
+    def during_cycle(number):
+        if number == 1:
+            # Cambios mientras el worker procesa: un solo despertar pendiente.
+            for _ in range(3):
+                window._wake_background_api_sync()
+
+    run_loop(monkeypatch, [{'enabled': True}] * 3,
+             wake_event=wake, during_cycle=during_cycle)
+    assert elapsed == [0.0, 0.0, 60.0]
+
+
+def run_loop(monkeypatch, outcomes, active=True, wake_event=None, during_cycle=None):
     waits = []
     stop = SimpleNamespace(is_set=lambda: len(waits) >= len(outcomes))
-    wake = SimpleNamespace(wait=lambda timeout: waits.append(timeout), clear=lambda: None)
+    wake = wake_event or SimpleNamespace(wait=lambda timeout: waits.append(timeout), clear=lambda: None)
     signal = SimpleNamespace(emit=lambda *_: None)
     window = SimpleNamespace(_api_sync_stop_event=stop, _api_sync_wake_event=wake,
         _shared_sync_active=active, _shared_sync_enabled=True,
@@ -209,6 +234,8 @@ def run_loop(monkeypatch, outcomes, active=True):
     cycle = quote_sync_adapter.run_shared_cycle
     def run(*args):
         completed[0] += 1
+        if during_cycle:
+            during_cycle(completed[0])
         return cycle(*args)
     stop.is_set = lambda: completed[0] >= len(outcomes)
     monkeypatch.setattr(quote_sync_adapter, 'run_shared_cycle', run)

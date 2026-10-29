@@ -116,6 +116,16 @@ def resolve_historical_quote_owner(
     return historical_username or current_username, historical_id or current_id
 
 
+def require_quote_read_access(header: Mapping[str, Any]) -> None:
+    if header.get('sync_owner_id') and (
+        not header.get('sync_current_owner_id') or (
+            str(header['sync_owner_id']) != str(header['sync_current_owner_id'])
+            and not header.get('sync_is_recipient')
+        )
+    ):
+        raise ValueError('Esta cotización no está compartida con el usuario actual.')
+
+
 def quote_context_from_header(
     header: Mapping[str, Any],
     *,
@@ -156,7 +166,16 @@ def quote_context_from_header(
 
 
 def duplicate_quote_context(header: Mapping[str, Any], manager: Any) -> QuoteContext:
-    historical = quote_context_from_header(header, catalog_manager=manager)
+    if header.get('sync_is_recipient'):
+        scope, _ = resolve_historical_quote_scope(header, manager.available_scopes,
+                                                 default_country_code=historical_country_code(header))
+        if scope is None:
+            raise ValueError('El país y empresa históricos no están asignados.')
+        historical = QuoteContext(scope=scope, username=str(manager.username),
+            id_cotizador=str(manager.id_cotizador), base_currency=str(header.get('base_currency') or ''),
+            preserve_historical_currency=True)
+    else:
+        historical = quote_context_from_header(header, catalog_manager=manager)
     return QuoteContext(
         scope=historical.scope,
         username=str(manager.username),

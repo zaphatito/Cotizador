@@ -74,8 +74,13 @@ def sync_quote_key(value: object, country: object, installation: object) -> str 
     installation = str(installation or '').strip().upper()
     if not country or not re.fullmatch(r'[A-Z0-9]+', installation):
         return None
-    if code.startswith(country + '-'):
-        code = code[len(country) + 1:]
+    # SQLite usa BO y los números históricos usan BOL. Ambos identifican
+    # Bolivia; conservar la comparación estricta para otros países/series.
+    country_prefixes = ('BO', 'BOL') if country in ('BO', 'BOL') else (country,)
+    for prefix in country_prefixes:
+        if code.startswith(prefix + '-'):
+            code = code[len(prefix) + 1:]
+            break
     if code.startswith(installation + '-'):
         code = code[len(installation) + 1:]
     if not re.fullmatch(r'\d+', code):

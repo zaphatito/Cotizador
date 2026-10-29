@@ -1265,15 +1265,18 @@ def list_quotes(
             if username and installation and _has_column(con, 'quotes', 'id_cotizador'):
                 from src.quote_code import sync_quote_key
                 con.create_function('cotizador_quote_key', 3, sync_quote_key, deterministic=True)
-                where.extend(['upper(trim(q.cotizador_username))=?', 'upper(trim(q.id_cotizador))=?',
-                    'cotizador_quote_key(q.quote_no,q.country_code,q.id_cotizador) IS NOT NULL'])
-                params.extend([username, installation])
+                where.append('''((upper(trim(q.cotizador_username))=? AND upper(trim(q.id_cotizador))=?
+                    AND cotizador_quote_key(q.quote_no,q.country_code,q.id_cotizador) IS NOT NULL)
+                    OR EXISTS(SELECT 1 FROM quote_sync_document sd JOIN quote_sync_recipient sr
+                        ON sr.quote_uuid=sd.quote_uuid WHERE sd.quote_id=q.id AND sr.recipient_owner_id=?))''')
+                params.extend([username, installation, str(caps['owner_id'])])
             scopes = caps.get('scopes', [])
             scope_sql = ' OR '.join('(sd.country_code=? AND sd.company_type=?)' for _ in scopes) or '0'
             where.append(f'''(NOT EXISTS(SELECT 1 FROM quote_sync_document sd WHERE sd.quote_id=q.id)
                 OR EXISTS(SELECT 1 FROM quote_sync_document sd WHERE sd.quote_id=q.id
-                    AND sd.owner_id=? AND ({scope_sql})))''')
-            params.append(str(caps['owner_id']))
+                    AND (sd.owner_id=? OR EXISTS(SELECT 1 FROM quote_sync_recipient sr
+                        WHERE sr.quote_uuid=sd.quote_uuid AND sr.recipient_owner_id=?)) AND ({scope_sql})))''')
+            params.extend([str(caps['owner_id']), str(caps['owner_id'])])
             for scope in scopes:
                 params.extend([scope['country_code'], scope['company_type']])
 
@@ -1304,6 +1307,10 @@ def list_quotes(
         cliente_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cliente'),{cliente_expr})"
         cedula_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cedula'),{cedula_expr})"
         telefono_expr = f"COALESCE(json_extract(qcs.snapshot,'$.telefono'),{telefono_expr})"
+    sync_fields = "'' AS sync_origin"
+    if _table_exists(con, 'quote_sync_document'):
+        client_join += ' LEFT JOIN quote_sync_document sync_document ON sync_document.quote_id=q.id'
+        sync_fields = "json_extract(sync_document.remote_document,'$.origin') AS sync_origin"
     status_join = "LEFT JOIN quote_statuses qs ON qs.code = q.estado" if (has_estado and has_status_catalog) else ""
 
     quote_tail = (
@@ -1613,6 +1620,7 @@ def list_quotes(
             q.currency_shown,
             {chatbot_value_sql} AS chatbot,
             q.pdf_path,
+            {sync_fields},
             q.deleted_at,
             {items_count_sql} AS items_count
         FROM quotes q
@@ -1718,15 +1726,22 @@ def get_quote_header(con: sqlite3.Connection, quote_id: int, *, include_sync_sna
         if saved_client:
             out.update(json.loads(saved_client[0]))
     if _table_exists(con, "quote_sync_document"):
-        sync = con.execute('SELECT owner_id,quote_uuid,revision,snapshot,completeness FROM quote_sync_document WHERE quote_id=?',
+        import json
+        sync = con.execute('SELECT owner_id,quote_uuid,revision,snapshot,completeness,remote_document FROM quote_sync_document WHERE quote_id=?',
                            (int(quote_id),)).fetchone()
         if sync:
+            out['observations'] = json.loads(sync[3])['header'].get('observations') or ''
             if include_sync_snapshot and sync[4] == 'complete':
                 import json
                 out.update(json.loads(sync[3])['header'])
             out.update(sync_owner_id=sync[0], quote_uuid=sync[1], sync_revision=sync[2])
             configured = con.execute("SELECT value FROM settings WHERE key='shared_quote_sync_owner'").fetchone()
             out['sync_current_owner_id'] = configured[0] if configured else ''
+            envelope = json.loads(sync[5]) if sync[5] else {}
+            out['sync_origin'] = envelope.get('origin')
+            out['sync_is_recipient'] = bool(configured and con.execute(
+                'SELECT 1 FROM quote_sync_recipient WHERE quote_uuid=? AND recipient_owner_id=?',
+                (sync[1], configured[0])).fetchone())
     return out
 
 

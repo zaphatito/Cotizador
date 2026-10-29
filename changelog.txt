@@ -1,15 +1,29 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.45
-Fecha: 2026-09-15
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+Versión: 2.0.50
+Fecha: 2026-10-29
 
 Resumen
-- Etiquetas de BASE01 en Bolivia con 1 litro por unidad cotizada.
+- Integra los precios comerciales revisados por país y las mejoras pendientes del histórico compartido.
 
-Mejoras
-- BASE01 aparece en la ventana de etiquetas de Bolivia, incluso si el catálogo lo clasifica como producto unitario.
-- Cada unidad genera por defecto una etiqueta de 1 L; dos unidades generan dos etiquetas de 1 L.
-- Las cantidades de BASE01 se muestran e imprimen en litros. Los demás productos conservan sus etiquetas en gramos.
+Precios y descuentos
+- Redondeo decimal a dos decimales antes de multiplicar, con mitades hacia arriba.
+- Paraguay y Bolivia conservan el descuento monetario exacto; Perú mantiene sus reglas.
+- Efectivo en Paraguay respeta el 99% sin retirar todo el descuento y restaura el porcentaje al desactivarlo.
+- Los precios mínimos positivos que redondean a cero no saltan al máximo al cambiar la cantidad.
+- El envío de productos por peso de Venezuela conserva los gramos y el importe del editor.
+- Se comprobaron los catálogos recibidos de Perú, Paraguay y Bolivia contra main.
 
-Compatibilidad
-- No requiere cambios de API ni migraciones de base de datos.
-- Se conservan las reglas de precios y cantidades de las cotizaciones y el comportamiento de otros países.
+Histórico y PDF
+- Incorpora cotizaciones recibidas desde el catálogo para destinatarios autorizados sin cambiar el autor.
+- Los destinatarios consultan el documento original y crean una copia propia para editarlo.
+- Conserva observaciones, importes, moneda, fecha y contexto de las cotizaciones recibidas.
+- Genera localmente los PDF ausentes en segundo plano y publica el archivo de forma atómica.
+- Los PDF y tickets permanecen en cada dispositivo; no se transfieren como adjuntos al servidor.
+- Los recibos de sincronización se reintentan después del guardado local.
+
+Distribución y compatibilidad
+- Publicación normal de producción con actualizaciones automáticas; el perfil piloto sigue sin actualizaciones.
+- Conserva la identidad del instalador habitual y los datos locales durante la actualización.
+- Incluye la migración SQLite 47 para destinatarios y recibos del histórico compartido.
+- Las funciones nuevas del histórico compartido requieren un EFAPI compatible y permisos habilitados.
+- Esta entrega no aplica migraciones ni modifica la base PostgreSQL del servidor.

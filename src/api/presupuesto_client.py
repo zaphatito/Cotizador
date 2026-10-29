@@ -42,7 +42,6 @@ from sqlModels.settings_repo import get_setting, set_setting
 from ..db_path import resolve_db_path
 from ..config import APP_CONFIG, currency_for_country
 from ..country_rules import country_code_for, country_profile
-from ..pricing import discount_from_amount, discount_percentage_decimals, round_discount_percentage
 from ..logging_setup import get_logger
 from ..paths import resolve_pdf_path_portable
 from ..product_rules import uses_gram_quantity
@@ -227,11 +226,11 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
 
     country = str(cod_pais or "").strip().upper()
 
-    # Paraguay recibe gramos enteros para todos los productos por peso,
+    # PY y VE reciben gramos enteros para todos los productos por peso,
     # incluidos los que llegan con categoria genérica y departamento
     # DILUYENTES. La excepción de productos por unidad vive en la regla
     # compartida y por eso no se duplica aquí.
-    if country == "PY" and uses_gram_quantity(item, country="PARAGUAY"):
+    if country in {"PY", "VE"} and uses_gram_quantity(item, country=country):
         grams = int(round(qty * 50.0))
         if qty > 0 and grams <= 0:
             return 1
@@ -242,8 +241,6 @@ def _quantity_for_api(item: dict, *, cod_pais: str) -> int | float:
 
 def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[dict]:
     out: list[dict] = []
-    discount_country = str(cod_pais or "").strip().upper()
-    integer_discount = discount_percentage_decimals(discount_country) == 0
     for it in (items_base or []):
         tipo_prod = _tipo_prod_from_item(it)
         nombre = str(it.get("nombre") or it.get("producto") or "").strip()
@@ -254,24 +251,8 @@ def _build_presupuesto_items(items_base: list[dict], *, cod_pais: str) -> list[d
             nombre = "ITEM"
         descuento_pct = float(nz(it.get("descuento_pct"), 0.0))
         descuento_monto = float(nz(it.get("descuento_monto"), 0.0))
-        if integer_discount:
-            subtotal_base = float(nz(it.get("subtotal_base"), 0.0))
-            if subtotal_base <= 0:
-                precio_base = float(nz(it.get("precio"), 0.0))
-                cantidad_base = float(nz(it.get("cantidad"), 0.0))
-                factor_total = float(nz(it.get("factor_total"), 1.0))
-                subtotal_base = max(0.0, precio_base * cantidad_base * factor_total)
-            discount_mode = str(it.get("descuento_mode") or "").strip().lower()
-            if discount_mode == "amount" or (descuento_monto > 0 and descuento_pct <= 0):
-                descuento_pct, descuento_monto = discount_from_amount(
-                    subtotal_base,
-                    descuento_monto,
-                    discount_country,
-                )
-            else:
-                descuento_pct = round_discount_percentage(descuento_pct, discount_country)
-                if subtotal_base > 0:
-                    descuento_monto = subtotal_base * descuento_pct / 100.0
+        # El snapshot comercial ya fue calculado por el editor. Recalcular
+        # desde el porcentaje pierde importes y altera cotizaciones históricas.
         out.append(
             {
                 "codigo": str(it.get("codigo") or ""),
@@ -596,43 +577,6 @@ def _infer_tipo_documento_for_api(doc_cliente: str, cod_pais: str) -> str:
     )
 
 
-def _build_adjunto_entry(path: str) -> dict[str, str]:
-    filename = os.path.basename(path)
-    ext = os.path.splitext(filename)[1].lstrip(".").strip().lower()
-
-    mime_map = {
-        "pdf": "application/pdf",
-        "cmd": "text/plain",
-    }
-    mime = mime_map.get(ext) or "application/octet-stream"
-    tipo = ext or "bin"
-
-    return {
-        "tipo": tipo,
-        "nombre_archivo": filename,
-        "mime_type": mime,
-        "extension": ext or "bin",
-    }
-
-
-def _adjunto_field_name_from_extension(ext: str) -> str:
-    e = str(ext or "").strip().lower()
-    if e == "pdf":
-        return "adjunto_pdf"
-    if e == "cmd":
-        return "adjunto_cmd"
-    return f"adjunto_{e or 'bin'}"
-
-
-def _build_adjunto_source(path: str) -> dict[str, Any]:
-    meta = _build_adjunto_entry(path)
-    return {
-        "field_name": _adjunto_field_name_from_extension(meta.get("extension", "")),
-        "path": str(path or ""),
-        "meta": meta,
-    }
-
-
 def _resolve_app_version() -> str:
     try:
         from ..version import __version__
@@ -814,131 +758,9 @@ def _build_cotizador_verification_payload(
 
 def _ticket_cmd_path_from_pdf(pdf_path: str) -> str:
     if not pdf_path:
-        return ""
-    abs_pdf = os.path.abspath(pdf_path)
-    pdf_folder = os.path.dirname(abs_pdf)
-    base = os.path.splitext(os.path.basename(abs_pdf))[0]
-    if not base:
-        return ""
-    return os.path.join(pdf_folder, "tickets", f"{base}.IMPRIMIR_TICKET.cmd")
-
-
-def _build_adjunto_sources_for_quote(header: dict[str, Any]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    pdf_path = resolve_pdf_path_portable(header.get("pdf_path"))
-    if pdf_path:
-        abs_pdf = os.path.abspath(pdf_path)
-        if os.path.exists(abs_pdf):
-            seen.add(abs_pdf.lower())
-            out.append(_build_adjunto_source(abs_pdf))
-
-        cmd_path = _ticket_cmd_path_from_pdf(abs_pdf)
-        if cmd_path:
-            abs_cmd = os.path.abspath(cmd_path)
-            key = abs_cmd.lower()
-            if os.path.exists(abs_cmd) and key not in seen:
-                seen.add(key)
-                out.append(_build_adjunto_source(abs_cmd))
-
-    return out
-
-
-def _build_adjuntos_for_quote(header: dict[str, Any]) -> list[dict[str, str]]:
-    return [dict(src.get("meta") or {}) for src in _build_adjunto_sources_for_quote(header)]
-
-
-def _validate_required_adjunto_sources(sources: list[dict[str, Any]]) -> None:
-    fields = {str((x or {}).get("field_name") or "").strip().lower() for x in (sources or [])}
-    missing: list[str] = []
-    if "adjunto_pdf" not in fields:
-        missing.append("adjunto_pdf (.pdf)")
-    if "adjunto_cmd" not in fields:
-        missing.append("adjunto_cmd (.cmd)")
-    if missing:
-        raise PresupuestoApiError(
-            "Faltan archivos requeridos para envio multipart: " + ", ".join(missing)
-        )
-
-
-def _multipart_boundary() -> str:
-    return f"----CotizadorBoundary{os.urandom(12).hex()}"
-
-
-def _header_param_safe(value: str) -> str:
-    return str(value or "").replace("\\", "\\\\").replace("\"", "'")
-
-
-def _read_adjunto_file_parts(adjunto_files: list[dict[str, str]] | None) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for entry in (adjunto_files or []):
-        path = os.path.abspath(str((entry or {}).get("path") or "").strip())
-        if not path:
-            continue
-        if not os.path.exists(path):
-            log.warning("Adjunto no existe y se omitira del multipart: %s", path)
-            continue
-
-        filename = str((entry or {}).get("filename") or os.path.basename(path))
-        field_name = str((entry or {}).get("field_name") or "").strip() or "adjunto_bin"
-        mime_type = str((entry or {}).get("mime_type") or "application/octet-stream").strip()
-
-        try:
-            with open(path, "rb") as f:
-                content = f.read()
-        except Exception as exc:
-            log.warning("No se pudo leer adjunto %s: %s", path, exc)
-            continue
-
-        out.append(
-            {
-                "field_name": field_name,
-                "filename": filename,
-                "mime_type": mime_type,
-                "content": content,
-            }
-        )
-    return out
-
-
-def _build_multipart_form_data(
-    *,
-    presupuesto_json: str,
-    files: list[dict[str, Any]],
-) -> tuple[bytes, str]:
-    boundary = _multipart_boundary()
-    b = bytearray()
-    br = "\r\n"
-
-    b.extend(f"--{boundary}{br}".encode("utf-8"))
-    b.extend(f'Content-Disposition: form-data; name="presupuesto"{br}'.encode("utf-8"))
-    b.extend(f"Content-Type: application/json; charset=utf-8{br}{br}".encode("utf-8"))
-    b.extend(str(presupuesto_json or "").encode("utf-8"))
-    b.extend(br.encode("utf-8"))
-
-    for fpart in (files or []):
-        field_name = _header_param_safe(str(fpart.get("field_name") or "adjunto_bin"))
-        filename = _header_param_safe(str(fpart.get("filename") or "archivo.bin"))
-        mime_type = str(fpart.get("mime_type") or "application/octet-stream").strip()
-        content = fpart.get("content")
-        if not isinstance(content, (bytes, bytearray)):
-            content = bytes(str(content or ""), encoding="utf-8")
-
-        b.extend(f"--{boundary}{br}".encode("utf-8"))
-        b.extend(
-            (
-                f'Content-Disposition: form-data; name="{field_name}"; '
-                f'filename="{filename}"{br}'
-            ).encode("utf-8")
-        )
-        b.extend(f"Content-Type: {mime_type}{br}{br}".encode("utf-8"))
-        b.extend(bytes(content))
-        b.extend(br.encode("utf-8"))
-
-    b.extend(f"--{boundary}--{br}".encode("utf-8"))
-    content_type = f"multipart/form-data; boundary={boundary}"
-    return bytes(b), content_type
+        return ''
+    folder, filename = os.path.split(os.path.abspath(pdf_path))
+    return os.path.join(folder, 'tickets', f'{os.path.splitext(filename)[0]}.IMPRIMIR_TICKET.cmd')
 
 
 def build_presupuesto_payload(
@@ -961,7 +783,6 @@ def build_presupuesto_payload(
     user_api: str = "",
     telemarketing: bool = False,
     chatbot: bool = False,
-    adjuntos: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     presupuesto_items = _build_presupuesto_items(items_base, cod_pais=cod_pais)
     user_for_payload = _require_functional_username(
@@ -991,7 +812,6 @@ def build_presupuesto_payload(
             "cantidad_items": int(len(presupuesto_items)),
             "presupuesto_prod": presupuesto_items,
         },
-        "adjuntos": list(adjuntos or []),
     }
 
 
@@ -1801,8 +1621,6 @@ def login_and_send_presupuesto(
     tipo_documento: str = "",
     chatbot: bool = False,
     items_base: list[dict],
-    adjuntos: list[dict[str, str]] | None = None,
-    adjunto_files: list[dict[str, str]] | None = None,
     login_password: str | None = None,
     context: Any = None,
 ) -> dict[str, Any]:
@@ -1834,7 +1652,6 @@ def login_and_send_presupuesto(
         chatbot=bool(chatbot),
         id_cotizador=_extract_id_cotizador(quote_code, store_id),
         items_base=items_base,
-        adjuntos=adjuntos,
     )
 
     # Contrato principal: enviar solo el objeto "presupuesto" (plano).
@@ -2117,6 +1934,7 @@ def _regenerate_quote_artifacts(
         "subtotal_bruto": float(nz(header.get("subtotal_bruto_shown"), 0.0)),
         "descuento_total": float(nz(header.get("descuento_total_shown"), 0.0)),
         "total_general": float(nz(header.get("total_neto_shown"), 0.0)),
+        "observations": header.get("observations") or "",
     }
     generated_pdf = generar_pdf(
         datos,
