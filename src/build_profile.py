@@ -26,6 +26,4 @@ SHOW_EVENT_NAME = (
 
 
 def automatic_updates_allowed() -> bool:
-    # Edición de precios: actualización exclusivamente mediante instalador.
-    # No depende de settings remotos ni de preferencias guardadas en SQLite.
-    return False
+    return not IS_PILOT

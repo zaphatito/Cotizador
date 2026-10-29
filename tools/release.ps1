@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet("major","mayor","minor","patch")]
   [string]$Bump = "patch",
   [string]$RepoUser = "zaphatito",
@@ -166,6 +166,14 @@ function Set-ContentUtf8NoBOM([string]$Path, [string]$Text) {
 }
 
 function Remove-Dir-Robust([string]$path) {
+  $resolved = [System.IO.Path]::GetFullPath($path)
+  $workspacePrefix = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') + '\'
+  $buildPrefix = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Cotizador')).TrimEnd('\') + '\'
+  if (-not $resolved.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+      -not $resolved.StartsWith($buildPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "La limpieza queda fuera de los directorios de build permitidos: $resolved"
+  }
+  $path = $resolved
   if (!(Test-Path $path)) { return }
   try { attrib -r -s -h "$path" /s /d 2>$null } catch {}
   for ($i=0; $i -lt 6; $i++) {
@@ -458,7 +466,7 @@ Write-Host "OK: changelog actualizado (Versión/Fecha) -> $changelogPath"
 
 # 2) patch .iss
 $issFull = Join-Path $ProjectRoot $IssPath
-$issTxt  = Get-Content -Raw $issFull
+$issTxt  = Read-TextAuto -Path $issFull
 $issTxt  = $issTxt -replace '#define\s+MyAppVersion\s+"[^"]+"', "#define MyAppVersion `"$next`""
 $projectRootIss = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd("\")
 $buildDirIss = Join-Path $projectRootIss "dist\SistemaCotizaciones"
@@ -468,7 +476,8 @@ $manifestUrl = "https://github.com/$RepoUser/$RepoName/releases/latest/download/
 if ($issTxt -match '#define\s+UpdateManifestUrl\s+"[^"]+"') {
   $issTxt = $issTxt -replace '#define\s+UpdateManifestUrl\s+"[^"]+"', "#define UpdateManifestUrl `"$manifestUrl`""
 }
-Set-Content -Path $issFull -Value $issTxt -Encoding UTF8
+# Inno Setup y Windows PowerShell 5.1 deben reconocer UTF-8 sin depender del locale.
+Set-ContentUtf8BOM -Path $issFull -Text $issTxt
 
 $appConfigPath = Join-Path $ProjectRoot "config\config.json"
 if (Test-Path $appConfigPath) {

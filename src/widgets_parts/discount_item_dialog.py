@@ -9,7 +9,13 @@ from PySide6.QtWidgets import (
 
 from ..config import convert_from_base
 from ..pricing import discount_percentage_decimals
-from ..lcdp_pricing import line_discount, line_subtotal, money, percentage_from_entered_amount
+from ..lcdp_pricing import (
+    line_discount,
+    line_subtotal,
+    money,
+    percentage_from_entered_amount,
+    preserves_discount_amount,
+)
 from ..utils import fmt_money_ui
 
 
@@ -71,12 +77,12 @@ def show_discount_dialog_for_item(
             if source == "pct":
                 method, percent, amt = "percent", pct.value(), 0
             else:
-                method = "percent"
+                method = "amount" if preserves_discount_amount(country) else "percent"
                 amt = amount.value() / rate if source == "amt" else subtotal - final.value() / rate
-                percent = percentage_from_entered_amount(subtotal, amt)
+                percent = 0 if method == "amount" else percentage_from_entered_amount(subtotal, amt)
             percentage, discount, total = line_discount(subtotal, method, percent, amt, country)
             mode["value"] = method
-            # El porcentaje redondeado determina el importe disponible.
+            # PY/BO conservan el importe; PE/VE ajustan al porcentaje entero.
             for field in (pct, amount, final):
                 field.blockSignals(True)
             pct.setValue(percentage)

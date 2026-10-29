@@ -2429,6 +2429,12 @@ def mig_46(con: sqlite3.Connection) -> None:
     install(con)
 
 
+def mig_47(con: sqlite3.Connection) -> None:
+    """Destinatarios autorizados del histórico compartido, sin cambiar el autor."""
+    from .quote_sync_repo import install
+    install(con)
+
+
 MIGRATIONS: dict[int, callable] = {
     1: mig_1,
     2: mig_2,
@@ -2476,4 +2482,5 @@ MIGRATIONS: dict[int, callable] = {
     44: mig_44,
     45: mig_45,
     46: mig_46,
+    47: mig_47,
 }

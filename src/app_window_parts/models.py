@@ -1,7 +1,14 @@
 # src/models.py
 import re
 
-from ..lcdp_pricing import money, line_subtotal, line_discount, validate_line_minimum, percentage_from_entered_amount
+from ..lcdp_pricing import (
+    money,
+    line_subtotal,
+    line_discount,
+    validate_line_minimum,
+    percentage_from_entered_amount,
+    preserves_discount_amount,
+)
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QBrush, QFont
@@ -143,7 +150,9 @@ def _first_from_aliases(d: dict, aliases: list[str]) -> float:
         try:
             v = float(nz(d.get(k), 0.0))
             if v > 0:
-                return money(v)
+                # Un precio positivo que redondea a cero sigue siendo válido.
+                # Redondear al normalizar la línea, antes de multiplicar.
+                return v
         except Exception:
             continue
     return 0.0
@@ -519,8 +528,8 @@ class ItemsModel(QAbstractTableModel):
             pct = 0.0
         if pct < 0:
             pct = 0.0
-        if pct > 100:
-            pct = 100.0
+        if pct > 99:
+            pct = 99.0
         return pct
 
     def _maybe_snap_override_to_tier(self, it: dict, unit_price: float) -> float:
@@ -620,7 +629,12 @@ class ItemsModel(QAbstractTableModel):
             d_monto = float(nz(it.get("descuento_monto"), 0.0))
             cur_total_pct = self._effective_discount_pct(subtotal, mode, d_pct, d_monto)
 
-            user_pct = max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT)
+            # Al alcanzar el tope, restar el descuento de efectivo pierde
+            # parte del descuento original. Conservar el porcentaje guardado.
+            user_pct = float(nz(
+                it.get("_py_user_disc_pct"),
+                max(0.0, float(cur_total_pct) - PY_CASH_BASE_PCT),
+            ))
             user_pct = self._clamp_pct(user_pct)
 
             it["_py_user_disc_pct"] = user_pct
@@ -961,7 +975,7 @@ class ItemsModel(QAbstractTableModel):
 
             mode = (value.get("mode") or "").lower()
 
-            if mode == "amount":
+            if mode == "amount" and not preserves_discount_amount(self.country):
                 try:
                     value = {"mode": "percent", "percent": percentage_from_entered_amount(
                         subtotal, value.get("amount", 0)
@@ -976,16 +990,21 @@ class ItemsModel(QAbstractTableModel):
                     total_pct = 0.0
                 elif mode == "percent":
                     try:
-                        total_pct = float(nz(value.get("percent"), 0.0))
-                    except Exception:
-                        total_pct = 0.0
+                        total_pct = float(value.get("percent", 0))
+                    except (TypeError, ValueError):
+                        return False
+                    if not 0 <= total_pct <= 99:
+                        self.toast_requested.emit("El descuento debe estar entre 0 y 99%")
+                        return False
                 elif mode == "amount":
                     try:
-                        amt = float(nz(value.get("amount"), 0.0))
-                    except Exception:
-                        amt = 0.0
-                    amt = max(0.0, min(amt, subtotal))
-                    total_pct = (amt / subtotal) * 100.0 if subtotal > 0 else 0.0
+                        total_pct, _, _ = line_discount(
+                            subtotal, "amount", amount=value.get("amount", 0),
+                            country=self.country,
+                        )
+                    except (ValueError, TypeError) as exc:
+                        self.toast_requested.emit(str(exc))
+                        return False
                 else:
                     return False
 

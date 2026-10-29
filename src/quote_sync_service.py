@@ -36,6 +36,11 @@ class QuoteSyncService:
         self.id_cotizador = str(id_cotizador).strip().upper()
 
     def _belongs_to_identity(self, remote):
+        access = remote.get('access') or {}
+        if (access.get('relation') == 'recipient'
+                and str(access.get('recipient_owner_id')) == self.owner_id
+                and access.get('can_edit') is False):
+            return True
         if not self.functional_username and not self.id_cotizador:
             return True
         from .quote_code import sync_quote_key
@@ -79,6 +84,9 @@ class QuoteSyncService:
                     result['more'] = result['more'] or bool(page.get('has_more'))
                 finally:
                     con.close()
+                # Receipt follows the local commit and survives failed delivery.
+                if hasattr(self.transport, 'receipt'):
+                    self._send_receipts(country, company)
             except (SyncFailure, OSError, ValueError) as exc:
                 result['failed'] += 1
                 result['offline'] = result['offline'] or isinstance(exc, OSError) or (
@@ -89,6 +97,25 @@ class QuoteSyncService:
         finally:
             con.close()
         return result
+
+    def _send_receipts(self, country, company):
+        con = self.connect()
+        try:
+            pending = con.execute('''SELECT r.quote_uuid,r.revision FROM quote_sync_receipt r
+                JOIN quote_sync_document d ON d.quote_uuid=r.quote_uuid
+                WHERE r.owner_id=? AND d.country_code=? AND d.company_type=? LIMIT 25''',
+                (self.owner_id, country, company)).fetchall()
+        finally:
+            con.close()
+        for quote_uuid, revision in pending:
+            self.transport.receipt(dict(pid=self.pid, quote_uuid=quote_uuid, revision=revision))
+            con = self.connect()
+            try:
+                with tx(con, immediate=True):
+                    con.execute('DELETE FROM quote_sync_receipt WHERE quote_uuid=? AND owner_id=? AND revision=?',
+                                (quote_uuid, self.owner_id, revision))
+            finally:
+                con.close()
 
     def _send_one(self, country, company, result):
         con = self.connect()

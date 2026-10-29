@@ -5,7 +5,7 @@ Se redondea precio, bruto y total; el descuento es bruto menos total.
 """
 from decimal import Decimal, ROUND_HALF_UP
 
-from .country_rules import country_profile
+from .country_rules import country_profile, normalize_country_name
 
 
 def money(value) -> float:
@@ -17,6 +17,11 @@ def money(value) -> float:
 
 def line_subtotal(price, quantity, factor=1) -> float:
     return money(Decimal(str(money(price))) * Decimal(str(quantity)) * Decimal(str(factor)))
+
+
+def preserves_discount_amount(country) -> bool:
+    """PY y BO conservan el importe introducido, sin convertirlo a un % entero."""
+    return normalize_country_name(country) in {"PARAGUAY", "BOLIVIA"}
 
 
 def percentage_from_entered_amount(subtotal, amount) -> float:

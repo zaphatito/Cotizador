@@ -1,4 +1,4 @@
-; Distribución independiente. No reutiliza AppId, carpetas ni desinstalador de producción.
+﻿; Distribución independiente. No reutiliza AppId, carpetas ni desinstalador de producción.
 #ifndef ProjectRoot
   #error ProjectRoot es obligatorio
 #endif

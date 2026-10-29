@@ -37,6 +37,7 @@ skills-lock.json
 # Pruebas locales (no versionar)
 /tests/*
 !/tests/test_shared_quote_sync.py
+!/tests/test_catalogue_shared_quotes.py
 !/tests/shared_quote_crossstack.py
 !/tests/test_shared_history_ui.py
 /tmp/
@@ -49,6 +50,7 @@ skills-lock.json
 !/tests/test_multicountry_regressions.py
 !/tests/test_multicountry_windows.py
 !/tests/test_pdf_context_isolation.py
+!/tests/test_regional_pdf_history.py
 !/tests/test_window_currency_context.py
 !/tests/test_peru_base_units.py
 !/tests/test_bolivia_base_labels.py
@@ -59,3 +61,5 @@ skills-lock.json
 !/tests/test_lcdp_pricing.py
 
 /Output/precios/
+/Output/catalogo/
+!/tests/test_update_policy.py

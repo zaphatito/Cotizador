@@ -12,7 +12,7 @@ from .quote_sync_service import SyncFailure
 HEADER_FIELDS = ('country_code company_type quote_no cotizador_username id_cotizador '
     'created_at cliente cedula tipo_documento telefono direccion email estado metodo_pago '
     'chatbot base_currency currency_shown tasa_shown subtotal_bruto_base descuento_total_base '
-    'total_neto_base subtotal_bruto_shown descuento_total_shown total_neto_shown').split()
+    'total_neto_base subtotal_bruto_shown descuento_total_shown total_neto_shown observations').split()
 
 
 def snapshot_for(con, quote_id):
@@ -27,6 +27,7 @@ def snapshot_for(con, quote_id):
     for key in ('country_code', 'company_type', 'base_currency', 'cotizador_username', 'id_cotizador'):
         snapshot['header'][key] = raw.get(key)
     snapshot['header']['chatbot'] = bool(header.get('chatbot'))
+    snapshot['header']['observations'] = header.get('observations') or ''
     if snapshot['header']['company_type'] == 'LCDP':
         snapshot['header']['company_type'] = 'LA CASA DEL PERFUME'
     if not base or raw.get('quote_no_status') not in ('confirmed', None, ''):
@@ -125,7 +126,7 @@ def materialize(con, remote, quote_id):
     h = snapshot['header']
     previous_header = get_quote_header(con, quote_id, include_sync_snapshot=False) if quote_id is not None else {}
     if quote_id is None:
-        args = {key: h.get(key, '') for key in HEADER_FIELDS if key != 'estado'}
+        args = {key: h.get(key, '') for key in HEADER_FIELDS if key not in ('estado', 'observations')}
         con.execute('CREATE TEMP TABLE quote_sync_importing(marker INTEGER)')
         try:
             quote_id = insert_quote(con, **args, pdf_path='',
@@ -159,7 +160,7 @@ def materialize(con, remote, quote_id):
         'cotizador_username', 'id_cotizador', 'created_at']
     # Estado, pago y origen web son metadata del histórico, no contenido del PDF.
     rendered_fields = stable_columns + ['cliente', 'cedula', 'tipo_documento',
-        'telefono', 'direccion', 'email']
+        'telefono', 'direccion', 'email', 'observations']
     def rendered_value(header, key):
         value = header.get(key) or ''
         return 'LA CASA DEL PERFUME' if key == 'company_type' and value == 'LCDP' else value
@@ -207,6 +208,10 @@ class EfapiQuoteTransport:
     def get(self, payload):
         from .api.cases import API_CASE_GET_QUOTE_SYNC
         return self._post(API_CASE_GET_QUOTE_SYNC, payload)
+
+    def receipt(self, payload):
+        from .api.cases import API_CASE_POST_CATALOGUE_QUOTE_RECEIPT
+        return self._post(API_CASE_POST_CATALOGUE_QUOTE_RECEIPT, payload)
 
 
 def projection(snapshot):

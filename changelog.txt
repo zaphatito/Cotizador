@@ -1,28 +1,29 @@
-﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
+SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
 Versión: 2.0.50
-Fecha: 2026-09-16
+Fecha: 2026-10-29
 
 Resumen
-- Ajustes de sincronización del histórico y recuperación de PDF para reimprimir tickets.
+- Integra los precios comerciales revisados por país y las mejoras pendientes del histórico compartido.
 
-Mejoras
-- La sincronización automática espera un minuto entre ciclos; los cambios locales mantienen el despertar inmediato.
-- Activar la ventana no dispara consultas adicionales; los fallos conservan la espera progresiva.
-- Reimprimir un ticket recupera el PDF ausente y usa país, empresa e instalación de la cotización histórica.
-- Las conexiones se cierran incluso si falla la lectura del histórico o la generación del ticket.
-- En Bolivia, ingresar 50 conserva una cantidad de 50 y calcula cantidad por precio unitario.
-- Bolivia muestra y edita cantidades enteras: 200 en lugar de 200.000; rechaza fracciones sin cambiar el subtotal.
-- Los productos comienzan con cantidad 1 y las recomendaciones conservan cantidades enteras.
-- Editor, asistente, vista previa, PDF, ticket, etiquetas y envío conservan la misma cantidad.
-- Perú mantiene su conversión de gramos a kilos; Paraguay y Venezuela conservan sus reglas.
-- El histórico reconoce BO y BOL como el mismo país al validar el número de cotización.
-- Las cotizaciones existentes vuelven a mostrarse sin modificar sus datos ni los filtros de usuario e instalación.
-- El histórico muestra los PDF locales cuya referencia quedó vacía, identificándolos por país, instalación, número y cliente.
-- Cambiar estado, pago u origen de la cotización conserva la referencia al PDF.
-- Los cambios de contenido siguen regenerando el documento al abrirlo.
-- Se retiran las columnas de país/empresa y sincronización, el informe y la etiqueta inferior de sincronización.
-- La sincronización en segundo plano conserva su funcionamiento.
+Precios y descuentos
+- Redondeo decimal a dos decimales antes de multiplicar, con mitades hacia arriba.
+- Paraguay y Bolivia conservan el descuento monetario exacto; Perú mantiene sus reglas.
+- Efectivo en Paraguay respeta el 99% sin retirar todo el descuento y restaura el porcentaje al desactivarlo.
+- Los precios mínimos positivos que redondean a cero no saltan al máximo al cambiar la cantidad.
+- El envío de productos por peso de Venezuela conserva los gramos y el importe del editor.
+- Se comprobaron los catálogos recibidos de Perú, Paraguay y Bolivia contra main.
 
-Compatibilidad
-- No requiere cambios de API ni migraciones de base de datos.
-- Esta versión pública conserva las reglas de precios vigentes.
+Histórico y PDF
+- Incorpora cotizaciones recibidas desde el catálogo para destinatarios autorizados sin cambiar el autor.
+- Los destinatarios consultan el documento original y crean una copia propia para editarlo.
+- Conserva observaciones, importes, moneda, fecha y contexto de las cotizaciones recibidas.
+- Genera localmente los PDF ausentes en segundo plano y publica el archivo de forma atómica.
+- Los PDF y tickets permanecen en cada dispositivo; no se transfieren como adjuntos al servidor.
+- Los recibos de sincronización se reintentan después del guardado local.
+
+Distribución y compatibilidad
+- Publicación normal de producción con actualizaciones automáticas; el perfil piloto sigue sin actualizaciones.
+- Conserva la identidad del instalador habitual y los datos locales durante la actualización.
+- Incluye la migración SQLite 47 para destinatarios y recibos del histórico compartido.
+- Las funciones nuevas del histórico compartido requieren un EFAPI compatible y permisos habilitados.
+- Esta entrega no aplica migraciones ni modifica la base PostgreSQL del servidor.

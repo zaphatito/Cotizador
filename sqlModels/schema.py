@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from .catalog_cache_repo import CATALOG_CACHE_DDL
 from .offline_catalogs_repo import OFFLINE_CATALOG_DDL
+from .quote_sync_repo import DDL as QUOTE_SYNC_DDL
 
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 DDL = [
     # =========================
@@ -425,4 +426,5 @@ DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON quote_items(quote_id)",
     "CREATE INDEX IF NOT EXISTS idx_quote_items_codigo ON quote_items(codigo)",
+    *QUOTE_SYNC_DDL,
 ]

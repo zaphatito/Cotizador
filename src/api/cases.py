@@ -29,6 +29,7 @@ def build_api_cases(base_url: str | None = None) -> tuple[tuple[int, str], ...]:
         (API_CASE_POST_QUOTE_SYNC, f"{root}/db/postCotizacionSync"),
         (API_CASE_GET_QUOTES_SYNC, f"{root}/db/getCotizacionesSync"),
         (API_CASE_GET_QUOTE_SYNC, f"{root}/db/getCotizacionSync"),
+        (API_CASE_POST_CATALOGUE_QUOTE_RECEIPT, f"{root}/db/postCatalogueQuoteReceipt"),
     )
 
 
@@ -45,6 +46,7 @@ API_CASE_GET_COTIZADOR_CATALOG_STOCK: Final[int] = 7
 API_CASE_POST_QUOTE_SYNC: Final[int] = 8
 API_CASE_GET_QUOTES_SYNC: Final[int] = 9
 API_CASE_GET_QUOTE_SYNC: Final[int] = 10
+API_CASE_POST_CATALOGUE_QUOTE_RECEIPT: Final[int] = 12
 
 API_CASES: Final[tuple[tuple[int, str], ...]] = build_api_cases(API_BASE_URL)
 

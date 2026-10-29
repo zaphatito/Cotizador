@@ -1,4 +1,4 @@
-Cotizador Piloto - prueba controlada
+﻿Cotizador Piloto - prueba controlada
 
 Este instalador crea una aplicación independiente del Cotizador habitual.
 No reemplaza, copia ni borra la base de datos existente.
