@@ -3,6 +3,11 @@ Versión: 2.0.51
 Fecha: 2026-10-29
 
 Resumen
+- Los productos del catálogo remoto muestran el nombre corto en el cotizador y en la consulta de stock por tiendas.
+- Si el nombre corto está vacío, se conserva el nombre completo como respaldo.
+- Conserva los nombres de las presentaciones y los datos originales del catálogo almacenado.
+
+Mejoras incluidas en la versión anterior
 - Integra los precios comerciales revisados por país y las mejoras pendientes del histórico compartido.
 
 Precios y descuentos

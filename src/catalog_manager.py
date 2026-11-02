@@ -16,6 +16,7 @@ from .country_rules import country_code_for
 from .db_path import resolve_db_path
 from .logging_setup import get_logger
 from .server_identity import has_complete_server_identity
+from .stock_matrix import item_type_label
 
 
 log = get_logger(__name__)
@@ -87,6 +88,9 @@ def _products_frame(catalog: Mapping[str, Any], matrix: Mapping[str, Any] | None
         if column not in frame.columns:
             frame[column] = ""
         frame[column] = frame[column].fillna("").astype(str).str.strip()
+    frame["nombre"] = frame["nombre_corto"].where(
+        frame["nombre_corto"] != "", frame["nombre"]
+    )
     frame["codigo"] = frame["codigo"].str.upper()
     if bool((frame["codigo"] == "").any()):
         raise ValueError("El catalogo remoto contiene productos sin codigo.")
@@ -679,7 +683,15 @@ class CatalogManager(QObject):
 
     def stock_matrix(self, scope: CatalogScope | None = None) -> dict[str, Any]:
         selected = scope or self._active_scope
-        return deepcopy(self._stock_matrices.get(selected) or {})
+        matrix = deepcopy(self._stock_matrices.get(selected) or {})
+        products, _presentations = self.catalog_for_scope(selected)
+        if not products.empty:
+            names = products.set_index("codigo")["nombre"].to_dict()
+            for row in matrix.get("rows", []):
+                code = str(row.get("codigo_norm") or row.get("codigo") or "").strip().upper()
+                if code in names and item_type_label(row) == "Productos":
+                    row["nombre"] = names[code]
+        return matrix
 
     def _set_active_frames(
         self,
