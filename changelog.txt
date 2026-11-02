@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.51
-Fecha: 2026-10-29
+Versión: 2.0.52
+Fecha: 2026-11-02
 
 Resumen
 - Los productos del catálogo remoto muestran el nombre corto en el cotizador y en la consulta de stock por tiendas.
