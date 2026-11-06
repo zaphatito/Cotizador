@@ -1307,10 +1307,15 @@ def list_quotes(
         cliente_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cliente'),{cliente_expr})"
         cedula_expr = f"COALESCE(json_extract(qcs.snapshot,'$.cedula'),{cedula_expr})"
         telefono_expr = f"COALESCE(json_extract(qcs.snapshot,'$.telefono'),{telefono_expr})"
-    sync_fields = "'' AS sync_origin"
+    sync_origin = "''"
+    history_date = "q.created_at"
     if _table_exists(con, 'quote_sync_document'):
         client_join += ' LEFT JOIN quote_sync_document sync_document ON sync_document.quote_id=q.id'
-        sync_fields = "json_extract(sync_document.remote_document,'$.origin') AS sync_origin"
+        sync_origin = "json_extract(sync_document.remote_document,'$.origin')"
+        # El gateway del catálogo solo emite para Perú (UTC−05:00).
+        history_date = f"""CASE WHEN {sync_origin} = 'catalogue'
+            THEN COALESCE(strftime('%Y-%m-%dT%H:%M:%f', q.created_at, '-5 hours'), q.created_at)
+            ELSE q.created_at END"""
     status_join = "LEFT JOIN quote_statuses qs ON qs.code = q.estado" if (has_estado and has_status_catalog) else ""
 
     quote_tail = (
@@ -1357,7 +1362,7 @@ def list_quotes(
 
         # Normaliza created_at a "YYYY-MM-DD HH:MM:SS" (desde "YYYY-MM-DDTHH:MM:SS")
 
-        dt = "replace(substr(q.created_at,1,19), 'T', ' ')"
+        dt = f"replace(substr({history_date},1,19), 'T', ' ')"
 
         date_ddmm = f"(substr({dt},9,2) || '/' || substr({dt},6,2))"
 
@@ -1417,7 +1422,7 @@ def list_quotes(
 
         or_terms.extend([
 
-            "q.created_at LIKE ?",
+            f"{history_date} LIKE ?",
 
             f"{date_ddmm} LIKE ?",
 
@@ -1578,7 +1583,7 @@ def list_quotes(
     id_cotizador_expr = "q.id_cotizador" if has_id_cotizador else "''"
 
     sort_expressions = {
-        "created_at": "q.created_at",
+        "created_at": history_date,
         "quote_no": f"CAST({quote_tail} AS INTEGER)",
         "cliente": f"{cliente_expr} COLLATE NOCASE",
         "cedula": f"{cedula_expr} COLLATE NOCASE",
@@ -1590,7 +1595,7 @@ def list_quotes(
         "items": items_count_sql,
         "pdf": "q.pdf_path COLLATE NOCASE",
     }
-    order_expr = sort_expressions.get(str(sort_by or "").strip().lower(), "q.created_at")
+    order_expr = sort_expressions.get(str(sort_by or "").strip().lower(), history_date)
     order_direction = "DESC" if bool(sort_desc) else "ASC"
     order_sql = f"{order_expr} {order_direction}, q.id {order_direction}"
 
@@ -1604,6 +1609,7 @@ def list_quotes(
 
             q.id,
             q.created_at,
+            {history_date} AS history_created_at,
             q.quote_no,
             {quote_no_status_expr},
             q.country_code,
@@ -1620,7 +1626,7 @@ def list_quotes(
             q.currency_shown,
             {chatbot_value_sql} AS chatbot,
             q.pdf_path,
-            {sync_fields},
+            {sync_origin} AS sync_origin,
             q.deleted_at,
             {items_count_sql} AS items_count
         FROM quotes q

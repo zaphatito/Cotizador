@@ -979,7 +979,7 @@ class QuotesTableModel(QAbstractTableModel):
         return ("" if v is None else str(v)).casefold()
 
     def _hydrate_row_cache(self, row: dict, *, today: datetime.date) -> None:
-        created_raw = row.get("created_at", "")
+        created_raw = row.get("history_created_at", row.get("created_at", ""))
         created_dt = _parse_dt(created_raw)
         row["_cache_dt"] = created_dt
         row["_cache_is_today"] = bool(created_dt and created_dt.date() == today)
