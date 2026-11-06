@@ -1,6 +1,6 @@
 ﻿SISTEMA DE COTIZACIONES — REGISTRO DE CAMBIOS
-Versión: 2.0.52
-Fecha: 2026-11-02
+Versión: 2.0.53
+Fecha: 2026-11-06
 
 Resumen
 - El histórico muestra, busca y ordena las cotizaciones del catálogo en hora de Perú.
